@@ -241,13 +241,15 @@ def test_tds_on_an_idcw_payout_comes_off_the_payout() -> None:
     assert _income(st) == [Money.rupees("10911.99")]
 
 
-def test_tds_on_a_reinvestment_comes_off_the_income_not_the_units_bought() -> None:
+def test_tds_after_a_reinvestment_is_already_deducted() -> None:
+    """The reinvested amount is what was left after TDS: Income equals the
+    Buy, and the TDS row does not take it off a second time."""
     txns = [
         fx.txn("2026-02-25", "DIVIDEND_REINVEST", "10", "900"),
         fx.txn("2026-02-25", "TDS_TAX", None, "100"),
     ]
     st = cas.from_casparser(_rta(txns), "sha")
-    assert _income(st) == [Money.rupees("800")]
+    assert _income(st) == [Money.rupees("900")]
     (buy,) = [f.event for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Buy)]
     assert buy.amount == Money.rupees("900")
 

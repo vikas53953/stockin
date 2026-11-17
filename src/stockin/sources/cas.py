@@ -183,13 +183,16 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
       the opposite units and the same amount; each row is cancelled at most
       once. A reversal with no such row in this statement rejects it.
     - Stamp duty adds to the cost of the buy it follows on the same day;
-      STT and TDS come off the proceeds of the sell they follow.
+      STT comes off the proceeds of the sell it follows; TDS comes off the
+      sell or IDCW payout it follows. A reinvested IDCW is already net of
+      TDS, so a TDS row after it changes nothing.
     - The statement must reconcile with itself (open + units == close).
     - Rows that move no units and carry no money we use (MISC: nominee or
       address notes) are skipped; any other type that moves units rejects."""
     name = scheme.scheme
     rows = _uncancelled(scheme.transactions, name)
     events: list[tuple[date, Event]] = []
+    reinvested: set[int] = set()  # indexes of Income events that are already net of TDS
     units_seen = Decimal(0)
     for row in rows:
         kind = _tag(row.type)
@@ -200,6 +203,7 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
             if units <= 0 or amount <= 0:
                 raise CasRejected(f"{name}: {kind} on {on} needs positive units and amount")
             if kind == "DIVIDEND_REINVEST":
+                reinvested.add(len(events))
                 events.append((on, Income(amount=_money(amount, name))))
             events.append((on, Buy(units=_qty(units, name), amount=_money(amount, name))))
         elif kind in _SELL:
@@ -213,7 +217,7 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
         elif kind in _TAX_ON_SELL:
             _charge(events, on, (Sell,), abs(amount), kind, name)
         elif kind in _TAX_ON_PAYOUT:
-            _charge(events, on, (Sell, Income), abs(amount), kind, name)
+            _charge(events, on, (Sell, Income), abs(amount), kind, name, already_net=reinvested)
         elif units:
             raise CasRejected(f"{name}: unsupported {kind} row on {on} moves units")
         units_seen += units
@@ -264,11 +268,13 @@ def _charge(
     tax: Decimal,
     kind: str,
     name: str,
+    already_net: set[int] | None = None,
 ) -> None:
     """Apply a tax row to the latest same-day event of a type in `onto`
     before it in the statement. Stamp duty adds to a buy's cost. STT comes
     off a sell's proceeds; TDS comes off a sell's proceeds or an IDCW
-    payout (for a reinvestment, off the Income, since the Buy is already net)."""
+    payout. An Income in `already_net` (a reinvestment, whose amount is what
+    was left after TDS) is the row the tax belongs to but is not reduced."""
     charge = _money(tax, name)
     for i in range(len(events) - 1, -1, -1):
         when, event = events[i]
@@ -278,6 +284,8 @@ def _charge(
             continue
         if isinstance(event, Buy):
             events[i] = (when, Buy(units=event.units, amount=event.amount + charge))
+            return
+        if already_net and i in already_net:
             return
         net = event.amount - charge
         if net.paise < 0:
