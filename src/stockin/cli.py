@@ -193,8 +193,10 @@ def _holding_lines(
 
 
 def _price_text(q: Quote) -> str:
+    """Exact, at least two decimals: 1,367.00, 2,378.851, 94.4817."""
     rupees, micros = divmod(q.price.micro_rupees, 1_000_000)
-    return f"{rupees}.{micros:06d}".rstrip("0").rstrip(".")
+    frac = f"{micros:06d}".rstrip("0").ljust(2, "0")
+    return f"{Money(paise=rupees * 100)!s}"[:-3] + "." + frac
 
 
 class Valued(Value):
@@ -302,6 +304,7 @@ class PricesReport(Value):
     changed: int  # rows added or changed in prices.db
     latest: str | None
     unpriced: tuple[Isin, ...]  # held ISINs with no price at all
+    failed: tuple[str, ...] = ()  # sources that could not be downloaded this time
 
 
 def _held_isins() -> frozenset[Isin]:
@@ -338,6 +341,8 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
         typer.echo(f"  latest price date: {report.latest}")
     if report.unpriced:
         typer.echo(f"  no price yet for: {', '.join(report.unpriced)}")
+    for f in report.failed:
+        typer.echo(f"  not downloaded this time: {f} (prices already saved are kept)")
 
 
 @prices_app.command("fetch")
@@ -348,14 +353,22 @@ def prices_fetch(as_json: JsonFlag = False) -> None:
     from datetime import date
 
     held = _held_isins()
-    try:
-        amfi = eod.fetch_amfi()
-        nse = eod.fetch_bhavcopy(date.today())
-    except (OSError, eod.EodRejected) as exc:
+    got: list[Quote] = []
+    failed: list[str] = []
+    for name, fetch in (
+        ("AMFI", eod.fetch_amfi),
+        ("NSE", lambda: eod.fetch_bhavcopy(date.today())),
+    ):
+        try:
+            got.extend(fetch())
+        except (OSError, eod.EodRejected) as exc:
+            failed.append(f"{name}: {exc}")
+    if len(failed) == 2:
         raise _fail(
-            f"could not download prices: {exc}", "check your internet and try again"
-        ) from None
-    _print_prices(_store_quotes("amfi + nse", amfi + nse, held), as_json)
+            "could not download prices: " + "; ".join(failed), "check your internet and try again"
+        )
+    report = _store_quotes("amfi + nse", tuple(got), held)
+    _print_prices(report.model_copy(update={"failed": tuple(failed)}), as_json)
 
 
 @prices_app.command("import")

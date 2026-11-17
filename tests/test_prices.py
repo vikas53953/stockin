@@ -156,3 +156,63 @@ def test_gain_is_value_minus_cost_and_unknown_when_either_is() -> None:
     assert v.gain == Money.rupees("500")
     assert _valued(held.model_copy(update={"cost": None}), book).gain is None
     assert _valued(held, PriceBook(quotes={})).gain is None
+
+
+def test_a_dropped_connection_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class Resp:
+        def __enter__(self) -> "Resp":
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"ok"
+
+    def flaky(req: object, timeout: float) -> Resp:
+        calls.append("x")
+        if len(calls) < 3:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return Resp()
+
+    monkeypatch.setattr(eod.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(eod, "_sleep", lambda s: None)
+    assert eod._get("https://example.invalid/x") == b"ok"  # pyright: ignore[reportPrivateUsage]
+    assert len(calls) == 3
+
+
+def test_fetch_keeps_what_downloaded_when_one_source_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    bhav = eod.parse_bhavcopy((EOD / "bhavcopy-sample.csv").read_bytes())
+
+    def down() -> tuple[Quote, ...]:
+        raise ConnectionResetError(104, "Connection reset by peer")
+
+    monkeypatch.setattr(eod, "fetch_amfi", down)
+    monkeypatch.setattr(eod, "fetch_bhavcopy", lambda today: bhav)
+    result = runner.invoke(app, ["prices", "fetch", "--json"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["kept"] == 1
+    assert report["failed"] and report["failed"][0].startswith("AMFI")
+
+    monkeypatch.setattr(eod, "fetch_bhavcopy", lambda today: down())
+    both = runner.invoke(app, ["prices", "fetch"])
+    assert both.exit_code == 2
+    assert "could not download prices" in both.output
+
+
+def test_prices_print_exactly_with_two_decimals_at_least() -> None:
+    from stockin.cli import _price_text  # pyright: ignore[reportPrivateUsage]
+
+    def q(p: str) -> Quote:
+        return _q("INE009A01021", date(2026, 11, 14), p, "bhavcopy")
+
+    assert _price_text(q("1367")) == "1,367.00"
+    assert _price_text(q("2378.851")) == "2,378.851"
+    assert _price_text(q("94.4817")) == "94.4817"
+    assert _price_text(q("0.5")) == "0.50"

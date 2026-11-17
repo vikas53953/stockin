@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -123,16 +124,29 @@ def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
     return tuple(best[k][1] for k in sorted(best))
 
 
+_sleep = time.sleep
+ATTEMPTS = 3
+
+
 def _get(url: str, timeout: float = 60) -> bytes | None:
-    """GET a public file. None on 404 (no file for that day)."""
+    """GET a public file. None on 404 (no file for that day). A dropped
+    connection or a 5xx is retried twice, 2 s then 4 s later: NSE resets
+    connections from clients that ask again quickly."""
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise
+    for attempt in range(ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            if exc.code < 500 or attempt == ATTEMPTS - 1:
+                raise
+        except OSError:
+            if attempt == ATTEMPTS - 1:
+                raise
+        _sleep(2 * 2**attempt)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def fetch_amfi() -> tuple[Quote, ...]:
