@@ -80,5 +80,5 @@ themselves are in `CLAUDE.md`; their history is in [PIPELINE.md](PIPELINE.md).
 ### 14. Evidence files can change after you hash them
 - **What happened:** the #13 verifier found that the project share adds a metadata chunk to PNG screenshots a few seconds after they are copied. Hashes taken right after the copy failed `sha256sum -c` twenty seconds later, though the pixels were identical.
 - **Lesson:** a hash proves nothing if the file can legitimately change under it; the evidence store has to be settled before it is fingerprinted.
-- **Rule:** fingerprint evidence with `evidence_hash.py`, which hashes a PNG's image data only (PIPELINE #13).
-- **Caught since:** the first fix ("wait until two hashes 30 seconds apart agree") failed verification on #16: the share stayed quiet for 90 seconds, then rewrote every PNG at about two minutes. Timing rules for a process you do not control are guesses.
+- **Rule:** fingerprint evidence with `evidence_hash.py`, which hashes every byte of a PNG except the share's own `caBX` chunk (PIPELINE #13).
+- **Caught since:** two fixes failed verification on #16. "Wait until two hashes 30 seconds apart agree" passed, then the share rewrote every PNG at about two minutes (another time it took eleven): timing rules for a process you do not control are guesses. Then hashing only the image data let the verifier add APNG frames that make an "after" screenshot show the "before" page, with the fingerprint unchanged. Exclude exactly what you must, and nothing more.
