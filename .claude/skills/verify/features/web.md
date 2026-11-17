@@ -19,7 +19,7 @@
 
 Preconditions: the baseline in [README.md](./README.md).
 
-- Start `stockin web --port 8765` in the background, and wait for the "running at" line.
+- Start `stockin web --port 8765` in the background, then poll until `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8765/` prints 200 (the "running at" line prints just before the server listens).
 - Drive it with Playwright (Chromium is preinstalled; `require('playwright')`): open `/`, `setInputFiles('#statement', …)` for each of `tests/fixtures/cas/{mf-2026-01,mf-2026-01-to-02,demat-2026-01,demat-2026-02}.json`, and click Import. Expect `5 new facts`, then `3 new facts, 3 already`, then `3 new`, then `2 new`.
 - On `/`, the ISINs shown (`.isin`) are exactly `INE009A01021, INF179K01BE2`, with 13,010.60 and "unknown". The chip reads `reconcile OK`.
 - On `/reconcile`: `OK: no mismatches`, with 3 match and 4 inferred.
