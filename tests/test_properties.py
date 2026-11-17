@@ -13,6 +13,7 @@ import hashlib
 import random
 import tempfile
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -24,9 +25,10 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from stockin.book import Book, reconcile
-from stockin.facts import Buy, Sell, Txn
-from stockin.money import Money, Qty, div_half_even
-from stockin.sources import cas
+from stockin.facts import Buy, Isin, Sell, Txn
+from stockin.money import Money, Price, Qty, div_half_even
+from stockin.prices import PriceBook, PriceStore, Quote
+from stockin.sources import cas, eod
 from stockin.store import Ledger, LedgerWriter
 
 # ------------------------------------------------------------------- money
@@ -423,3 +425,97 @@ def test_demat_holdings_follow_the_latest_statement_in_any_order(
     assert {h.isin: str(h.qty) for h in book.holdings()} == {
         isin: str(n) for isin, n in latest.items() if n
     }
+
+
+# ------------------------------------------------------------------ prices
+
+
+def _with_check_digit(body: str) -> str:
+    from stockin.facts import parse_isin
+
+    for d in "0123456789":
+        try:
+            return parse_isin(body + d)
+        except ValueError:
+            continue
+    raise AssertionError("no check digit")  # pragma: no cover
+
+
+ISINS = [_with_check_digit(f"INF{n:08d}") for n in range(6)]
+price_text = st.builds(
+    lambda whole, frac: f"{whole}.{frac:04d}", st.integers(1, 99_999), st.integers(0, 9_999)
+)
+quote_days = st.dates(min_value=date(2026, 1, 1), max_value=date(2026, 1, 31))
+
+
+@st.composite
+def quotes(draw: st.DrawFn) -> list[Quote]:
+    rows = draw(
+        st.lists(
+            st.tuples(
+                st.sampled_from(ISINS),
+                quote_days,
+                price_text,
+                st.sampled_from(["amfi", "bhavcopy"]),
+            ),
+            max_size=25,
+        )
+    )
+    return [
+        Quote(isin=Isin(i), on=on, price=Price.rupees(p), source=src)  # type: ignore[arg-type]
+        for i, on, p, src in rows
+    ]
+
+
+@given(
+    st.lists(
+        st.tuples(st.sampled_from(ISINS), quote_days, price_text),
+        max_size=20,
+        unique_by=lambda t: t[0],
+    )
+)
+def test_amfi_file_round_trips(rows: list[tuple[str, date, str]]) -> None:
+    lines = [
+        "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;"
+        "Scheme Name;Plan;Option;Net Asset Value;Date",
+        " ",
+        "Some AMC",
+        " ",
+    ]
+    for n, (isin, on, p) in enumerate(rows):
+        lines.append(f"{n};{isin};-;Fund {n};Direct Plan;Growth;{p};{on.strftime('%d-%b-%Y')}")
+    parsed = {q.isin: q for q in eod.parse_amfi("\n".join(lines))}
+    assert parsed == {
+        Isin(i): Quote(isin=Isin(i), on=on, price=Price.rupees(p), source="amfi")
+        for i, on, p in rows
+    }
+
+
+@given(quotes(), st.randoms(use_true_random=False))
+def test_best_price_does_not_depend_on_order(qs: list[Quote], rnd: random.Random) -> None:
+    shuffled = qs[:]
+    rnd.shuffle(shuffled)
+    assert PriceBook.best(qs) == PriceBook.best(shuffled + qs[:3])
+
+
+@given(quotes(), st.randoms(use_true_random=False), quote_days)
+def test_price_store_is_order_and_repeat_free_and_reads_like_best(
+    qs: list[Quote], rnd: random.Random, cutoff: date
+) -> None:
+    shuffled = qs + qs[: len(qs) // 2]
+    rnd.shuffle(shuffled)
+    with tempfile.TemporaryDirectory() as d, PriceStore.open(Path(d) / "a.db", write=True) as a:
+        a.put(qs)
+        with PriceStore.open(Path(d) / "b.db", write=True) as b:
+            b.put(shuffled)
+            assert a.digest() == b.digest()
+            # what the store reads equals the pure rule over the stored rows
+            stored = PriceBook.best(q for q in qs if q.on <= cutoff)
+            kept: dict[tuple[str, date, str], Quote] = {}
+            for q in qs:
+                k = (q.isin, q.on, q.source)
+                if k not in kept or q.price.micro_rupees > kept[k].price.micro_rupees:
+                    kept[k] = q
+            expected = PriceBook.best(q for q in kept.values() if q.on <= cutoff)
+            assert stored.quotes.keys() == expected.quotes.keys()
+            assert b.book(ISINS, on_or_before=cutoff) == expected  # type: ignore[arg-type]
