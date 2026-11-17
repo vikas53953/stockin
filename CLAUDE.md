@@ -9,7 +9,8 @@ A private, read-only app for one investor in Indian markets. It answers one ques
 - Start rigorous work with `/pstack:poteto-mode`. It picks the playbook.
 - Verification comes first. A change is done when it has run against the real surface, not when tests pass.
 - Plan with code. Settle open questions with a prototype, not a longer document.
-- One PR is one change with its own evidence. Small, ordered, reviewed by the owner before merge.
+- One PR is one change with its own evidence. Small and ordered.
+- **Auto pipeline (owner's standing go, 2026-11-17).** Every PR goes through pstack's shipping flow without waiting for the owner: an agent that did not write the code verifies it (gates, a live run through the `verify` skill, and a diff audit; thermos for code PRs) and posts `PASS`, `PASS+NOTES` or `FAIL` on the PR. A PR with a passing verdict and green CI on the same head is squash-merged bottom-up with a head-SHA guard. A `FAIL` gets at most two fix-forwards, then stops and is reported.
 
 ## Hard rules
 
