@@ -17,9 +17,9 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from casparser import read_cas_pdf  # pyright: ignore[reportUnknownVariableType]
 from casparser.types import CASData, DematAccount, NSDLCASData, Scheme, TransactionData
@@ -55,6 +55,7 @@ _BUY = {"PURCHASE", "PURCHASE_SIP", "SWITCH_IN", "SWITCH_IN_MERGER"}
 _SELL = {"REDEMPTION", "SWITCH_OUT", "SWITCH_OUT_MERGER"}
 _TAX_ON_BUY = {"STAMP_DUTY_TAX"}
 _TAX_ON_SELL = {"STT_TAX", "TDS_TAX"}
+_PAISA = Decimal("0.01")
 
 
 def read(path: Path, password: str = "") -> Statement:
@@ -63,19 +64,41 @@ def read(path: Path, password: str = "") -> Statement:
     raw = path.read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
     if path.suffix.lower() == ".json":
-        body: dict[str, Any] = json.loads(raw)
-        data: CASData | NSDLCASData = (
-            CASData.model_validate(body) if "folios" in body else NSDLCASData.model_validate(body)
-        )
+        data = _from_json(raw)
     else:
         try:
             parsed: object = read_cas_pdf(str(path), password)
-        except Exception as exc:  # casparser raises several types; the message is safe
+        except Exception as exc:  # casparser raises several types; never echo the password
             raise CasRejected(f"could not read {path.name}: {type(exc).__name__}") from None
         if not isinstance(parsed, CASData | NSDLCASData):
-            raise CasRejected(f"{path.name}: unexpected parser output")
+            raise CasRejected("unexpected parser output")
         data = parsed
-    return from_casparser(data, sha)
+    try:
+        return from_casparser(data, sha)
+    except CasRejected:
+        raise
+    except (ValueError, ArithmeticError) as exc:  # a value our domain types refuse
+        raise CasRejected(_why(exc)) from None
+
+
+def _from_json(raw: bytes) -> CASData | NSDLCASData:
+    try:
+        body: object = json.loads(raw)
+    except ValueError as exc:
+        raise CasRejected(f"not JSON ({_why(exc)})") from None
+    if not isinstance(body, dict):
+        raise CasRejected("not a casparser statement")
+    try:
+        if "folios" in body:
+            return CASData.model_validate(body)
+        return NSDLCASData.model_validate(body)
+    except (ValueError, ArithmeticError) as exc:  # pydantic's ValidationError is a ValueError
+        raise CasRejected(f"not a valid casparser statement ({_why(exc)})") from None
+
+
+def _why(exc: BaseException) -> str:
+    first = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    return f"{type(exc).__name__}: {first}"[:200]
 
 
 def from_casparser(data: CASData | NSDLCASData, sha256: str) -> Statement:
@@ -94,6 +117,8 @@ def _from_rta(data: CASData, sha: str, start: date, end: date) -> Statement:
     accounts: dict[AccountId, Account] = {}
     facts: list[StatementFact] = []
     for folio in data.folios:
+        if not folio.folio.strip() or not folio.amc.strip():
+            raise CasRejected("a folio in this statement has no folio number or AMC")
         acct = account_id("mf_folio", folio.amc, folio.folio)
         accounts[acct] = Account(
             id=acct, kind="mf_folio", institution=folio.amc, masked=_mask(folio.amc, folio.folio)
@@ -135,35 +160,39 @@ def _from_rta(data: CASData, sha: str, start: date, end: date) -> Statement:
 
 
 def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
-    """casparser rows -> Txns. Taxes fold into the same-day buy or sell;
-    a REVERSAL cancels the row it reverses; the statement must reconcile
-    with itself (open + units == close) or it is rejected."""
+    """casparser rows -> Txns, in statement order.
+
+    - A REVERSAL cancels the latest earlier row (on or before its date) with
+      the opposite units and the same amount; each row is cancelled at most
+      once. A reversal with no such row in this statement rejects it.
+    - Stamp duty adds to the cost of the buy it follows on the same day;
+      STT and TDS come off the proceeds of the sell they follow.
+    - The statement must reconcile with itself (open + units == close).
+    - Rows that move no units and carry no money we use (MISC: nominee or
+      address notes) are skipped; any other type that moves units rejects."""
     name = scheme.scheme
-    rows = [r for r in scheme.transactions if not _cancelled(r, scheme.transactions)]
+    rows = _uncancelled(scheme.transactions, name)
     events: list[tuple[date, Event]] = []
-    taxes: dict[tuple[date, str], Decimal] = defaultdict(Decimal)
     units_seen = Decimal(0)
     for row in rows:
         kind = _tag(row.type)
         on = _date(row.date, name)
         units = row.units or Decimal(0)
-        amount = abs(row.amount or Decimal(0))
+        amount = row.amount or Decimal(0)
         if kind in _BUY or kind == "DIVIDEND_REINVEST":
-            if units <= 0:
-                raise CasRejected(f"{name}: {kind} on {on} has non-positive units")
+            if units <= 0 or amount <= 0:
+                raise CasRejected(f"{name}: {kind} on {on} needs positive units and amount")
             if kind == "DIVIDEND_REINVEST":
                 events.append((on, Income(amount=_money(amount, name))))
             events.append((on, Buy(units=_qty(units, name), amount=_money(amount, name))))
         elif kind in _SELL:
             if units >= 0:
                 raise CasRejected(f"{name}: {kind} on {on} has non-negative units")
-            events.append((on, Sell(units=_qty(-units, name), amount=_money(amount, name))))
+            events.append((on, Sell(units=_qty(-units, name), amount=_money(abs(amount), name))))
         elif kind == "DIVIDEND_PAYOUT":
-            events.append((on, Income(amount=_money(amount, name))))
-        elif kind in _TAX_ON_BUY:
-            taxes[(on, "buy")] += amount
-        elif kind in _TAX_ON_SELL:
-            taxes[(on, "sell")] += amount
+            events.append((on, Income(amount=_money(abs(amount), name))))
+        elif kind in _TAX_ON_BUY or kind in _TAX_ON_SELL:
+            _charge(events, on, Buy if kind in _TAX_ON_BUY else Sell, abs(amount), kind, name)
         elif units:
             raise CasRejected(f"{name}: unsupported {kind} row on {on} moves units")
         units_seen += units
@@ -171,7 +200,6 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
         raise CasRejected(
             f"{name}: opening {scheme.open} + transactions {units_seen} != closing {scheme.close}"
         )
-    events = _apply_taxes(events, taxes, name)
     seen: Counter[tuple[date, Event]] = Counter()
     txns: list[Txn] = []
     for on, event in events:
@@ -181,42 +209,57 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
     return txns
 
 
-def _cancelled(row: TransactionData, rows: list[TransactionData]) -> bool:
-    """True for a REVERSAL and for the one row it reverses (same units and
-    amount, opposite sign, on or before it). An unmatched reversal rejects."""
-    if _tag(row.type) == "REVERSAL":
-        if _reversed_by(row, rows) is None:
-            raise CasRejected(f"reversal on {row.date} matches no earlier row")
-        return True
-    return any(_tag(r.type) == "REVERSAL" and _reversed_by(r, rows) is row for r in rows)
-
-
-def _reversed_by(rev: TransactionData, rows: list[TransactionData]) -> TransactionData | None:
-    for r in rows:
-        if r is rev or _tag(r.type) == "REVERSAL":
+def _uncancelled(rows: list[TransactionData], name: str) -> list[TransactionData]:
+    cancelled: set[int] = set()
+    for i, rev in enumerate(rows):
+        if _tag(rev.type) != "REVERSAL":
             continue
-        if (r.units or 0) == -(rev.units or 0) and abs(r.amount or 0) == abs(rev.amount or 0):
-            return r
-    return None
+        on = _date(rev.date, name)
+        match = next(
+            (
+                j
+                for j in range(i - 1, -1, -1)
+                if j not in cancelled
+                and _tag(rows[j].type) != "REVERSAL"
+                and _date(rows[j].date, name) <= on
+                and (rows[j].units or 0) == -(rev.units or 0)
+                and abs(rows[j].amount or 0) == abs(rev.amount or 0)
+            ),
+            None,
+        )
+        if match is None:
+            raise CasRejected(
+                f"{name}: reversal on {on} has no matching earlier row in this statement; "
+                "import a statement whose period covers both"
+            )
+        cancelled.update((i, match))
+    return [r for i, r in enumerate(rows) if i not in cancelled]
 
 
-def _apply_taxes(
-    events: list[tuple[date, Event]], taxes: dict[tuple[date, str], Decimal], name: str
-) -> list[tuple[date, Event]]:
-    out = list(events)
-    for (on, side), amount in taxes.items():
-        for i, (when, event) in enumerate(out):
-            if when != on:
-                continue
-            if side == "buy" and isinstance(event, Buy):
-                out[i] = (when, Buy(units=event.units, amount=event.amount + _money(amount, name)))
-                break
-            if side == "sell" and isinstance(event, Sell):
-                out[i] = (when, Sell(units=event.units, amount=event.amount - _money(amount, name)))
-                break
-        else:
-            raise CasRejected(f"{name}: {side} tax on {on} has no {side} that day")
-    return out
+def _charge(
+    events: list[tuple[date, Event]],
+    on: date,
+    side: type[Buy] | type[Sell],
+    tax: Decimal,
+    kind: str,
+    name: str,
+) -> None:
+    """Apply a tax row to the latest same-day buy (stamp duty) or sell
+    (STT, TDS) before it in the statement."""
+    for i in range(len(events) - 1, -1, -1):
+        when, event = events[i]
+        if when != on:
+            break
+        if isinstance(event, Buy) and side is Buy:
+            events[i] = (when, Buy(units=event.units, amount=event.amount + _money(tax, name)))
+            return
+        if isinstance(event, Sell) and side is Sell:
+            net = event.amount - _money(tax, name)
+            if net.paise < 0:
+                raise CasRejected(f"{name}: {kind} on {on} is larger than the proceeds")
+            events[i] = (when, Sell(units=event.units, amount=net))
+            return
+    raise CasRejected(f"{name}: {kind} on {on} follows no {side.__name__.lower()} that day")
 
 
 # ---------------------------------------------------------------- NSDL / CDSL
@@ -343,9 +386,17 @@ def _qty(value: Decimal, name: str) -> Qty:
 
 
 def _money(value: Decimal, name: str) -> Money:
+    """Exact rupees and paise only: a statement amount with more than two
+    decimals, or not a finite number, is not something we can trust."""
     try:
-        return Money.rupees(format(value.quantize(Decimal("0.01")), "f"))
-    except ValueError:
+        exact = value.is_finite() and value == value.quantize(_PAISA, rounding=ROUND_DOWN)
+    except InvalidOperation:
+        exact = False
+    if not exact:
+        raise CasRejected(f"{name}: amount {value} is not in whole paise")
+    try:
+        return Money.rupees(format(value, "f"))
+    except (ValueError, ArithmeticError):
         raise CasRejected(f"{name}: bad amount {value}") from None
 
 

@@ -128,7 +128,7 @@ def test_reversal_cancels_its_pair() -> None:
     [
         ([fx.txn("2026-01-05", "PURCHASE", "10", "1000")], "11", "closing"),
         ([fx.txn("2026-01-05", "GIFT_IN", "10", "1000")], "10", "unsupported GIFT_IN"),
-        ([fx.txn("2026-01-05", "REVERSAL", "-10", "-1000")], "10", "matches no earlier row"),
+        ([fx.txn("2026-01-05", "REVERSAL", "-10", "-1000")], "10", "no matching earlier row"),
         ([fx.txn("2026-01-05", "PURCHASE", "1.0000001", "1")], "1.0000001", "6 decimals"),
         (
             [
@@ -145,6 +145,106 @@ def test_statement_we_cannot_trust_is_rejected_whole(
 ) -> None:
     with pytest.raises(cas.CasRejected, match=reason):
         cas.from_casparser(_rta(txns, close=close), "sha")
+
+
+def test_identical_reversals_each_cancel_their_own_row() -> None:
+    st = cas.from_casparser(
+        _rta(
+            [
+                fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+                fx.txn("2026-01-25", "PURCHASE", "10", "1000"),
+                fx.txn("2026-01-25", "PURCHASE", "10", "1000"),
+                fx.txn("2026-01-26", "REVERSAL", "-10", "-1000"),
+                fx.txn("2026-01-26", "REVERSAL", "-10", "-1000"),
+            ]
+        ),
+        "sha",
+    )
+    assert [t.on.day for t in st.facts if isinstance(t, Txn)] == [5]
+
+
+def test_reversal_never_cancels_a_later_row() -> None:
+    txns = [
+        fx.txn("2026-01-03", "REVERSAL", "-10", "-1000"),
+        fx.txn("2026-01-25", "PURCHASE", "10", "1000"),
+    ]
+    with pytest.raises(cas.CasRejected, match="no matching earlier row"):
+        cas.from_casparser(_rta(txns, close="0"), "sha")
+
+
+def test_each_stamp_duty_goes_to_the_buy_it_follows() -> None:
+    st = cas.from_casparser(
+        _rta(
+            [
+                fx.txn("2026-01-05", "PURCHASE", "5", "500"),
+                fx.txn("2026-01-05", "STAMP_DUTY_TAX", None, "0.03"),
+                fx.txn("2026-01-05", "PURCHASE", "5", "600"),
+                fx.txn("2026-01-05", "STAMP_DUTY_TAX", None, "0.04"),
+            ]
+        ),
+        "sha",
+    )
+    buys = [f.event for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Buy)]
+    assert [b.amount for b in buys] == [Money.rupees("500.03"), Money.rupees("600.04")]
+
+
+@pytest.mark.parametrize(
+    ("txns", "reason"),
+    [
+        ([fx.txn("2026-01-05", "PURCHASE", "10", "1000.005")], "whole paise"),
+        ([fx.txn("2026-01-05", "PURCHASE", "10", "1E+40")], "whole paise|bad amount"),
+        ([fx.txn("2026-01-05", "PURCHASE", "10", "-1000")], "positive units and amount"),
+        (
+            [
+                fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+                fx.txn("2026-01-06", "REDEMPTION", "-10", "-5"),
+                fx.txn("2026-01-06", "STT_TAX", None, "6"),
+            ],
+            "larger than the proceeds",
+        ),
+    ],
+)
+def test_amounts_we_cannot_represent_exactly_are_rejected(
+    txns: list[dict[str, Any]], reason: str
+) -> None:
+    close = "0" if any(t["type"] == "REDEMPTION" for t in txns) else "10"
+    with pytest.raises(cas.CasRejected, match=reason):
+        cas.from_casparser(_rta(txns, close=close), "sha")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "{this is not json",
+        "[1, 2]",
+        '{"folios": "nope"}',
+        None,  # a blank folio number
+    ],
+)
+def test_malformed_files_are_rejected_not_crashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str | None
+) -> None:
+    path = tmp_path / "x.json"
+    if body is None:
+        data = fx.rta(
+            "01-Jan-2026",
+            "31-Jan-2026",
+            [fx.folio("   ", "Test AMC", [fx.scheme(fx.HDFC_MF, "Test Fund", "0", "0", [])])],
+        )
+        fx.write(data, path)
+    else:
+        path.write_text(body)
+    with pytest.raises(cas.CasRejected):
+        cas.read(path)
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path / "data"))
+    r = runner.invoke(app, ["import", "cas", str(path)])
+    assert r.exit_code == 2
+    assert "Traceback" not in r.output
+
+
+def test_ledger_file_is_private(tmp_path: Path) -> None:
+    db = _ledger(tmp_path, "mf-2026-01.json")
+    assert db.stat().st_mode & 0o077 == 0
 
 
 def test_bad_isin_is_rejected() -> None:
