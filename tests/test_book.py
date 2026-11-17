@@ -1,8 +1,11 @@
 """Book.timeline against hand-worked synthetic fixtures. No real data."""
 
-from datetime import date
+from datetime import date, timedelta
+from itertools import permutations
 
-from stockin.book import Book, reconcile
+import pytest
+
+from stockin.book import Book, Inferred, reconcile
 from stockin.facts import (
     Balance,
     Bonus,
@@ -21,7 +24,7 @@ from stockin.facts import (
     account_id,
     parse_isin,
 )
-from stockin.money import Money, Price, Qty
+from stockin.money import Money, Price, Qty, percent
 
 FOLIO = account_id("mf_folio", "Example AMC", "1001")
 DEMAT = account_id("demat", "IN300000", "10000001")
@@ -59,7 +62,6 @@ def mf_statement(
     start: date, end: date, opening: str, closing: str, *txns: Txn
 ) -> tuple[Fact, ...]:
     """What a CAMS detailed CAS becomes: open balance, coverage, txns, close."""
-    from datetime import timedelta
 
     return (bal(start - timedelta(days=1), opening), cov(start, end), *txns, bal(end, closing))
 
@@ -170,11 +172,14 @@ def test_split_remainder_keeps_lots_summing_to_qty() -> None:
     assert sum(lot.qty.micros for lot in tl.lots) == tl.qty.micros == 3
 
 
-def test_overselling_is_a_mismatch_not_a_negative_holding() -> None:
+def test_oversell_with_no_statement_coverage_is_inferred() -> None:
+    """No Coverage says the txn list is complete, so the missing buy is inferred."""
     facts = (buy(OCT5, "5", "500"), sell(OCT20, "8", "900"))
     book = Book.of(facts)
-    assert book.timeline(FOLIO, FUND).qty == q("0")
-    assert not reconcile(book).ok
+    tl = book.timeline(FOLIO, FUND)
+    assert tl.qty == q("0")
+    assert reconcile(book).ok
+    assert any(isinstance(m, Inferred) and m.delta.micros == 3_000_000 for m in tl.movements)
 
 
 def test_positions_group_accounts_and_resolve_symbols() -> None:
@@ -221,19 +226,107 @@ def test_manual_assets_current_only() -> None:
         FixedDeposit(
             label="sbi-1",
             principal=rs("200000"),
-            rate=710,  # type: ignore[arg-type]
+            rate=percent("7.1"),
             start=date(2026, 4, 1),
             months=12,
         ),
         FixedDeposit(
             label="old",
             principal=rs("1000"),
-            rate=600,  # type: ignore[arg-type]
+            rate=percent("6"),
             start=date(2024, 1, 31),
             months=1,
         ),
     )
-    assets = Book.of(facts, as_of=date(2026, 11, 17)).manual_assets()
-    labels = [(type(a).__name__, getattr(a, "label", "")) for a in assets]
-    assert labels == [("StatedBalance", ""), ("GoldHolding", ""), ("FixedDeposit", "sbi-1")]
-    assert assets[0].balance == rs("845000")  # type: ignore[union-attr]
+    assets = Book.of(facts).manual_assets(today=date(2026, 11, 17))
+    assert len(assets) == 3
+    epf, gold, fd = assets
+    assert isinstance(epf, StatedBalance) and epf.balance == rs("845000")
+    assert isinstance(gold, GoldHolding)
+    assert isinstance(fd, FixedDeposit) and fd.label == "sbi-1"  # the matured FD is gone
+
+
+def test_same_day_buys_do_not_depend_on_input_order() -> None:
+    lump = buy(OCT5, "10", "1000")
+    sip = buy(OCT5, "10", "2000")
+    out = sell(OCT20, "10", "2500")
+    results = {
+        (Book.of(order).holdings(), Book.of(order).timeline(FOLIO, FUND).disposals)
+        for order in permutations((lump, sip, out))
+    }
+    assert len(results) == 1
+
+
+def test_uncovered_oversell_infers_the_missing_buy() -> None:
+    jan31, feb10, feb28 = date(2026, 1, 31), date(2026, 2, 10), date(2026, 2, 28)
+    facts = (
+        bal(jan31, "100", DEMAT, INFY),
+        sell(feb10, "150", "15000", acct=DEMAT, isin=INFY),
+        bal(feb28, "0", DEMAT, INFY),
+    )
+    book = Book.of(facts)
+    tl = book.timeline(DEMAT, INFY)
+    assert reconcile(book).ok
+    assert [c.status for c in tl.checks] == ["inferred", "match"]
+    assert sum(d.proceeds.paise for d in tl.disposals if d.proceeds) == rs("15000").paise
+
+
+def test_covered_oversell_is_a_mismatch_with_held_proceeds_kept() -> None:
+    facts = (
+        *mf_statement(
+            date(2026, 10, 1),
+            date(2026, 10, 31),
+            "0",
+            "0",
+            buy(OCT5, "5", "500"),
+            sell(OCT20, "8", "800"),
+        ),
+    )
+    book = Book.of(facts)
+    (m,) = reconcile(book).mismatches
+    assert (m.kind, m.stated, m.computed) == ("oversell", q("8"), q("5"))
+    (d,) = book.timeline(FOLIO, FUND).disposals
+    assert d.proceeds == rs("500")
+
+
+def test_reverse_split_drops_empty_lots() -> None:
+    facts = (
+        buy(OCT5, "0.000001", "1", acct=DEMAT, isin=INFY),
+        bal(OCT20, "0.000011", DEMAT, INFY),
+        buy(OCT20, "0.000001", "1", acct=DEMAT, isin=INFY),
+        Txn(account=DEMAT, isin=INFY, on=NOV5, event=Split(num=1, den=10)),
+    )
+    tl = Book.of(facts).timeline(DEMAT, INFY)
+    assert all(lot.qty.micros for lot in tl.lots)
+    assert sum(lot.qty.micros for lot in tl.lots) == tl.qty.micros
+
+
+def test_closed_position_is_not_rechecked_every_month() -> None:
+    sep30, oct31, nov30 = date(2026, 9, 30), date(2026, 10, 31), date(2026, 11, 30)
+    facts = (
+        bal(sep30, "100", DEMAT, INFY),
+        Complete(account=DEMAT, on=oct31),
+        Complete(account=DEMAT, on=nov30),
+    )
+    assert len(Book.of(facts).timeline(DEMAT, INFY).checks) == 2
+
+
+def test_balance_only_pair_later_explained_by_trades() -> None:
+    sep30 = date(2026, 9, 30)
+    only_balance = (bal(sep30, "10", DEMAT, INFY),)
+    with_trade = (*only_balance, buy(date(2026, 9, 1), "10", "15000", acct=DEMAT, isin=INFY))
+    assert Book.of(only_balance).holdings()[0].cost is None
+    tl = Book.of(with_trade).timeline(DEMAT, INFY)
+    assert not any(isinstance(m, Inferred) for m in tl.movements)
+    assert Book.of(with_trade).holdings()[0].cost == rs("15000")
+
+
+def test_blank_lookup_is_rejected() -> None:
+    book = Book.of(
+        (),
+        instruments=(
+            Instrument(isin=FUND, name="A fund", kind="mutual_fund", asset_class="equity"),
+        ),
+    )
+    with pytest.raises(LookupError):
+        book.resolve("  ")

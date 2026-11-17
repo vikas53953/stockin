@@ -139,7 +139,9 @@ Rejected:
 
 - **Max weight is measured against market holdings** (stocks, MFs and ETFs only). The owner decided this on 2026-11-17, closing the first open question.
 - **`Book` is a plain class, not a pydantic `Value`.** It is never serialized, and it caches one `Timeline` per (account, ISIN). The shared contract (`Book.of`, `timeline`, `holdings`, `positions`, `reconcile`) is unchanged. Accepted in the fold PR.
-- **An oversell gets a `mismatch` check dated at the sell.** It consumes only what is held, so quantities never go negative. The sketch said "stop pair"; this keeps the rest of the timeline visible instead. Accepted in the fold PR.
+- **An oversell is judged by coverage, like a balance gap.** Inside a covered window it is a `mismatch` check (`kind="oversell"`), and only the units held are sold, with their share of the stated proceeds. Outside one, the shortfall is an `Inferred` acquisition dated at the sell. Accepted in the fold PR after the independent bug review.
+- **Same-day txns are ordered by fact id after kind and `nth`**, so FIFO never depends on input order. Found by the PR 4 verifier.
+- **`manual_assets(today)` takes the date from the caller**, like every other clock read.
 
 ## Open questions and risks
 
