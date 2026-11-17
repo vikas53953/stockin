@@ -84,11 +84,30 @@ themselves are in `CLAUDE.md`; their history is in [PIPELINE.md](PIPELINE.md).
 - **Caught since:** three fixes failed verification on #16. "Wait until two hashes 30 seconds apart agree" passed, then the share rewrote every PNG at about two minutes (other times it took eleven, twenty-seven and forty-two; there is no known upper bound): timing rules for a process you do not control are guesses. Then hashing only the image data let the verifier add APNG frames that make an "after" screenshot show the "before" page, with the fingerprint unchanged. Then skipping `caBX` anywhere let a `caBX` placed between IDATs hide the bottom of a screenshot. Exclude exactly what you must, and nothing more. The fourth attempt skips it only as the second chunk and passed (PASS+NOTES).
 
 ### 15. Agent-first UAT ran on the wrong operating system
-- **What happened:** the owner ran the checklist on Windows. Its first line, `mkdir -p ~/stockin-data && export ...`, fails in Windows PowerShell 5.1, which has no `&&`, and the Windows note told him to change a line by hand. Our own UAT run had used Linux and bash only, so it passed.
+- **What happened:** the owner ran the checklist on Windows. Its data-folder step, `mkdir -p ~/stockin-data && $env:STOCKIN_DATA=...` (the Unix line with a Windows note to swap `export` by hand), fails to parse in PowerShell: 5.1 has no `&&`, and `$env:X=...` after `&&` is not valid in 7 either. Its install line also used a `git+` URL, which needs Git installed. Our own UAT run had used Linux and bash only, so it passed. (The checklist lives in the project files, not in git, so its old text is quoted from the owner's error message.)
 - **Lesson:** running the owner's steps first only counts if it runs them where the owner runs them: same OS, same shell, same version.
-- **Rule:** the checklist gives one command per line per OS, with no hand edits. CI runs its PowerShell lines on `windows-latest` in both PowerShell 5.1 and 7 (PIPELINE #14); outside CI, lint them with PSScriptAnalyzer `PSUseCompatibleSyntax`/`PSUseCompatibleCommands` for 5.1, which flags the old line four times and the new lines zero.
+- **Rule:** the checklist gives one command per line per OS, with no hand edits. CI runs its PowerShell lines on `windows-latest` in both PowerShell 5.1 and 7 (PIPELINE #14); outside CI, lint them with PSScriptAnalyzer `PSUseCompatibleSyntax`/`PSUseCompatibleCommands`. On the old line it reported four findings: a parse error, `&&` (not in 5.1), `mkdir` (not in 5.1) and `-p` (not on 7.0); on the new lines, none. Install now uses the zip URL, so Git is not needed.
 
 ### 16. Synthetic statements are not the real risk
 - **What happened:** the owner has no CAS of his own yet, so he is testing drop 1 on our synthetic PDFs. They copy the CAMS, NSDL and CDSL layouts as the parser expects them, not as measured from a real statement.
 - **Lesson:** a pass on files we made shows the app agrees with our idea of the layout, not with the issuers'. Whether a real CAS imports correctly is still open.
-- **Rule:** `v0.1` waits for at least one real statement, from the owner or a public source, imported end to end; until then every drop 1 report says it used synthetic PDFs.
+- **Rule:** every report about drop 1 says it used synthetic PDFs. The real-statement risk stays open on the sprint plan until a real CAS has been imported end to end. (Whether that should gate `v0.1` is the owner's call and has not been asked yet.)
+
+## Sprint 1, drop 1 retro (2026-11-17)
+
+The owner ran the whole drop 1 checklist on Windows with the synthetic sample PDFs, and every step worked as expected (accepted on synthetic data; no tag until drop 2 is accepted too).
+
+| What slipped | The check that now catches it |
+|---|---|
+| UAT was asked of the owner with PDFs only tested as JSON (lesson 4) | Agent goes first on UAT, with password-protected PDFs and a real browser (PIPELINE #6) |
+| Windows steps broke on the first line (lesson 15) | Windows install job on PowerShell 5.1 and 7 (PIPELINE #14) |
+| TDS double-deducted on a reinvested IDCW (lesson 10) | Verifier's own mutations and properties on every import change (PIPELINE #10) |
+| Evidence hashes went stale on the project share (lesson 14) | `evidence_hash.py` with `--check` (PIPELINE #13) |
+| Process docs drifted from the record (lesson 13) | Docs audited against PR comments and git history (PIPELINE #11) |
+| No real CAS has been through the app (lesson 16) | Not caught yet: open risk |
+
+### 17. The owner wants numbers turned into learnings
+- **What happened:** after using drop 1, the owner said plain tables are not enough. Data should be shown visually, and Stockin's moat is translating numbers into patterns the user understands and learns from. A study of ten apps (`/mnt/project-files/stockin/re/`) found every good insight pairs one chart with one plain sentence, and that none of them shows SIP discipline or when lots turn long-term, which a CAS alone can compute.
+- **Lesson:** the product is the explanation, not the table. An explanation that disagrees with its own chart is worse than none (one app's own mock-up says 32% in the sentence and 35% in the legend).
+- **Rule:** insights are computed by code from the same numbers as their chart, and a test asserts the sentence and the chart agree. No model writes a number. Design directions are shown to the owner as options before the UI is built.
+

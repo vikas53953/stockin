@@ -27,8 +27,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/data"
           STOCKIN_DATA="$RUNNER_TEMP/data" stockin doctor --json
 
-  # The owner runs Stockin on Windows. These are the checklist's own
-  # PowerShell lines, one command per line, in Windows PowerShell 5.1 and 7.
+  # The owner runs Stockin on Windows. The data-folder, doctor and install
+  # lines match the UAT checklist, one command per line, in Windows
+  # PowerShell 5.1 and 7. Differences from the checklist: uv comes from
+  # setup-uv, Stockin installs from this checkout, PATH is set by hand instead
+  # of opening a new window, setx is skipped, and import uses a JSON fixture
+  # from the CLI, not a PDF through the web page.
   windows-install:
     runs-on: windows-latest
     strategy:
@@ -47,7 +51,9 @@ jobs:
         run: |
           $PSVersionTable.PSVersion.ToString()
           uv tool install .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv tool update-shell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Data folder, doctor, import, reconcile
         run: |
           $env:PATH = "$(uv tool dir --bin);$env:PATH"

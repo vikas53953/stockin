@@ -12,8 +12,9 @@ file is their history. The stories behind them are in [LEARNINGS.md](LEARNINGS.m
 
 1. Write the change on a branch with its tests. Money, facts, import, the
    ledger or reconcile also get a property in `tests/test_properties.py`.
-2. Gates: ruff, ruff format, pyright (strict on `src`), pytest (unit + properties), and
-   the installed-CLI smoke step in CI.
+2. Gates: ruff, ruff format, pyright (strict on `src`), pytest (unit + properties),
+   the installed-CLI smoke step in CI, and the Windows install job (PowerShell
+   5.1 and 7).
 3. Author runs it on the real surface (installed binary, browser) and
    records before/after evidence.
 4. An agent that did not write the code verifies it: gates, its own live run
@@ -46,4 +47,5 @@ file is their history. The stories behind them are in [LEARNINGS.md](LEARNINGS.m
 | 11 | 2026-11-17 | Docs about our own process are verified against PR comments and git history, like code | The #13 verifier found these docs undercounted past FAILs and overstated two claims | #13 FAIL, fixed forward |
 | 12 | 2026-11-17 | A property failure on an unrelated PR is a real bug, not a flake; CI is not derandomized on purpose | A random test that fails once has found a real input; re-running until green would throw it away | Nothing yet |
 | 13 | 2026-11-17 | Evidence is fingerprinted with `evidence_hash.py`: every byte of a PNG except the share's own `caBX` chunk in the place the share puts it (right after IHDR), every other file whole; `--check` also fails on added or removed files | The share adds `caBX` to PNGs at an unpredictable delay (seconds to ~42 min so far, no known upper bound). A "wait 30 s and hash" rule went stale (#16 FAIL 1); hashing IDAT only let an APNG frame, gamma or transparency chunk change what a screenshot shows without changing its hash (#16 FAIL 2) | #16 failed three times (also: a `caBX` placed between IDATs hid the bottom of an image); owner allowed a fourth attempt, which passed (PASS+NOTES) |
-| 14 | 2026-11-17 | The UAT checklist's PowerShell lines run in CI on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7; one command per line per OS | The owner's first checklist step failed in PowerShell 5.1 (`&&`); our own UAT had run only on Linux | Old line: 4 PSScriptAnalyzer findings; new lines: 0 |
+| 14 | 2026-11-17 | The UAT checklist's install, data-folder and doctor PowerShell lines run in CI on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7; one command per line per OS | The owner's first checklist step failed in PowerShell 5.1 (`&&`); our own UAT had run only on Linux | Old line: 4 PSScriptAnalyzer findings; new lines: 0 |
+| 15 | 2026-11-17 | Insight sentences are computed by code from the same numbers as their chart, and a test asserts they agree; no model writes a number. UI directions are shown to the owner as options before building | The owner set the moat: turn numbers into learnings. In the 10-app study, one app's own mock-up gave 32% in its sentence and 35% in its chart | Nothing yet (the insight engine is next) |
