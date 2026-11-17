@@ -292,6 +292,29 @@ def test_a_sold_out_sip_is_due_only_to_its_last_purchase() -> None:
     assert (ins.numbers["expected"], ins.numbers["missed"]) == (3, 0)
 
 
+def test_dividend_reinvestments_are_not_sip_instalments_or_new_money() -> None:
+    rows = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-02-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-03-25", "DIVIDEND_REINVEST", "1", "90"),
+    ]
+    stmt = fx.rta(
+        "01-Jan-2026",
+        "31-Mar-2026",
+        [
+            fx.folio(
+                "9000001/01", "Test Mutual Fund", [fx.scheme(fx.HDFC_MF, "HDFC", "0", "21", rows)]
+            )
+        ],
+    )
+    book = _book([stmt])
+    assert sip_discipline(book) is None  # 2 months of real purchases, not 3
+    ins = what_changed(book)
+    assert ins is not None
+    assert (ins.numbers["added_paise"], ins.numbers["income_paise"]) == (200_000, 0)
+    assert ins.numbers["reinvested_paise"] == 9_000
+
+
 def test_two_purchases_are_not_a_sip() -> None:
     assert sip_discipline(_book([_statement(_sip_history([1, 3]), 1, 3)])) is None
 
@@ -410,6 +433,19 @@ def test_a_holding_without_a_price_is_named_not_counted_as_unknown_cost() -> Non
     assert "1 holding (ICICI Bluechip) has no price yet and is left out." in conc.detail
     assert cov.headline == "You're up ₹100 (10.0%) on what's priced."
     assert "statements start after" not in cov.detail
+
+
+def test_exactly_25_percent_is_not_over_the_line() -> None:
+    buy = _trade(1, 5)
+    mf = {fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}
+    shares: list[dict[str, int]] = [{i: 100 for i in STOCKS[:2]}] * MONTHS
+    book = _book([_statement(mf, 1, 1), _demat(shares, 1, 1)])
+    every: dict[str, int] = {i: 1_000 * 1_000_000 for i in (fx.HDFC_MF, fx.ICICI_MF)}
+    every |= {i: 100 * 1_000_000 for i in STOCKS[:2]}  # 4 x Rs 10,000
+    ins = concentration(book, _prices(every))
+    assert ins is not None
+    assert ins.headline == "Your largest holding is 25.0% of your money."
+    assert ins.tone == "warn"  # the top 3 (75%) are over half
 
 
 def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
