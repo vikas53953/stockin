@@ -112,3 +112,11 @@ The owner ran the whole drop 1 checklist on Windows with the synthetic sample PD
 - **Lesson:** the product is the explanation, not the table. An explanation that disagrees with its own chart is worse than none (one app's own mock-up says 32% in the sentence and 35% in the legend).
 - **Rule:** insights are computed by code from the same numbers as their chart, and a test asserts the sentence and the chart agree. No model writes a number. Design directions are shown to the owner as options before the UI is built.
 
+## Sprint 1, drop 2 (2026-11-17)
+
+### 18. "Rejected cleanly" has to cover every way a download breaks
+- **What happened:** PR #18 (end-of-day prices) failed verification twice. The first FAIL: a truncated bhavcopy zip (`BadZipFile`) and a connection closed mid-download (`IncompleteRead`, an `HTTPException`, not an `OSError`) ended in a traceback, and in `prices fetch` the crash also threw away the AMFI prices that had downloaded. Four injected bugs survived. The fix caught `BadZipFile` and retried `HTTPException`. The second FAIL: the verifier flipped bytes in a real NSE zip and 24 of 4,587 copies still escaped (`RuntimeError` for a flipped "encrypted" bit, `ValueError` for a bad directory offset), and one survivor (a 404 inside the real `_get`) was "tested" only through a stub that replaced `_get`.
+- **Lesson:** a parser's error contract is every exception its library can raise, not the ones we have seen. A test that stubs out the code under test does not test it.
+- **Rule:** a parser of downloaded files gets a fuzz test that changes every byte of a fixture and asserts each copy parses the same or is rejected; one data source failing in any way never costs another's results. Tests for a function drive that function, with only the network faked.
+- **Caught since:** the fix-forward 2 run of the same idea on the real 17 Nov bhavcopy: 5,180 damaged copies, 4,221 rejected, 959 parsed identically, 0 escapes (in verification).
+
