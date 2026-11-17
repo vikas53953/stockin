@@ -188,6 +188,21 @@ def test_each_stamp_duty_goes_to_the_buy_it_follows() -> None:
     assert [b.amount for b in buys] == [Money.rupees("500.03"), Money.rupees("600.04")]
 
 
+def test_trailing_zero_amount_is_whole_paise() -> None:
+    st = cas.from_casparser(_rta([fx.txn("2026-01-05", "PURCHASE", "10", "1000.100")]), "sha")
+    (buy,) = [f.event for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Buy)]
+    assert buy.amount == Money.rupees("1000.10")
+
+
+def test_redemption_without_an_amount_is_rejected() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-06", "REDEMPTION", "-10", None),
+    ]
+    with pytest.raises(cas.CasRejected, match="needs negative units and an amount"):
+        cas.from_casparser(_rta(txns, close="0"), "sha")
+
+
 @pytest.mark.parametrize(
     ("txns", "reason"),
     [
