@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 import typer
 
 from . import __version__
-from .book import Holding, ReconcileReport, reconcile
+from .book import Book, Holding, ReconcileReport, reconcile
 from .money import Value
 from .sources import cas
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
@@ -160,8 +160,7 @@ def _open_ledger() -> Ledger:
         ) from None
 
 
-def _holding_lines(ledger: Ledger, holdings: tuple[Holding, ...]) -> list[str]:
-    book = ledger.book()
+def _holding_lines(book: Book, holdings: tuple[Holding, ...]) -> list[str]:
     lines: list[str] = []
     current = None
     for h in sorted(holdings, key=lambda h: (h.account, h.isin)):
@@ -201,7 +200,7 @@ def import_cas(
         raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
     with LedgerWriter.open(ledger_path()) as writer:
         report: ImportReport = writer.ingest(statement)
-        lines = _holding_lines(writer, report.holdings)
+        lines = _holding_lines(writer.book(), report.holdings)
     if as_json:
         typer.echo(report.model_dump_json(indent=2))
         return
@@ -226,13 +225,14 @@ class HoldingsView(Value):
 def holdings(as_json: JsonFlag = False) -> None:
     """Units held per account and ISIN, folded from every imported statement."""
     with _open_ledger() as ledger:
-        rows = ledger.book().holdings()
+        book = ledger.book()
+        rows = book.holdings()
         if as_json:
             typer.echo(HoldingsView(holdings=rows).model_dump_json(indent=2))
             return
         if not rows:
             typer.echo("no holdings")
-        for line in _holding_lines(ledger, rows):
+        for line in _holding_lines(book, rows):
             typer.echo(line)
 
 

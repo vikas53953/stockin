@@ -92,7 +92,8 @@ class Ledger:
     def book(self, as_of: date | None = None) -> Book:
         """Every fact, parsed back through the pydantic union in one read
         transaction: the database is a boundary like any file."""
-        with self._conn:
+        self._conn.execute("BEGIN")  # one snapshot: a writer cannot land between reads
+        try:
             facts = tuple(
                 _FACT.validate_json(body)
                 for (body,) in self._conn.execute("SELECT body FROM facts ORDER BY id")
@@ -103,6 +104,8 @@ class Ledger:
             accounts = tuple(
                 Account.model_validate_json(body) for body in self._latest("accounts", "id")
             )
+        finally:
+            self._conn.execute("COMMIT")
         return Book.of(facts, instruments, accounts, as_of)
 
     def _latest(self, table: str, key: str) -> list[str]:
@@ -153,7 +156,10 @@ class LedgerWriter(Ledger):
     @classmethod
     def open(cls, db: Path) -> Self:
         db.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not db.exists()
         conn = sqlite3.connect(db, isolation_level=None)
+        if fresh:
+            db.chmod(0o600)  # holdings are private; the WAL and SHM files inherit this
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         conn.isolation_level = "DEFERRED"
