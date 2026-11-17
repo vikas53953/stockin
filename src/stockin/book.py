@@ -264,7 +264,7 @@ class Book:
 
     def _fold(self, pair: Pair) -> Timeline:
         txns = self._txns.get(pair, [])
-        stated = self._checkpoints(pair, txns)
+        stated, implied = self._checkpoints(pair, txns)
         windows = self._coverage.get(pair, [])
         fold = _Fold(pair, windows)
         i = 0
@@ -273,6 +273,9 @@ class Book:
                 fold.apply(txns[i])
                 i += 1
             claims = stated[on]
+            if on in implied and fold.running == 0:
+                fold.checkpoint = on  # omitting a position already at zero says nothing new
+                continue
             if len(claims) > 1:  # two statements disagree about one day
                 for qty in sorted(claims):
                     fold.check("balance", on, qty, "mismatch")
@@ -291,27 +294,19 @@ class Book:
             fold.apply(txn)
         return fold.timeline()
 
-    def _checkpoints(self, pair: Pair, txns: list[Txn]) -> dict[date, set[int]]:
+    def _checkpoints(self, pair: Pair, txns: list[Txn]) -> tuple[dict[date, set[int]], set[date]]:
         """Stated balances, plus an implied zero on each Complete listing that
-        omits this ISIN. Once an implied zero stands and no txn has moved the
-        holding since, later listings add nothing."""
+        omits this ISIN after it was first seen. Returns (claims, implied)."""
         stated = {on: set(qtys) for on, qtys in self._balances.get(pair, {}).items()}
-        txn_dates = [t.on for t in txns]
-        first_seen = min([*txn_dates, *stated], default=None)
+        first_seen = min([*(t.on for t in txns), *stated], default=None)
+        implied: set[date] = set()
         if first_seen is None:
-            return stated
+            return stated, implied
         for on in self._complete.get(pair[0], []):
-            if on <= first_seen or on in stated:
-                continue
-            last = max((d for d in stated if d < on), default=None)
-            if (
-                last is not None
-                and stated[last] == {0}
-                and not any(last < d <= on for d in txn_dates)
-            ):
-                continue  # already closed and untouched since
-            stated[on] = {0}
-        return stated
+            if on > first_seen and on not in stated:
+                stated[on] = {0}
+                implied.add(on)
+        return stated, implied
 
     # ----------------------------------------------------------------- views
 

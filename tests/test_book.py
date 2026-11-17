@@ -311,6 +311,26 @@ def test_closed_position_is_not_rechecked_every_month() -> None:
     assert len(Book.of(facts).timeline(DEMAT, INFY).checks) == 2
 
 
+def test_flagged_zero_does_not_stop_a_later_listing_closing_it() -> None:
+    """A covered month whose listing omits a holding is a mismatch, and the
+    holding stays. The next uncovered listing that omits it still closes it."""
+    jan31, feb28, apr30 = date(2026, 1, 31), date(2026, 2, 28), date(2026, 4, 30)
+    facts = (
+        bal(jan31, "10", DEMAT, INFY),
+        cov(date(2026, 2, 1), feb28, DEMAT, INFY),
+        Complete(account=DEMAT, on=feb28),
+        Complete(account=DEMAT, on=apr30),
+    )
+    book = Book.of(facts)
+    checks = book.timeline(DEMAT, INFY).checks
+    assert [(c.on, c.status) for c in checks] == [
+        (jan31, "inferred"),
+        (feb28, "mismatch"),
+        (apr30, "inferred"),
+    ]
+    assert book.holdings() == ()
+
+
 def test_balance_only_pair_later_explained_by_trades() -> None:
     sep30 = date(2026, 9, 30)
     only_balance = (bal(sep30, "10", DEMAT, INFY),)
