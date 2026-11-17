@@ -374,3 +374,24 @@ def test_prices_db_is_private(tmp_path: Path) -> None:
         pass
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_fetch_keeps_amfi_when_nse_keeps_cutting_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import http.client
+
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    amfi = eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text())
+
+    def cut(req: object, timeout: float) -> _Resp:
+        raise http.client.IncompleteRead(b"PK", 9000)
+
+    monkeypatch.setattr(eod, "fetch_amfi", lambda: amfi)
+    monkeypatch.setattr(eod.urllib.request, "urlopen", cut)
+    monkeypatch.setattr(eod, "_sleep", lambda s: None)
+    result = runner.invoke(app, ["prices", "fetch", "--json"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["read"] == len(amfi)
+    assert len(report["failed"]) == 1 and report["failed"][0].startswith("NSE")
