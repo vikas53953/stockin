@@ -24,7 +24,8 @@ file is their history. The stories behind them are in [LEARNINGS.md](LEARNINGS.m
 5. Passing verdict + green CI on the same head: squash-merge with a head-SHA
    guard. `FAIL`: at most two fix-forwards, then stop and report.
 6. Before the owner tests anything, an agent runs the owner's exact steps
-   first, as an end user, and reports pass/fail with evidence.
+   first, as an end user, on the owner's OS and shell, and reports pass/fail
+   with evidence.
 7. The owner's run is the final confirmation. Only then a `v0.N` tag and a
    retro.
 
@@ -44,4 +45,5 @@ file is their history. The stories behind them are in [LEARNINGS.md](LEARNINGS.m
 | 10 | 2026-11-17 | Every new or changed test is mutation-checked: it fails with the fix reverted, and the verifier injects at least three bugs of its own and reports survivors | The #11 verifier's own mutations showed the first properties missed 6 of 10 bugs | #14 verifier confirmed M2, M5, M6, M8 and M9 caught; M10 is caught by `test_money`, not a property. It also found N4 (per-lot proceeds unchecked) and no money check on same-day trades: fixed in #15 (in verification) |
 | 11 | 2026-11-17 | Docs about our own process are verified against PR comments and git history, like code | The #13 verifier found these docs undercounted past FAILs and overstated two claims | #13 FAIL, fixed forward |
 | 12 | 2026-11-17 | A property failure on an unrelated PR is a real bug, not a flake; CI is not derandomized on purpose | A random test that fails once has found a real input; re-running until green would throw it away | Nothing yet |
-| 13 | 2026-11-17 | Evidence is fingerprinted with `evidence_hash.py`: every byte of a PNG except the share's own `caBX` chunk in the place the share puts it (right after IHDR), every other file whole; `--check` also fails on added or removed files | The share adds `caBX` to PNGs at an unpredictable delay (seconds to ~27 min). A "wait 30 s and hash" rule went stale (#16 FAIL 1); hashing IDAT only let an APNG frame, gamma or transparency chunk change what a screenshot shows without changing its hash (#16 FAIL 2) | #16 failed three times (also: a `caBX` placed between IDATs hid the bottom of an image); owner allowed a fourth attempt |
+| 13 | 2026-11-17 | Evidence is fingerprinted with `evidence_hash.py`: every byte of a PNG except the share's own `caBX` chunk in the place the share puts it (right after IHDR), every other file whole; `--check` also fails on added or removed files | The share adds `caBX` to PNGs at an unpredictable delay (seconds to ~42 min so far, no known upper bound). A "wait 30 s and hash" rule went stale (#16 FAIL 1); hashing IDAT only let an APNG frame, gamma or transparency chunk change what a screenshot shows without changing its hash (#16 FAIL 2) | #16 failed three times (also: a `caBX` placed between IDATs hid the bottom of an image); owner allowed a fourth attempt, which passed (PASS+NOTES) |
+| 14 | 2026-11-17 | The UAT checklist's PowerShell lines run in CI on `windows-latest` under Windows PowerShell 5.1 and PowerShell 7; one command per line per OS | The owner's first checklist step failed in PowerShell 5.1 (`&&`); our own UAT had run only on Linux | Old line: 4 PSScriptAnalyzer findings; new lines: 0 |

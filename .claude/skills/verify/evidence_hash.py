@@ -1,16 +1,16 @@
 """Fingerprint an evidence folder so the hashes survive the project share.
 
-Some time after a PNG is copied to the share (seen from seconds to about 27
-minutes), the share inserts one ancillary chunk of its own, `caBX` (C2PA
-provenance), always as the chunk straight after IHDR. There it does not
-change what the image shows. So for a PNG this hashes every byte except that
-one chunk: the signature, every other chunk whole (length, type, data, CRC,
-so IHDR, gAMA, tRNS, APNG frames and the rest all count), and anything after
-IEND. A `caBX` anywhere else is hashed like any other chunk, because a chunk
-between IDATs or before IHDR does change what a decoder draws. Every other
-file is hashed whole.
-Output is `sha256sum`-style: "<hex>  <name>", with "[png-no-caBX]" after the
-name for PNGs.
+Some time after a PNG is copied to the share (seen from seconds to about 42
+minutes, no known upper bound), the share inserts one ancillary chunk of its
+own, `caBX` (C2PA provenance), always as the chunk straight after IHDR.
+There it does not change what the image shows. So for a PNG this hashes
+every byte except that one chunk: the signature, every other chunk whole
+(length, type, data, CRC, so IHDR, gAMA, tRNS, APNG frames and the rest all
+count), and anything after IEND. A `caBX` anywhere else is hashed like any
+other chunk, because a chunk between IDATs or before IHDR does change what a
+decoder draws. Every other file is hashed whole. Output is
+`sha256sum`-style: "<hex> <name>", with "[png-no-caBX]" after the name for
+PNGs.
 
   python3 evidence_hash.py DIR            # print the list
   python3 evidence_hash.py DIR --check F  # exit 1 if any file changed, is
