@@ -192,14 +192,17 @@ def concentration(book: Book, prices: PriceBook) -> Insight | None:
     over_one = top.value.paise * 10_000 > CONCENTRATED_ONE * total.paise
     over_three = len(ws) > 3 and top3_value * 10_000 > CONCENTRATED_TOP3 * total.paise
     of = "of what's priced" if unpriced else "of your money"
-    if over_one:
+    alone = len(ws) < 2 or ws[1].value.paise < top.value.paise
+    if over_one and alone:
         headline = f"One holding is {pct(top_t)} {of}."
     else:
         headline = f"Your largest holding is {pct(top_t)} {of}."
-    group = f"Your top 3 holdings are {pct(top3_t)} together. " if len(ws) > 3 else ""
+    priced = " priced" if unpriced else ""
+    whole = "what's priced" if unpriced else "your whole portfolio"
+    group = f"Your top 3{priced} holdings are {pct(top3_t)} together. " if len(ws) > 3 else ""
     detail = (
         f"{top.name}. {group}"
-        f"If {top.name} falls 10%, your whole portfolio falls about {pct(fall10_t)}. "
+        f"If {top.name} falls 10%, {whole} falls about {pct(fall10_t)}. "
         "A common rule of thumb is no more than 25% in one holding."
         + _unpriced_note(book, unpriced)
     )
@@ -238,6 +241,30 @@ def _gain_words(gain: Money, cost: Money) -> tuple[str, int | None]:
     return f"{text} ({pct(t)})", t
 
 
+def _unknown_cost_reason(book: Book, isins: set[Isin]) -> str:
+    """Why cost is unknown, by where the units are held. A fund folio's cost
+    comes from a statement that starts at the first purchase; a demat
+    statement (NSDL/CDSL) lists balances only, so no statement gives its cost."""
+    kinds: set[str] = set()
+    for h in book.holdings():
+        if h.isin in isins and h.cost is None:
+            acct = book.account(h.account)
+            kinds.add(acct.kind if acct else "demat")
+    parts: list[str] = []
+    if "mf_folio" in kinds:
+        parts.append(
+            "Your fund statements start after some units were bought, so their cost "
+            "isn't known. A statement from your first investment fixes this."
+        )
+    if "demat" in kinds:
+        parts.append(
+            "Demat statements (NSDL, CDSL) list what you hold, not what you paid, so "
+            "the cost of shares and ETFs there stays unknown until Stockin can read "
+            "your broker's tradebook."
+        )
+    return " ".join(parts)
+
+
 def cost_coverage(book: Book, prices: PriceBook) -> Insight | None:
     """Of the priced value, how much has a known cost, and the gain on it.
     Unknown cost (bought before your statements) and no price are told apart."""
@@ -265,10 +292,7 @@ def cost_coverage(book: Book, prices: PriceBook) -> Insight | None:
     of = "of what's priced" if unpriced else "of your money"
     if unknown_value > 0:
         headline = f"Gain is unknown for {pct(unknown_t)} {of}."
-        detail = (
-            "Your statements start after these holdings were bought, so their cost "
-            "isn't known. A statement from your first investment fixes this."
-        )
+        detail = _unknown_cost_reason(book, {w.isin for w in ws if w.cost is None})
         if known:
             detail += f" On the rest you're {words}."
         tone: Tone = "unknown"
@@ -312,13 +336,24 @@ def _months(a: tuple[int, int], b: tuple[int, int]) -> list[tuple[int, int]]:
 _MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _reinvested(book: Book) -> set[tuple[AccountId, Isin, date]]:
-    """(account, ISIN, day) of dividend reinvestments: the import writes them
-    as an Income and a Buy on the same day. That Buy is not new money, and
-    that Income was not paid out."""
-    income = {(t.account, t.isin, t.on) for t in _txns(book) if isinstance(t.event, Income)}
-    buys = {(t.account, t.isin, t.on) for t in _txns(book) if isinstance(t.event, Buy)}
-    return income & buys
+def _reinvested(book: Book) -> set[Txn]:
+    """The Buy and Income facts of each dividend reinvestment. The import
+    writes one as an Income and a Buy of the same amount, on the same day,
+    for the same account and fund; that Buy is not new money and that Income
+    was not paid out. Pairing by amount keeps a SIP purchase or an IDCW
+    payout that happens to fall on the same day."""
+    incomes: dict[tuple[AccountId, Isin, date, int], list[Txn]] = defaultdict(list)
+    for t in _txns(book):
+        if isinstance(t.event, Income):
+            incomes[(t.account, t.isin, t.on, t.event.amount.paise)].append(t)
+    out: set[Txn] = set()
+    for t in sorted(_txns(book), key=lambda t: (t.on, t.nth)):
+        if isinstance(t.event, Buy):
+            pool = incomes.get((t.account, t.isin, t.on, t.event.amount.paise))
+            if pool:
+                out.add(pool.pop(0))
+                out.add(t)
+    return out
 
 
 def _day(d: date) -> str:
@@ -340,7 +375,7 @@ def what_changed(book: Book) -> Insight | None:
     re_ = _reinvested(book)
 
     def fresh(t: Txn) -> bool:
-        return (t.account, t.isin, t.on) not in re_
+        return t not in re_
 
     added = sum(t.event.amount.paise for t in window if isinstance(t.event, Buy) and fresh(t))
     out = sum(t.event.amount.paise for t in window if isinstance(t.event, Sell))
@@ -392,26 +427,32 @@ STOPPED_AFTER = 3
 treated as stopped, not as missing instalments."""
 
 
+def _sip_date(ym: tuple[int, int], day: int) -> date:
+    """The SIP's day in month `ym`; the 31st is the month's last day."""
+    import calendar
+
+    return date(ym[0], ym[1], min(day, calendar.monthrange(*ym)[1]))
+
+
 def sip_discipline(book: Book) -> Insight | None:
     """A SIP is a mutual fund in one account bought (new money, not a dividend
-    reinvestment) in at least 3 different months.
+    reinvestment) in at least 3 different months. Its day is the day of the
+    latest purchase.
 
-    A month is due from the first purchase month up to the latest statement
-    for that fund, but the statement's own month only once the statement
-    reaches the SIP's day (the day of the latest purchase). A sold-out fund
-    is due up to its last purchase. 3 or more missed months in a row at the
-    end means the SIP stopped: those months are not counted as missed, and
-    the stop is said instead."""
+    A month is due when that day falls inside a statement for the fund: a
+    statement that ends before the SIP day, or a gap between statements,
+    makes no month due. A sold-out fund is due up to its last purchase. 3 or
+    more missed months in a row at the end means the SIP stopped: those are
+    not counted as missed, and the stop is said instead."""
     re_ = _reinvested(book)
-    cover_end: dict[tuple[AccountId, Isin], date] = {}
+    spans: dict[tuple[AccountId, Isin], list[tuple[date, date]]] = defaultdict(list)
     for c in book.facts:
         if isinstance(c, Coverage):
-            k = (c.account, c.isin)
-            cover_end[k] = max(cover_end.get(k, c.end), c.end)
+            spans[(c.account, c.isin)].append((c.start, c.end))
     held = {(h.account, h.isin) for h in book.holdings()}
     buys: dict[tuple[AccountId, Isin], list[date]] = defaultdict(list)
     for t in _txns(book):
-        if isinstance(t.event, Buy) and (t.account, t.isin, t.on) not in re_:
+        if isinstance(t.event, Buy) and t not in re_:
             inst = book.instrument(t.isin)
             if inst is not None and inst.kind == "mutual_fund":
                 buys[(t.account, t.isin)].append(t.on)
@@ -422,19 +463,21 @@ def sip_discipline(book: Book) -> Insight | None:
     stopped: list[str] = []
     series: list[Point] = []
     for (acct, isin), days in sorted(sips.items()):
-        inst = book.instrument(Isin(isin))
+        inst = book.instrument(isin)
         name = _short_name(inst.name) if inst else isin
         months = {_month(d) for d in days}
-        last_buy = days[-1]
-        if (acct, isin) in held and (acct, isin) in cover_end:
-            end = cover_end[(acct, isin)]
-            last = _month(end)
-            if end.day < last_buy.day and last > _month(last_buy):
-                y, m = last
-                last = (y - 1, 12) if m == 1 else (y, m - 1)  # not due yet this month
+        sip_day = days[-1].day
+        covered = spans.get((acct, isin), [])
+        if (acct, isin) in held and covered:
+            last = max(_month(days[-1]), max(_month(e) for _, e in covered))
         else:
-            last = _month(last_buy)
-        due = _months(min(months), max(last, _month(last_buy)))
+            last = _month(days[-1])  # sold out: nothing is due after the last purchase
+
+        due = [
+            ym
+            for ym in _months(min(months), last)
+            if ym in months or any(s <= _sip_date(ym, sip_day) <= e for s, e in covered)
+        ]
         trailing = 0
         for ym in reversed(due):
             if ym in months:
@@ -524,7 +567,10 @@ def tax_clock(book: Book, today: date) -> Insight | None:
     names = sorted({n for n, _ in lots})
     cost = Money(paise=sum(c.paise for _, c in lots))
     days = (when - today).days
-    headline = f"{rupees(cost)} (at cost) of {_names(names)} turn long-term on {_day(when)}."
+    if cost.paise > 0:
+        headline = f"{rupees(cost)} (at cost) of {_names(names)} turn long-term on {_day(when)}."
+    else:  # bonus units: nothing was paid for them
+        headline = f"Bonus units of {_names(names)} turn long-term on {_day(when)}."
     detail = (
         f"That's in {_plural(days, 'day')}. Selling before then is taxed as short-term gains. "
         "Worked out from your purchase dates, oldest first. Units bought before your "

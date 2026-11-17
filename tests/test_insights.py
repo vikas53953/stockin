@@ -174,7 +174,9 @@ def test_value_insights_match_an_independent_count(
     assert c["top3_tenths"] == div_half_even(top3 * 1_000, total)
     assert c["fall10_tenths"] == div_half_even(top * 100, total)
     assert (c["unpriced"], c["holdings"]) == (unpriced, len(rows))
-    assert conc.headline.startswith("One holding is") == (top * 4 > total)
+    alone = len(rows) == 1 or rows[1][0] < top
+    assert conc.headline.startswith("One holding is") == (top * 4 > total and alone)
+    assert ("whole portfolio" in conc.detail) == (unpriced == 0)
     assert (conc.tone == "warn") == (top * 4 > total or (len(rows) > 3 and top3 * 2 > total))
     assert ("of what's priced" in conc.headline) == (unpriced > 0)
     assert ("Your top 3" in conc.detail) == (len(rows) > 3)
@@ -198,8 +200,10 @@ def test_value_insights_match_an_independent_count(
         assert g["gain_tenths"] == div_half_even(abs(kv - kc) * 1_000, kc)
     if kc == 0:
         assert "gain_tenths" not in g or kv == kc  # no percent of a zero cost
-    # "start after these were bought" only when some priced value has no cost
-    assert ("Your statements start after" in cov.detail) == (unknown > 0)
+    # an unknown-cost reason only when some priced value has no cost
+    assert cov.headline.startswith("Gain is unknown") == (unknown > 0)
+    assert ("statements" in cov.detail) == (unknown > 0)
+    assert ("no price yet" in cov.detail) == (unpriced > 0)
     if unknown == 0:
         expect = "good" if kv > kc else "warn" if kv < kc else "info"
         assert cov.tone == expect
@@ -313,6 +317,58 @@ def test_dividend_reinvestments_are_not_sip_instalments_or_new_money() -> None:
     assert ins is not None
     assert (ins.numbers["added_paise"], ins.numbers["income_paise"]) == (200_000, 0)
     assert ins.numbers["reinvested_paise"] == 9_000
+
+
+def _rta(rows: list[dict[str, str | None]], close: str, start: str, end: str) -> fx.CASData:
+    scheme = fx.scheme(fx.HDFC_MF, "HDFC Flexi Cap Fund", "0", close, rows)  # type: ignore[arg-type]
+    return fx.rta(start, end, [fx.folio("9000001/01", "Test Mutual Fund", [scheme])])
+
+
+def test_a_payout_or_reinvestment_on_the_sip_day_keeps_the_sip_purchase() -> None:
+    rows = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-02-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-03-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-03-05", "DIVIDEND_PAYOUT", None, "50"),  # IDCW paid out, same day
+        fx.txn("2026-04-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-04-05", "DIVIDEND_REINVEST", "0.5", "50"),  # and reinvested, same day
+    ]
+    book = _book([_rta(rows, "40.5", "01-Jan-2026", "30-Apr-2026")])
+    sip = sip_discipline(book)
+    assert sip is not None
+    assert (sip.numbers["expected"], sip.numbers["missed"]) == (4, 0)
+    ch = what_changed(book)
+    assert ch is not None
+    assert ch.numbers["added_paise"] == 400_000  # the 4 SIP purchases, not the reinvestment
+    assert (ch.numbers["income_paise"], ch.numbers["reinvested_paise"]) == (5_000, 5_000)
+
+
+def test_months_between_statements_are_not_missed() -> None:
+    history = _sip_history([1, 2, 3, 7, 8, 9])
+    book = _book([_statement(history, 1, 3), _statement(history, 7, 9)])
+    ins = sip_discipline(book)
+    assert ins is not None
+    assert (ins.numbers["expected"], ins.numbers["missed"]) == (6, 0)
+
+
+def test_a_statement_ending_on_the_sip_day_makes_that_month_due() -> None:
+    history = {fx.HDFC_MF: [_trade(m, 20) for m in (1, 2, 3)]}
+    stmt = _statement(history, 1, 4)
+    stmt = stmt.model_copy(
+        update={"statement_period": stmt.statement_period.model_copy(update={"to": "20-Apr-2026"})}
+    )
+    ins = sip_discipline(_book([stmt]))
+    assert ins is not None
+    assert (ins.numbers["expected"], ins.numbers["missed"]) == (4, 1)
+
+
+def test_only_mutual_funds_count_as_sips() -> None:
+    st_ = cas.from_casparser(_statement(_sip_history([1, 2, 3]), 1, 3), "sha")
+    as_stock = tuple(i.model_copy(update={"kind": "stock"}) for i in st_.instruments)
+    fund = Book.of(tuple(st_.facts), tuple(st_.instruments), tuple(st_.accounts))
+    stock = Book.of(tuple(st_.facts), as_stock, tuple(st_.accounts))
+    assert sip_discipline(fund) is not None
+    assert sip_discipline(stock) is None
 
 
 def test_two_purchases_are_not_a_sip() -> None:
@@ -446,6 +502,49 @@ def test_exactly_25_percent_is_not_over_the_line() -> None:
     assert ins is not None
     assert ins.headline == "Your largest holding is 25.0% of your money."
     assert ins.tone == "warn"  # the top 3 (75%) are over half
+
+
+def _five_holdings() -> Book:
+    buy = _trade(1, 5)
+    mf = {fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}
+    shares: list[dict[str, int]] = [{i: 100 for i in STOCKS}] * MONTHS
+    return _book([_statement(mf, 1, 1), _demat(shares, 1, 1)])
+
+
+def test_with_a_holding_unpriced_every_share_says_priced() -> None:
+    ps: dict[str, int] = {fx.HDFC_MF: 3_000 * 1_000_000}  # Rs 30,000
+    ps |= {i: 100 * 1_000_000 for i in STOCKS}  # 3 x Rs 10,000; ICICI unpriced
+    ins = concentration(_five_holdings(), _prices(ps))
+    assert ins is not None
+    assert ins.headline == "One holding is 50.0% of what's priced."
+    assert "Your top 3 priced holdings are 83.3% together." in ins.detail
+    assert "falls 10%, what's priced falls about 5.0%." in ins.detail
+    assert "whole portfolio" not in ins.detail
+
+
+def test_equal_largest_holdings_are_not_called_one_holding() -> None:
+    ps: dict[str, int] = {i: 100 * 1_000_000 for i in STOCKS}  # 3 x Rs 10,000
+    shares: list[dict[str, int]] = [{i: 100 for i in STOCKS}] * MONTHS
+    ins = concentration(_book([_demat(shares, 1, 1)]), _prices(ps))
+    assert ins is not None
+    assert ins.headline == "Your largest holding is 33.3% of your money."
+    assert ins.tone == "warn"
+
+
+def test_unknown_cost_advice_depends_on_where_the_units_are() -> None:
+    shares: list[dict[str, int]] = [{i: 100 for i in STOCKS}] * MONTHS
+    ps: dict[str, int] = {i: 100 * 1_000_000 for i in STOCKS}
+    demat = cost_coverage(_book([_demat(shares, 1, 1)]), _prices(ps))
+    assert demat is not None
+    assert "Demat statements (NSDL, CDSL) list what you hold" in demat.detail
+    assert "first investment" not in demat.detail
+    # a fund statement from March: Jan and Feb units are an opening balance
+    fund = cost_coverage(
+        _book([_statement(_sip_history([1, 2, 3]), 3, 3)]), _prices({fx.HDFC_MF: 100_000_000})
+    )
+    assert fund is not None
+    assert "A statement from your first investment fixes this." in fund.detail
+    assert "Demat" not in fund.detail
 
 
 def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
