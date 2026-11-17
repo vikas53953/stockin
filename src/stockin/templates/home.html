@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% set active = "home" %}
+{% block body %}
+<h1>Holdings</h1>
+{% if empty %}
+<section class="panel"><p>No statements yet. Import your CAMS/KFintech CAS for mutual funds and your NSDL or CDSL CAS for demat holdings.</p></section>
+{% else %}
+<div class="chips">
+  {% if ok %}<span class="chip ok">reconcile OK</span>{% else %}<a class="chip bad" href="/reconcile">{{ summary.mismatch }} mismatch</a>{% endif %}
+  <span class="chip">{{ summary.match }} match</span><span class="chip warn">{{ summary.inferred }} inferred</span>
+</div>
+<section class="panel">
+  {% if groups %}{% include "_holdings.html" %}{% else %}<p>Nothing held right now.</p>{% endif %}
+  <p class="muted">Demat statements list balances, not trades, so demat cost shows as unknown until a tradebook import exists. Stockin never invents a cost.</p>
+</section>
+{% endif %}
+{% include "_upload.html" %}
+{% endblock %}

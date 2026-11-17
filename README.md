@@ -25,7 +25,11 @@ Stockin keeps its data in `./data`, or wherever `STOCKIN_DATA` points.
 
 ### 2. Import your holdings
 
-> **Working.** `stockin import cas` and `stockin holdings` run today. A PDF asks for its password (or reads `$STOCKIN_CAS_PASSWORD`), uses it once, and never stores it.
+> **Working.** `stockin web`, `stockin import cas` and `stockin holdings` run today. A PDF's password is used once and never stored.
+
+**Easiest: the local web app.** Run `stockin web`, then open http://127.0.0.1:8765. Pick your CAS PDF, type its password and press Import. You will see your holdings and the reconcile result. The app only answers on your own computer.
+
+Or from the terminal:
 
 Download your latest CAS from CAMS or KFintech (mutual funds) and NSDL or CDSL (demat, all brokers), then import each one:
 

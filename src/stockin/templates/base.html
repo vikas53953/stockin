@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Stockin{% endblock %}</title>
+<style>
+:root{--bg:#f7f8f6;--panel:#fff;--fg:#18201c;--muted:#5d6862;--line:#dfe3df;--accent:#0f6e52;--ok:#0f6e52;--warn:#9a5b00;--bad:#b42318;--chip:#eef2ef;
+  --font:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#111513;--panel:#181e1b;--fg:#e6ece8;--muted:#9ba7a0;--line:#2a332e;--accent:#4cc79a;--ok:#4cc79a;--warn:#f0a43c;--bad:#ff7b6e;--chip:#202824;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--font)}
+.wrap{max-width:980px;margin:0 auto;padding:28px max(16px,env(safe-area-inset-left)) 64px max(16px,env(safe-area-inset-right));display:grid;gap:24px}
+nav{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+nav b{font-size:20px;letter-spacing:-.01em}
+nav a{color:var(--muted);text-decoration:none}
+nav a[aria-current]{color:var(--fg);font-weight:600}
+nav .tag{margin-left:auto;font:12px var(--mono);color:var(--muted)}
+h1{font-size:22px;margin:0}
+h2{font-size:16px;margin:0 0 8px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:12px;min-width:0}
+.muted{color:var(--muted)}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{font:13px var(--mono);padding:3px 10px;border-radius:999px;background:var(--chip)}
+.chip.ok{color:var(--ok)}.chip.bad{color:var(--bad);font-weight:600}.chip.warn{color:var(--warn)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font:12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+td.num,th.num{text-align:right}
+td.name{white-space:normal;min-width:180px}
+tr:last-child td{border-bottom:0}
+.acct{font-weight:600;padding-top:14px}
+.isin{font:12.5px var(--mono);color:var(--muted)}
+.unknown{color:var(--muted);font-style:italic}
+.status-mismatch{color:var(--bad);font-weight:600}.status-inferred{color:var(--warn)}.status-match{color:var(--ok)}
+form{display:grid;gap:12px}
+label{display:grid;gap:4px;font-weight:500}
+input[type=file],input[type=password]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);max-width:100%}
+button{font:inherit;font-weight:600;padding:9px 16px;border-radius:8px;border:0;background:var(--accent);color:var(--bg);cursor:pointer;justify-self:start}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.notice{padding:12px 14px;border-radius:10px;border:1px solid var(--line)}
+.notice.bad{border-color:var(--bad);color:var(--bad)}
+.notice.ok{border-color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <b>Stockin</b>
+  <a href="/" {% if active == "home" %}aria-current="page"{% endif %}>Holdings</a>
+  <a href="/reconcile" {% if active == "reconcile" %}aria-current="page"{% endif %}>Reconcile</a>
+  <span class="tag">read-only · this computer only</span>
+</nav>
+{% block body %}{% endblock %}
+</div>
+</body>
+</html>

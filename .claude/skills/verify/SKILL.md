@@ -5,7 +5,7 @@ description: Drive the Stockin CLI the way its owner does and capture proof. Use
 
 # Verify Stockin
 
-Stockin's surface is the `stockin` CLI. The web dashboard, Telegram alerts and the MCP server arrive in later PRs, and each will get its own section here. Every command takes `--json`, which prints the same object the human output is drawn from. Prefer `--json` for assertions and keep the human output as evidence.
+Stockin's surfaces are the `stockin` CLI and the local web app (`stockin web`, see [features/web.md](features/web.md)). Telegram alerts and the MCP server arrive in later sprints, and each will get its own section here. Every command takes `--json`, which prints the same object the human output is drawn from. Prefer `--json` for assertions and keep the human output as evidence.
 
 **Never point a run at real data.** This repository is public. Verification uses a disposable `STOCKIN_DATA` folder and synthetic fixtures only. Never read, copy or print anything from the server's real `data/` folder.
 
