@@ -1,0 +1,11 @@
+<section class="panel">
+  <h2>Import a statement</h2>
+  <form action="/import" method="post" enctype="multipart/form-data">
+    <label for="statement">CAS file (PDF from CAMS, KFintech, NSDL or CDSL)
+      <input id="statement" name="statement" type="file" accept=".pdf,.json" required></label>
+    <label for="password">PDF password <span class="muted">(used once, never saved)</span>
+      <input id="password" name="password" type="password" autocomplete="off"></label>
+    <button type="submit">Import</button>
+  </form>
+  <p class="muted">Importing the same file again changes nothing. Overlapping months are never counted twice.</p>
+</section>

@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% set active = "import" %}
+{% block body %}
+<h1>Import: {{ filename }}</h1>
+{% if error %}
+<div class="notice bad" role="alert">{{ error }}<br><span class="muted">Nothing was imported.</span></div>
+{% else %}
+<div class="notice ok">
+  {{ report.source }}, {{ report.period_start }} to {{ report.period_end }}.
+  {% if report.seen_before %}<b>Already imported; nothing changed.</b>{% endif %}
+  {{ report.facts_added }} new facts, {{ report.facts_already_present }} already in your ledger.
+</div>
+{% for w in report.warnings %}<p class="muted">Note: {{ w }}</p>{% endfor %}
+<section class="panel"><h2>Holdings in this statement's accounts</h2>{% include "_holdings.html" %}</section>
+{% endif %}
+<p><a href="/">Back to holdings</a></p>
+{% include "_upload.html" %}
+{% endblock %}

@@ -262,5 +262,20 @@ def reconcile_cmd(as_json: JsonFlag = False) -> None:
     raise typer.Exit(0 if report.ok else 1)
 
 
+@app.command()
+def web(
+    port: Annotated[int, typer.Option(help="Port on 127.0.0.1.")] = 8765,
+) -> None:
+    """Open the local web app: upload a CAS, see holdings and reconcile.
+
+    Listens on 127.0.0.1 only, so nothing outside this computer can reach it."""
+    import uvicorn
+
+    from .web import create_app
+
+    typer.echo(f"Stockin is running at http://127.0.0.1:{port}  (Ctrl+C to stop)")
+    uvicorn.run(create_app(ledger_path(), port), host="127.0.0.1", port=port, log_level="warning")
+
+
 def main() -> None:
     app()
