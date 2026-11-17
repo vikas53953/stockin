@@ -1,11 +1,14 @@
 """Fingerprint an evidence folder so the hashes survive the project share.
 
-Some time after a PNG is copied to the share (seen from seconds to about 11
+Some time after a PNG is copied to the share (seen from seconds to about 27
 minutes), the share inserts one ancillary chunk of its own, `caBX` (C2PA
-provenance). That chunk does not change what the image shows. So for a PNG
-this hashes every byte except `caBX` chunks: the signature, every other chunk
-whole (length, type, data, CRC, so IHDR, gAMA, tRNS, APNG frames and the rest
-all count), and anything after IEND. Every other file is hashed whole.
+provenance), always as the chunk straight after IHDR. There it does not
+change what the image shows. So for a PNG this hashes every byte except that
+one chunk: the signature, every other chunk whole (length, type, data, CRC,
+so IHDR, gAMA, tRNS, APNG frames and the rest all count), and anything after
+IEND. A `caBX` anywhere else is hashed like any other chunk, because a chunk
+between IDATs or before IHDR does change what a decoder draws. Every other
+file is hashed whole.
 Output is `sha256sum`-style: "<hex>  <name>", with "[png-no-caBX]" after the
 name for PNGs.
 
@@ -31,13 +34,14 @@ def fingerprint(path: Path) -> tuple[str, str]:
     if not data.startswith(_PNG):
         return hashlib.sha256(data).hexdigest(), path.name
     h = hashlib.sha256(_PNG)
-    pos = len(_PNG)
+    pos, index = len(_PNG), 0
     while pos + 8 <= len(data):
         (length,) = struct.unpack(">I", data[pos : pos + 4])
         end = pos + 12 + length
-        if data[pos + 4 : pos + 8] != _SHARE_CHUNK:
+        # only where the share puts it: the second chunk, right after IHDR
+        if not (index == 1 and data[pos + 4 : pos + 8] == _SHARE_CHUNK):
             h.update(data[pos:end])
-        pos = end
+        pos, index = end, index + 1
     h.update(data[pos:])  # a truncated chunk or bytes after IEND still count
     return h.hexdigest(), f"{path.name} [png-no-caBX]"
 
