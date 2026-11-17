@@ -100,9 +100,21 @@ class PriceStore:
                 raise PricesMissing(f"no prices at {path}; run `stockin prices fetch`")
             conn = sqlite3.connect(path)
             conn.execute("PRAGMA query_only=ON")
+            try:
+                has = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quotes'"
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                has = None
+            if has is None:  # an empty or foreign file: treat as no prices yet
+                conn.close()
+                raise PricesMissing(f"{path} holds no prices; run `stockin prices fetch`")
             return cls(conn)
         path.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not path.exists()
         conn = sqlite3.connect(path, isolation_level=None)
+        if fresh:
+            path.chmod(0o600)  # which ISINs you hold is private, like ledger.db
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         conn.isolation_level = "DEFERRED"

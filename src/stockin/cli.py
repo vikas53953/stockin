@@ -6,6 +6,7 @@ output is rendered from, so the verify skill and the owner see one truth.
 
 from __future__ import annotations
 
+import http.client
 import os
 import shlex
 import sys
@@ -111,8 +112,11 @@ def _quotes_check(path: Path) -> DoctorCheck:
     hint = "run `stockin prices fetch` (AMFI NAVs and the NSE bhavcopy)"
     if not path.is_file():
         return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
-    with PriceStore.open(path) as store:
-        latest, n = store.latest_day(), store.count()
+    try:
+        with PriceStore.open(path) as store:
+            latest, n = store.latest_day(), store.count()
+    except PricesMissing:
+        latest, n = None, 0
     if latest is None:
         return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
     return DoctorCheck(name="quotes", status="ok", detail=f"{n} end-of-day prices, latest {latest}")
@@ -361,7 +365,7 @@ def prices_fetch(as_json: JsonFlag = False) -> None:
     ):
         try:
             got.extend(fetch())
-        except (OSError, eod.EodRejected) as exc:
+        except (OSError, http.client.HTTPException, eod.EodRejected) as exc:
             failed.append(f"{name}: {exc}")
     if len(failed) == 2:
         raise _fail(

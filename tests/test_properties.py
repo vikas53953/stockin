@@ -470,6 +470,7 @@ def quotes(draw: st.DrawFn) -> list[Quote]:
 @given(
     st.lists(
         st.tuples(st.sampled_from(ISINS), quote_days, price_text),
+        min_size=1,  # a file with no NAV rows is rejected: see test_prices
         max_size=20,
         unique_by=lambda t: t[0],
     )

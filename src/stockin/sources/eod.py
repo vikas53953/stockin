@@ -15,11 +15,13 @@ network calls, and they only download public files: no login, no token.
 from __future__ import annotations
 
 import csv
+import http.client
 import io
 import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 
@@ -85,17 +87,26 @@ def parse_amfi(text: str) -> tuple[Quote, ...]:
                 prev.price.micro_rupees,
             ):
                 out[isin] = quote
+    if not out:
+        raise EodRejected("the NAVAll file has no NAV rows")
     return tuple(out[k] for k in sorted(out))
 
 
 def _csv_text(data: bytes) -> str:
-    if data[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            names = [n for n in z.namelist() if n.lower().endswith(".csv")]
-            if len(names) != 1:
-                raise EodRejected("bhavcopy zip should hold exactly one CSV")
-            data = z.read(names[0])
-    return data.decode("utf-8-sig")
+    """The CSV inside a bhavcopy. A truncated or corrupt zip, or text that is
+    not UTF-8, is a rejected file, never a traceback."""
+    try:
+        if data[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = [n for n in z.namelist() if n.lower().endswith(".csv")]
+                if len(names) != 1:
+                    raise EodRejected("bhavcopy zip should hold exactly one CSV")
+                data = z.read(names[0])
+        return data.decode("utf-8-sig")
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
+        raise EodRejected(f"the bhavcopy zip is damaged or incomplete ({exc})") from None
+    except UnicodeDecodeError:
+        raise EodRejected("the bhavcopy is not UTF-8 text") from None
 
 
 def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
@@ -121,6 +132,8 @@ def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
         key = (rank, -quote.price.micro_rupees)
         if prev is None or key < (prev[0], -prev[1].price.micro_rupees):
             best[isin] = (rank, quote)
+    if not best:
+        raise EodRejected("the bhavcopy has no price rows")
     return tuple(best[k][1] for k in sorted(best))
 
 
@@ -130,8 +143,9 @@ ATTEMPTS = 3
 
 def _get(url: str, timeout: float = 60) -> bytes | None:
     """GET a public file. None on 404 (no file for that day). A dropped
-    connection or a 5xx is retried twice, 2 s then 4 s later: NSE resets
-    connections from clients that ask again quickly."""
+    connection (reset, or closed mid-download), or a 5xx, is retried twice,
+    2 s then 4 s later: NSE resets connections from clients that ask again
+    quickly."""
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     for attempt in range(ATTEMPTS):
         try:
@@ -142,7 +156,7 @@ def _get(url: str, timeout: float = 60) -> bytes | None:
                 return None
             if exc.code < 500 or attempt == ATTEMPTS - 1:
                 raise
-        except OSError:
+        except (OSError, http.client.HTTPException):
             if attempt == ATTEMPTS - 1:
                 raise
         _sleep(2 * 2**attempt)
@@ -158,7 +172,8 @@ def fetch_amfi() -> tuple[Quote, ...]:
 
 def fetch_bhavcopy(today: date, days_back: int = 7) -> tuple[Quote, ...]:
     """The newest bhavcopy on or before `today`, looking back over weekends
-    and holidays. Empty if none was found in `days_back` days."""
+    (not asked for) and holidays (404). Rejected if no weekday in `days_back`
+    days has a file, so a long NSE gap is reported, not silent."""
     for back in range(days_back + 1):
         day = today - timedelta(days=back)
         if day.weekday() >= 5:
@@ -166,7 +181,7 @@ def fetch_bhavcopy(today: date, days_back: int = 7) -> tuple[Quote, ...]:
         data = _get(NSE_URL.format(ymd=day.strftime("%Y%m%d")))
         if data is not None:
             return parse_bhavcopy(data)
-    return ()
+    raise EodRejected(f"no NSE bhavcopy found in the {days_back} days before {today}")
 
 
 def only(quotes: Iterable[Quote], isins: frozenset[Isin]) -> tuple[Quote, ...]:

@@ -216,3 +216,161 @@ def test_prices_print_exactly_with_two_decimals_at_least() -> None:
     assert _price_text(q("2378.851")) == "2,378.851"
     assert _price_text(q("94.4817")) == "94.4817"
     assert _price_text(q("0.5")) == "0.50"
+
+
+class _Resp:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> "_Resp":
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def test_a_download_cut_off_midway_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    calls: list[str] = []
+
+    class Cut(_Resp):
+        def read(self) -> bytes:
+            raise http.client.IncompleteRead(b"PK\x03", 9000)
+
+    def flaky(req: object, timeout: float) -> _Resp:
+        calls.append("x")
+        return Cut(b"") if len(calls) < 2 else _Resp(b"ok")
+
+    monkeypatch.setattr(eod.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(eod, "_sleep", lambda s: None)
+    assert eod._get("https://example.invalid/x") == b"ok"  # pyright: ignore[reportPrivateUsage]
+    assert len(calls) == 2
+
+
+def _damaged_zip() -> bytes:
+    whole = (EOD / "bhavcopy-sample.csv.zip").read_bytes()
+    return whole[: len(whole) // 2]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [_damaged_zip(), b"PK\x03\x04" + b"\x00" * 40, b"TradDt,ISIN\n\xff\xfe,x\n"],
+    ids=["truncated-zip", "junk-zip", "not-utf8"],
+)
+def test_a_damaged_bhavcopy_is_rejected_not_a_traceback(data: bytes) -> None:
+    with pytest.raises(eod.EodRejected):
+        eod.parse_bhavcopy(data)
+
+
+def test_import_of_a_truncated_zip_exits_2_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    bad = tmp_path / "cut.csv.zip"
+    bad.write_bytes(_damaged_zip())
+    result = runner.invoke(app, ["prices", "import", str(bad)])
+    assert result.exit_code == 2, result.output
+    assert "nothing was imported" in result.output
+    assert not (tmp_path / "prices.db").exists()
+
+
+def test_fetch_keeps_amfi_when_the_nse_download_is_damaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    amfi = eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text())
+    monkeypatch.setattr(eod, "fetch_amfi", lambda: amfi)
+    monkeypatch.setattr(eod, "_get", lambda url: _damaged_zip())
+    result = runner.invoke(app, ["prices", "fetch", "--json"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["read"] == len(amfi) > 0  # the AMFI prices were not thrown away
+    assert len(report["failed"]) == 1 and report["failed"][0].startswith("NSE")
+
+
+def test_an_empty_price_file_is_rejected() -> None:
+    with pytest.raises(eod.EodRejected):
+        eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text().splitlines()[0] + "\n")
+    with pytest.raises(eod.EodRejected):
+        eod.parse_bhavcopy(b"TradDt,ISIN,SctySrs,ClsPric\n")
+
+
+def test_value_rounds_half_even_to_the_paisa() -> None:
+    isin = "INF179K01BB8"
+    book = PriceBook.best([_q(isin, date(2026, 11, 14), "2378.851", "amfi")])
+    # 1000.648 x 2378.851 = 2380392.495448: rounds up to .50, truncation gives .49
+    assert book.value(parse_isin(isin), Qty.parse("1000.648")) == Money.rupees("2380392.50")
+    half = PriceBook.best([_q(isin, date(2026, 11, 14), "5", "amfi")])
+    # 0.003 x 5 = 0.015 (half): to even .02; 0.001 x 5 = 0.005: to even .00
+    assert half.value(parse_isin(isin), Qty.parse("0.003")) == Money.rupees("0.02")
+    assert half.value(parse_isin(isin), Qty.parse("0.001")) == Money.rupees("0")
+
+
+def test_doctor_shows_the_latest_price_day_not_the_earliest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.put(
+            [
+                _q("INE009A01021", date(2026, 11, 3), "1400", "bhavcopy"),
+                _q("INE009A01021", date(2026, 11, 14), "1500", "bhavcopy"),
+            ]
+        )
+    checks = {
+        c["name"]: c for c in json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+    }
+    assert "latest 2026-11-14" in checks["quotes"]["detail"]
+    assert "2 end-of-day prices" in checks["quotes"]["detail"]
+
+
+def test_a_holiday_404_looks_back_and_weekends_are_never_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[str] = []
+    data = (EOD / "bhavcopy-sample.csv.zip").read_bytes()
+
+    def get(url: str) -> bytes | None:
+        ymd = url.split("_0_0_0_")[1][:8]
+        asked.append(ymd)
+        return data if ymd == "20261112" else None  # Thu has a file; Fri a holiday
+
+    monkeypatch.setattr(eod, "_get", get)
+    # Monday 16 Nov: Mon 404, Sun and Sat skipped, Fri 404, Thu found.
+    assert eod.fetch_bhavcopy(date(2026, 11, 16))
+    assert asked == ["20261116", "20261113", "20261112"]
+
+
+def test_a_week_with_no_nse_file_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(eod, "_get", lambda url: None)
+    with pytest.raises(eod.EodRejected, match="no NSE bhavcopy"):
+        eod.fetch_bhavcopy(date(2026, 11, 16))
+
+
+@pytest.mark.parametrize("content", [b"", b"not a database at all, just text"])
+def test_an_empty_or_foreign_prices_db_means_no_prices_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    (tmp_path / "prices.db").write_bytes(content)
+    doctor = runner.invoke(app, ["doctor", "--json"])
+    checks = {c["name"]: c for c in json.loads(doctor.output)["checks"]}
+    assert checks["quotes"]["detail"] == "no prices yet"
+    holdings = runner.invoke(app, ["holdings"])
+    assert holdings.exit_code == 0, holdings.output
+    assert "no prices yet" in holdings.output
+
+
+def test_prices_db_is_private(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    path = tmp_path / "prices.db"
+    with PriceStore.open(path, write=True):
+        pass
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
