@@ -266,6 +266,22 @@ def test_concentration_tone_follows_the_25_percent_line() -> None:
     assert cov.headline == "You're up ₹500 (50.0%) on what you hold."
 
 
+def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
+    from decimal import Decimal
+
+    buy = Trade(1, 5, True, Decimal("10.000"), Decimal("1000.00"), None)
+    mf = {fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}
+    shares: list[dict[str, int]] = [{i: 100 for i in STOCKS}] * MONTHS
+    book = _book([_statement(mf, 1, 1), _demat(shares, 1, 1)])
+    every: dict[str, int] = {i: 1_000 * 1_000_000 for i in (fx.HDFC_MF, fx.ICICI_MF)}
+    every |= {i: 100 * 1_000_000 for i in STOCKS}  # 5 x Rs 10,000
+    ins = concentration(book, _prices(every))
+    assert ins is not None
+    assert ins.headline == "Your largest holding is 20.0% of your money."
+    assert ins.numbers["top3_bps"] == 6_000
+    assert ins.tone == "warn"  # the top 3 are over half
+
+
 def test_pct_rounds_half_even_to_one_decimal() -> None:
     assert pct(8183) == "81.8%"
     assert pct(8185) == "81.8%"  # 818.5 tenths -> 818 (even)
