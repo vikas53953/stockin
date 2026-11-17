@@ -547,6 +547,25 @@ def test_unknown_cost_advice_depends_on_where_the_units_are() -> None:
     assert "Demat" not in fund.detail
 
 
+def test_one_holding_at_exactly_25_percent_is_not_over_the_line() -> None:
+    ps: dict[str, int] = {fx.HDFC_MF: 2_500 * 1_000_000, fx.ICICI_MF: 1_875 * 1_000_000}
+    ps |= {i: 187_500_000 for i in STOCKS}  # Rs 25,000 then 4 x Rs 18,750
+    ins = concentration(_five_holdings(), _prices(ps))
+    assert ins is not None
+    assert ins.headline == "Your largest holding is 25.0% of your money."
+    nudge = concentration(_five_holdings(), _prices(ps | {fx.HDFC_MF: 2_500_010_000}))
+    assert nudge is not None and nudge.headline.startswith("One holding is 25.0%")
+
+
+def test_the_headline_share_rounds_once_from_the_money() -> None:
+    buy = _trade(1, 5)
+    book = _book([_statement({fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}, 1, 1)])
+    # 8,185.49 of 10,000.00: 81.8549% -> 81.9% (via 8185 bps it would be 81.8%)
+    ins = concentration(book, _prices({fx.HDFC_MF: 818_549_000, fx.ICICI_MF: 181_451_000}))
+    assert ins is not None
+    assert ins.headline == "One holding is 81.9% of your money."
+
+
 def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
     buy = _trade(1, 5)
     mf = {fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}
