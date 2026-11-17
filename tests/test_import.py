@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 
 from stockin.book import reconcile
 from stockin.cli import app
-from stockin.facts import Balance, Buy, Complete, Coverage, Sell, Txn
+from stockin.facts import Balance, Buy, Complete, Coverage, Income, Sell, Txn
 from stockin.money import Money, Qty
 from stockin.sources import cas
 from stockin.store import Ledger, LedgerMissing, LedgerWriter
@@ -136,7 +136,7 @@ def test_reversal_cancels_its_pair() -> None:
                 fx.txn("2026-01-06", "STAMP_DUTY_TAX", None, "0.05"),
             ],
             "10",
-            "no buy that day",
+            "no purchase that day",
         ),
     ],
 )
@@ -215,7 +215,7 @@ def test_redemption_without_an_amount_is_rejected() -> None:
                 fx.txn("2026-01-06", "REDEMPTION", "-10", "-5"),
                 fx.txn("2026-01-06", "STT_TAX", None, "6"),
             ],
-            "larger than the proceeds",
+            "larger than the amount",
         ),
     ],
 )
@@ -225,6 +225,53 @@ def test_amounts_we_cannot_represent_exactly_are_rejected(
     close = "0" if any(t["type"] == "REDEMPTION" for t in txns) else "10"
     with pytest.raises(cas.CasRejected, match=reason):
         cas.from_casparser(_rta(txns, close=close), "sha")
+
+
+def _income(st: Any) -> list[Money]:
+    return [f.event.amount for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Income)]
+
+
+def test_tds_on_an_idcw_payout_comes_off_the_payout() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-02-25", "DIVIDEND_PAYOUT", None, "12124.43"),
+        fx.txn("2026-02-25", "TDS_TAX", None, "1212.44"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    assert _income(st) == [Money.rupees("10911.99")]
+
+
+def test_tds_after_a_reinvestment_is_already_deducted() -> None:
+    """The reinvested amount is what was left after TDS: Income equals the
+    Buy, and the TDS row does not take it off a second time."""
+    txns = [
+        fx.txn("2026-02-25", "DIVIDEND_REINVEST", "10", "900"),
+        fx.txn("2026-02-25", "TDS_TAX", None, "100"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    assert _income(st) == [Money.rupees("900")]
+    (buy,) = [f.event for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Buy)]
+    assert buy.amount == Money.rupees("900")
+
+
+def test_tds_on_a_redemption_still_comes_off_the_proceeds() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-06", "REDEMPTION", "-10", "1100"),
+        fx.txn("2026-01-06", "TDS_TAX", None, "10"),
+    ]
+    st = cas.from_casparser(_rta(txns, close="0"), "sha")
+    (sell,) = [f.event for f in st.facts if isinstance(f, Txn) and isinstance(f.event, Sell)]
+    assert sell.amount == Money.rupees("1090")
+
+
+def test_tds_with_nothing_to_come_off_is_rejected() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-05", "TDS_TAX", None, "10"),
+    ]
+    with pytest.raises(cas.CasRejected, match="follows no redemption or IDCW payout"):
+        cas.from_casparser(_rta(txns), "sha")
 
 
 @pytest.mark.parametrize(
