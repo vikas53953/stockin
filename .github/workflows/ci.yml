@@ -26,3 +26,38 @@ jobs:
           uv tool install .
           mkdir -p "$RUNNER_TEMP/data"
           STOCKIN_DATA="$RUNNER_TEMP/data" stockin doctor --json
+
+  # The owner runs Stockin on Windows. These are the checklist's own
+  # PowerShell lines, one command per line, in Windows PowerShell 5.1 and 7.
+  windows-install:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install (as the checklist does, from this checkout)
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          uv tool install .
+          uv tool update-shell
+      - name: Data folder, doctor, import, reconcile
+        run: |
+          $env:PATH = "$(uv tool dir --bin);$env:PATH"
+          New-Item -ItemType Directory -Force "$HOME\stockin-data" | Out-Null
+          $env:STOCKIN_DATA = "$HOME\stockin-data"
+          stockin doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin import cas tests\fixtures\cas\mf-2026-01.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin import cas tests\fixtures\cas\mf-2026-01.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin reconcile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
