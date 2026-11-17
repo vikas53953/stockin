@@ -1,0 +1,29 @@
+# Real personal data never leaves the server. This repository is public.
+data/
+raw/
+*.pdf
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+!tests/fixtures/**/*.csv
+.env
+.env.*
+secrets*
+*.age
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Tooling
+.DS_Store
+node_modules/
