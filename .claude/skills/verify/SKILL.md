@@ -44,7 +44,9 @@ The per-feature recipes are in [features/README.md](features/README.md).
 
 - For each command, save the command, its stdout, stderr and exit code to `$RUN/evidence/<feature>-<step>.txt`.
 - For a command that writes, also save a second read-only view of the result, such as `stockin doctor --json` or, once it lands, `stockin reconcile --json`.
-- Put the evidence directory's listing and the key lines in the PR's Verification section.
+- **Before and after, always.** For every step that writes or shows something, capture the state before the step and after it: a Playwright screenshot of the page for web steps (`page.screenshot({path, fullPage: true})`), and a read-only `--json` view for CLI steps. Name them `<step>-before.png` / `<step>-after.png` (or `.txt`).
+- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/` and put `sha256sum` of every file in the verdict comment, with the key lines. A verdict without this list is not a verdict.
+- Fixtures only: screenshots must show synthetic data. Never screenshot a real ledger.
 
 ## Cleanup
 
