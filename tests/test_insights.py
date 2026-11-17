@@ -32,7 +32,7 @@ from stockin.insights import (
     weights,
     what_changed,
 )
-from stockin.money import Money, Price
+from stockin.money import Money, Price, div_half_even
 from stockin.prices import PriceBook, Quote
 from stockin.sources import cas
 
@@ -80,6 +80,14 @@ def test_every_sentence_is_built_from_its_own_numbers(
             assert [p.value for p in ins.series] == sorted(
                 (p.value for p in ins.series), reverse=True
             )
+            # recomputed here from the chart's own series, not read back
+            vals = [p.value for p in ins.series]
+            total = sum(vals)
+            assert n["top_bps"] == div_half_even(vals[0] * 10_000, total)
+            assert n["top3_bps"] == div_half_even(sum(vals[:3]) * 10_000, total)
+            over_one = int(n["top_bps"]) > 2_500
+            assert ins.headline.startswith("One holding is") == over_one
+            assert (ins.tone == "warn") == (over_one or int(n["top3_bps"]) > 5_000)
         elif ins.kind == "cost_coverage":
             if int(n["unknown_bps"]) > 0:
                 assert pct(int(n["unknown_bps"])) in ins.headline
