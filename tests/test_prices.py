@@ -396,6 +396,7 @@ def test_fetch_keeps_amfi_when_nse_keeps_cutting_off(
     report = json.loads(result.output)
     assert report["read"] == len(amfi)
     assert len(report["failed"]) == 1 and report["failed"][0].startswith("NSE")
+    assert "unexpected" not in report["failed"][0]  # a known failure, said plainly
 
 
 def _foreign_sqlite(path: Path) -> None:
