@@ -119,8 +119,17 @@ def _csv_text(data: bytes) -> str:
 
 def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
     """Close price per ISIN from an NSE UDiFF cash-market bhavcopy (zip or
-    CSV). Prefers the EQ series when an ISIN trades in several."""
-    reader = csv.DictReader(io.StringIO(_csv_text(data)))
+    CSV). Prefers the EQ series when an ISIN trades in several. A CSV the
+    csv module cannot read (a stray quote, a bare CR) is rejected."""
+    text = _csv_text(data)
+    try:
+        return _bhavcopy_rows(text)
+    except csv.Error as exc:
+        raise EodRejected(f"the bhavcopy CSV is damaged ({exc})") from None
+
+
+def _bhavcopy_rows(text: str) -> tuple[Quote, ...]:
+    reader = csv.DictReader(io.StringIO(text))
     need = {"TradDt", "ISIN", "SctySrs", "ClsPric"}
     if reader.fieldnames is None or not need <= set(reader.fieldnames):
         raise EodRejected("not an NSE UDiFF bhavcopy (missing TradDt/ISIN/SctySrs/ClsPric)")

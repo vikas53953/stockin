@@ -563,3 +563,54 @@ def test_an_unexpected_error_in_one_source_keeps_the_other(
     report = json.loads(result.output)
     assert report["read"] == len(amfi)
     assert report["failed"] == ["NSE: unexpected KeyError: 'something nobody planned for'"]
+
+
+def test_every_single_byte_flip_of_a_bhavcopy_csv_parses_or_is_rejected() -> None:
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    good = eod.parse_bhavcopy(whole)
+    for i in range(len(whole)):
+        for new in (0x0D, 0x22, 0x00, whole[i] ^ 0x01):  # CR, quote, NUL, a bit
+            data = bytearray(whole)
+            data[i] = new
+            try:
+                got = eod.parse_bhavcopy(bytes(data))
+            except eod.EodRejected:
+                continue
+            # a plain CSV has no checksum: a changed digit can still parse, but
+            # nothing may escape as an exception other than EodRejected
+            assert isinstance(got, tuple), (i, new)
+    assert good
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\r" + (EOD / "bhavcopy-sample.csv").read_bytes()[1:],
+        b'TradDt,ISIN,SctySrs,ClsPric\n2026-11-14,INE009A01021,EQ,"' + b"9" * 200_000 + b"\n",
+    ],
+    ids=["bare-cr", "field-too-large"],
+)
+def test_a_csv_the_csv_module_cannot_read_is_rejected(data: bytes) -> None:
+    with pytest.raises(eod.EodRejected):
+        eod.parse_bhavcopy(data)
+
+
+def test_a_sqlite_prices_db_without_our_table_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    db = tmp_path / "prices.db"
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE notes(x)")
+    before = db.read_bytes()
+    result = runner.invoke(app, ["prices", "import", str(EOD / "bhavcopy-sample.csv")])
+    assert result.exit_code == 2, result.output
+    assert db.read_bytes() == before
+
+
+def test_fetch_amfi_reads_a_navall_with_a_byte_order_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = b"\xef\xbb\xbf" + (EOD / "NAVAll-sample.txt").read_bytes()
+    monkeypatch.setattr(eod, "_get", lambda url: body)
+    assert eod.fetch_amfi() == eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text())
