@@ -137,11 +137,12 @@ Rejected:
 
 ## Implementation reconciliation
 
-Empty until the scaffold PR.
+- **Max weight is measured against market holdings** (stocks, MFs and ETFs only). The owner decided this on 2026-11-17, closing the first open question.
+- **`Book` is a plain class, not a pydantic `Value`.** It is never serialized, and it caches one `Timeline` per (account, ISIN). The shared contract (`Book.of`, `timeline`, `holdings`, `positions`, `reconcile`) is unchanged. Accepted in the fold PR.
+- **An oversell gets a `mismatch` check dated at the sell.** It consumes only what is held, so quantities never go negative. The sketch said "stop pair"; this keeps the rest of the timeline visible instead. Accepted in the fold PR.
 
 ## Open questions and risks
 
-- **Max weight:** is `--max-weight 8` measured as 8% of your market holdings (the sketch's choice) or of total net worth including EPF, PPF, FD and gold? The answer changes every trim verdict.
 - **Headroom:** is 1 percentage point the right headroom for `add-eligible`? Without some headroom, the README's rule makes `hold` unreachable.
 - **FD interest:** do FDs compound quarterly? And should EPF and PPF accrue between the balances you enter? The sketch says no.
 - **Gold price:** should it come from IBJA, MCX EOD, or your own entry?
