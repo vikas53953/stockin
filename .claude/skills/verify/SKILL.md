@@ -54,9 +54,10 @@ The per-feature recipes are in [features/README.md](features/README.md).
   const video = page.video();
   await ctx.close();                   // closing the context writes the .webm
   await video.saveAs(`${EV}/<feature>-flow.webm`);
+  await video.delete();                // drop Playwright's own copy in $EV/video
   await browser.close();
   ```
-- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then run `sha256sum` **in that folder, after copying** (the share adds metadata to PNGs, so a hash taken before the copy will not match). Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
+- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then hash **in that folder, after the share has finished with the files**: the share adds a metadata chunk to each PNG a few seconds after the copy (pixels unchanged), so wait until `sha256sum` gives the same answer twice 30 seconds apart, then save it as `SHA256SUMS` and re-check it with `sha256sum -c` before posting. Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
 - Fixtures only: screenshots must show synthetic data. Never screenshot a real ledger.
 
 ## Cleanup
