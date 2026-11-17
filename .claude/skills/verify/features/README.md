@@ -17,9 +17,9 @@ Each feature file has an H1 and one paragraph, followed by four H2s: `Sub-featur
 | Feature | Status |
 |---|---|
 | [Doctor](./doctor.md) | Working |
-| Import a CAS (`stockin import cas`) | Not built yet |
+| [Import a CAS and list holdings](./import-cas.md) | Working |
 | Add a manual asset (`stockin asset add`) | Not built yet |
-| Reconcile (`stockin reconcile`) | Not built yet |
+| [Reconcile](./reconcile.md) | Working |
 | Net worth (`stockin networth`) | Not built yet |
 | Thesis and review (`stockin thesis add`, `stockin review`) | Not built yet |
 

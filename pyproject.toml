@@ -5,6 +5,7 @@ description = "Private, read-only add/trim/exit decisions for one investor in In
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "casparser>=1.4.1,<2",
     "pydantic>=2.9,<3",
     "typer>=0.12",
 ]

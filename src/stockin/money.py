@@ -133,6 +133,11 @@ class Qty(Value):
         """Boundary parser ("152.347"). Raises on >6 decimals or a sign."""
         return cls(micros=_parse_scaled(text, 6, signed=False))
 
+    def __str__(self) -> str:
+        """Exact, trailing zeros dropped: 152.347, 10, 0.000001."""
+        whole, frac = divmod(self.micros, 1_000_000)
+        return f"{whole}.{frac:06d}".rstrip("0").rstrip(".")
+
 
 class QtyDelta(Value):
     """Signed change in quantity, in micro-units."""

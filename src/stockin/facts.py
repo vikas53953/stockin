@@ -280,3 +280,4 @@ class Statement(Value):
     instruments: tuple[Instrument, ...]
     accounts: tuple[Account, ...]
     facts: tuple[StatementFact, ...]
+    warnings: tuple[str, ...] = ()
