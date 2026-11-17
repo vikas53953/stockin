@@ -28,7 +28,8 @@ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{font:12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 td.num,th.num{text-align:right}
-td.name{white-space:normal;min-width:140px}
+td.name{white-space:normal;min-width:120px}
+@media (max-width:560px){th,td{padding:8px 5px}th{white-space:normal}}
 tr:last-child td{border-bottom:0}
 .acct{font-weight:600;padding-top:14px}
 .isin{font:12.5px var(--mono);color:var(--muted)}

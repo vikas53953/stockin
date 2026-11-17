@@ -266,12 +266,21 @@ def test_null_scheme_is_rejected_not_crashed(tmp_path: Path) -> None:
         cas.read(path)
 
 
-def test_wrong_pdf_password_is_said_in_plain_words() -> None:
-    class IncorrectPasswordError(Exception):
-        pass
+_BLANK_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
 
-    msg = cas._pdf_reason("my.pdf", IncorrectPasswordError("pw=secret"))  # pyright: ignore[reportPrivateUsage]
-    assert "wrong password for my.pdf" in msg and "secret" not in msg
+
+@pytest.mark.parametrize("body", [_BLANK_PDF, b"\x00\x01 not a pdf at all " * 50])
+def test_a_pdf_that_is_not_a_cas_is_said_in_plain_words(tmp_path: Path, body: bytes) -> None:
+    path = tmp_path / "statement.pdf"
+    path.write_bytes(body)
+    with pytest.raises(cas.CasRejected, match="does not look like a CAS") as err:
+        cas.read(path, "some-password")
+    assert "some-password" not in str(err.value)
 
 
 def test_ledger_file_is_private(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Literal
 
 from casparser import read_cas_pdf  # pyright: ignore[reportUnknownVariableType]
+from casparser.exceptions import IncorrectPasswordError, ParserException
 from casparser.types import CASData, DematAccount, NSDLCASData, Scheme, TransactionData
 
 from ..facts import (
@@ -77,8 +78,7 @@ def read(path: Path, password: str = "") -> Statement:
         return from_casparser(data, sha)
     except CasRejected:
         raise
-    except (ValueError, ArithmeticError, AttributeError, TypeError) as exc:
-        # a value our domain types refuse, or a field casparser left empty
+    except (ValueError, ArithmeticError) as exc:  # a value our domain types refuse
         raise CasRejected(_why(exc)) from None
 
 
@@ -93,21 +93,23 @@ def _from_json(raw: bytes) -> CASData | NSDLCASData:
         if "folios" in body:
             return CASData.model_validate(body)
         return NSDLCASData.model_validate(body)
-    except (ValueError, ArithmeticError, AttributeError, TypeError) as exc:
-        # pydantic's ValidationError is a ValueError; casparser's own
-        # validators raise AttributeError on a null object
+    except (ValueError, ArithmeticError) as exc:  # pydantic's ValidationError is a ValueError
         raise CasRejected(f"not a valid casparser statement ({_why(exc)})") from None
+    except (AttributeError, TypeError):  # casparser's own validators on a null section
+        raise CasRejected("not a valid casparser statement (a section is empty)") from None
 
 
 def _pdf_reason(filename: str, exc: BaseException) -> str:
     """Plain words for the PDF failures people actually hit. Never includes
     the password: casparser's own messages are not passed through."""
-    kind = type(exc).__name__
-    if "Password" in kind:
+    if isinstance(exc, IncorrectPasswordError):
         return f"wrong password for {filename} (it is usually your PAN in capitals)"
-    if "Header" in kind or "Incomplete" in kind or "Unsupported" in kind:
-        return f"{filename} does not look like a CAS from CAMS, KFintech, NSDL or CDSL"
-    return f"could not read {filename} ({kind})"
+    if isinstance(exc, ParserException):
+        return (
+            f"{filename} does not look like a CAS from CAMS, KFintech, NSDL or CDSL "
+            "(download the detailed CAS PDF, not a portfolio summary or screenshot)"
+        )
+    return f"could not read {filename} ({type(exc).__name__})"
 
 
 def _why(exc: BaseException) -> str:

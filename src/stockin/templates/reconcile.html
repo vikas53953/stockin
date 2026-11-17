@@ -8,13 +8,13 @@
   {% if ok %}<span class="chip ok">OK: no mismatches</span>{% else %}<span class="chip bad">{{ summary.mismatch }} mismatch</span>{% endif %}
   <span class="chip">{{ summary.match }} match</span><span class="chip warn">{{ summary.inferred }} inferred</span>
 </div>
-<p class="muted"><b>Match</b>: the statement and the transactions agree. <b>Inferred</b>: the statement gave a balance but no trades for that window (normal for demat). <b>Mismatch</b>: a statement contradicts the transactions inside a window it covers.</p>
+<p class="muted"><b>Match</b>: the statement and the transactions agree. <b>Inferred</b>: the statement (Stated) gave a balance but no trades for that window (normal for demat). <b>Mismatch</b>: a statement contradicts the transactions inside a window it covers.</p>
 <section class="panel scroll"><table>
-  <thead><tr><th>Status</th><th>Date</th><th>Name</th><th>Account</th><th class="num">Statement</th><th class="num">Transactions</th></tr></thead>
+  <thead><tr><th>Check</th><th>Holding</th><th class="num">Stated</th><th class="num">Trades</th></tr></thead>
   <tbody>
   {% for c in checks %}
-  <tr><td class="status-{{ c.status }}">{{ c.status }}{% if c.kind == "oversell" %} (sell){% endif %}</td><td>{{ c.on }}</td>
-    <td class="name">{{ c.name }}<br><span class="isin">{{ c.isin }}</span></td><td>{{ c.account }}</td>
+  <tr><td><span class="status-{{ c.status }}">{{ c.status }}{% if c.kind == "oversell" %} (sell){% endif %}</span><br><span class="isin">{{ c.on }}</span></td>
+    <td class="name">{{ c.name }}<br><span class="isin">{{ c.isin }} · {{ c.account }}</span></td>
     <td class="num">{{ c.stated }}</td><td class="num">{{ c.computed }}</td></tr>
   {% endfor %}
   </tbody>
