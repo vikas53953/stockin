@@ -18,6 +18,7 @@ A private, read-only app for one investor in Indian markets. It answers one ques
 - **Pipeline changes are logged.** Any change to how we build or check (a new rule, gate or evidence type) adds a row to `docs/PIPELINE.md`: date, rule, why, and later what it caught.
 - **Lessons are kept.** Every owner pushback, every verifier FAIL and every sprint retro adds an entry to `docs/LEARNINGS.md`: what happened, the lesson, the rule, and what it caught since.
 - **Process docs are checked like code.** `docs/PIPELINE.md` and `docs/LEARNINGS.md` claim only what PR comments and git history show; a verifier audits them against that record. Work still in verification is described as in verification.
+- **Insights are computed, not written (from the owner's moat, 2026-11-17).** Every insight sentence is built by code from the same numbers as the chart beside it, and a test asserts they agree. No model writes a number. A UI direction goes to the owner as options before it is built.
 - **Never claim a check that has not run.** A PR body or reply describes only checks that have already run, with their evidence; anything not yet run is listed as unverified.
 - **Merged is not released.** Main moves on a passing verdict, but a version tag (`v0.N`) is created only after the owner has used that sprint end to end and said it works. Each sprint ends with a short retro: what slipped, and the check that now catches it.
 
