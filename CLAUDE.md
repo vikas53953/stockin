@@ -15,6 +15,7 @@ A private, read-only app for one investor in Indian markets. It answers one ques
 - **Agent goes first on UAT (owner, 2026-11-17).** Before asking the owner to do any test step, an agent runs that exact step as an end user: the installed app, realistic synthetic data (password-protected PDFs where the owner would use PDFs), a real browser. It reports each step's honest pass or fail with evidence. The owner's run is the final confirmation, never the first.
 - **Evidence or it did not happen (owner, 2026-11-17).** Every test and verification step saves a before and an after screenshot (for anything with a screen), a video of any multi-step browser flow, and the raw command output with its exit code. The files go to `/mnt/project-files/stockin/evidence/pr-<N>/`, and the verdict comment lists each file with its sha256. A `PASS` without that evidence is not a pass and does not merge.
 - **Pipeline changes are logged.** Any change to how we build or check (a new rule, gate or evidence type) adds a row to `docs/PIPELINE.md`: date, rule, why, and later what it caught.
+- **Lessons are kept.** Every owner pushback, every verifier FAIL and every sprint retro adds an entry to `docs/LEARNINGS.md`: what happened, the lesson, the rule, and what it caught since.
 - **Merged is not released.** Main moves on a passing verdict, but a version tag (`v0.N`) is created only after the owner has used that sprint end to end and said it works. Each sprint ends with a short retro: what slipped, and the check that now catches it.
 
 ## Hard rules

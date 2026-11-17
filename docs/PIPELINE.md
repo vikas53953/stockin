@@ -6,7 +6,7 @@ changes, in the same PR as the change. A rule that has never caught anything
 after a sprint is a candidate to drop at the retro.
 
 The rules themselves live in `CLAUDE.md` and `.claude/skills/verify/`; this
-file is their history.
+file is their history. The stories behind them are in [LEARNINGS.md](LEARNINGS.md).
 
 ## The flow today
 
@@ -39,3 +39,4 @@ file is their history.
 | 6 | 2026-11-17 | Agent goes first on UAT: before the owner tests, an agent runs the same checklist as an end user on realistic, password-protected synthetic PDFs | The owner was about to test PDF import that had only been tested with JSON | TDS on an IDCW payout rejected the whole CAS (#12). Cost shows unknown for funds held before the statement starts (checklist now says to download from first investment). Checklist said CDSL uses PAN + DOB; CDSL's FAQ says PAN |
 | 7 | 2026-11-17 | Evidence or it did not happen: before and after screenshots plus raw output with exit codes, saved under `evidence/pr-<N>/` and hashed (sha256) in the verdict | A green tick with nothing behind it can be fake | Applied from #11 on |
 | 8 | 2026-11-17 | Multi-step browser flows are also recorded as a video (Playwright `recordVideo`), hashed like the screenshots | A video shows the order of steps and what happened between screenshots | Applied from this PR on: the drop 1 checklist run is recorded |
+| 9 | 2026-11-17 | Lessons are kept in `docs/LEARNINGS.md`: every pushback, verifier FAIL and retro adds an entry | Lessons were living only in chat and would be lost between threads | Seeded with 9 lessons from drop 1 |
