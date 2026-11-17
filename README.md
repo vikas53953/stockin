@@ -10,12 +10,16 @@ This walkthrough takes you from an empty install to a review of every holding yo
 
 ### 1. Install
 
+> **Working.** `stockin doctor` runs today.
+
 On your server, behind Tailscale:
 
 ```bash
-uv tool install stockin
+uv tool install git+https://github.com/vikas53953/stockin
 stockin doctor
 ```
+
+Stockin keeps its data in `./data`, or wherever `STOCKIN_DATA` points.
 
 `doctor` checks the database, the data folder, and each configured source, and prints what is missing.
 
