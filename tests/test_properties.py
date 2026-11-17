@@ -287,12 +287,13 @@ def test_holdings_do_not_depend_on_fact_order(
     assert {h.isin: h.qty for h in one.holdings()} == expected  # right, not just consistent
 
 
-def _fifo(trades: list[Trade], upto: int) -> tuple[int, int]:
-    """An independent model of cost: (cost paise of what is held, total
-    proceeds paise of every sell). FIFO lots; stamp duty adds to a buy's cost,
-    STT comes off a sell's proceeds; a part-lot's cost is its half-even share."""
+def _fifo(trades: list[Trade], upto: int) -> tuple[int, list[tuple[int, int, int]]]:
+    """An independent model of cost: (cost paise of what is held, and one
+    (micros, cost paise, proceeds paise) per lot each sell touches). FIFO lots;
+    stamp duty adds to a buy's cost, STT comes off a sell's proceeds; a
+    part-lot's cost, and each lot's part of the proceeds, is its half-even share."""
     lots: list[list[int]] = []  # [micros, cost paise]
-    proceeds = 0
+    disposals: list[tuple[int, int, int]] = []
     for t in trades:
         if t.month > upto:
             continue
@@ -301,15 +302,18 @@ def _fifo(trades: list[Trade], upto: int) -> tuple[int, int]:
         if t.buy:
             lots.append([micros, paise + tax])
             continue
-        proceeds += paise - tax
+        proceeds = paise - tax
         while micros:
             lot = lots[0]
             take = min(lot[0], micros)
-            share = round(Fraction(lot[1] * take, lot[0]))
-            lot[0], lot[1], micros = lot[0] - take, lot[1] - share, micros - take
+            cost = round(Fraction(lot[1] * take, lot[0]))
+            part = round(Fraction(proceeds * take, micros))
+            disposals.append((take, cost, part))
+            lot[0], lot[1] = lot[0] - take, lot[1] - cost
+            micros, proceeds = micros - take, proceeds - part
             if not lot[0]:
                 lots.pop(0)
-    return sum(c for _, c in lots), proceeds
+    return sum(c for _, c in lots), disposals
 
 
 @given(histories(one_trade_a_day=True), st.integers(1, MONTHS))
@@ -317,16 +321,44 @@ def test_cost_and_proceeds_match_an_independent_fifo_model(
     history: dict[str, list[Trade]], last: int
 ) -> None:
     """Money, not just units: a statement from the first month on gives every
-    lot, so cost and proceeds are fully known and must match the model."""
+    lot, so held cost and every disposal's cost and proceeds are fully known
+    and must match the model lot by lot (each disposal's gain depends on it)."""
     book = Book.of(cas.from_casparser(_statement(history, 1, last), "sha").facts)
     held = {h.isin: h for h in book.holdings()}
     for acct, isin in book.pairs():
-        cost, proceeds = _fifo(history[isin], last)
-        timeline = book.timeline(acct, isin)
-        got = sum(d.proceeds.paise for d in timeline.disposals if d.proceeds is not None)
-        assert got == proceeds
+        cost, disposals = _fifo(history[isin], last)
+        got = [
+            (
+                d.qty.micros,
+                d.cost.paise if d.cost else None,
+                d.proceeds.paise if d.proceeds else None,
+            )
+            for d in book.timeline(acct, isin).disposals
+        ]
+        assert got == disposals
         if isin in held:
             assert held[isin].cost == Money(paise=cost)
+
+
+@given(histories(), st.integers(1, MONTHS))
+def test_money_is_conserved_whatever_the_same_day_order(
+    history: dict[str, list[Trade]], last: int
+) -> None:
+    """Holds even with several trades on one day, where lot order is by fact
+    id: every rupee paid in is either still held or sold, and every rupee of
+    net sale proceeds lands in exactly one disposal."""
+    book = Book.of(cas.from_casparser(_statement(history, 1, last), "sha").facts)
+    held = {h.isin: h for h in book.holdings()}
+    for acct, isin in book.pairs():
+        trades = [t for t in history[isin] if t.month <= last]
+        tax = {id(t): int(t.tax * 100) if t.tax is not None else 0 for t in trades}
+        paid = sum(int(t.amount * 100) + tax[id(t)] for t in trades if t.buy)
+        received = sum(int(t.amount * 100) - tax[id(t)] for t in trades if not t.buy)
+        disposals = book.timeline(acct, isin).disposals
+        h = held.get(isin)
+        held_cost = h.cost.paise if h is not None and h.cost is not None else 0
+        assert held_cost + sum(d.cost.paise for d in disposals if d.cost) == paid
+        assert sum(d.proceeds.paise for d in disposals if d.proceeds) == received
 
 
 @given(histories(), windows, st.randoms(use_true_random=False))
