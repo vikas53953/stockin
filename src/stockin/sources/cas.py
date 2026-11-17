@@ -186,8 +186,8 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
                 events.append((on, Income(amount=_money(amount, name))))
             events.append((on, Buy(units=_qty(units, name), amount=_money(amount, name))))
         elif kind in _SELL:
-            if units >= 0:
-                raise CasRejected(f"{name}: {kind} on {on} has non-negative units")
+            if units >= 0 or row.amount is None:
+                raise CasRejected(f"{name}: {kind} on {on} needs negative units and an amount")
             events.append((on, Sell(units=_qty(-units, name), amount=_money(abs(amount), name))))
         elif kind == "DIVIDEND_PAYOUT":
             events.append((on, Income(amount=_money(abs(amount), name))))
@@ -395,7 +395,7 @@ def _money(value: Decimal, name: str) -> Money:
     if not exact:
         raise CasRejected(f"{name}: amount {value} is not in whole paise")
     try:
-        return Money.rupees(format(value, "f"))
+        return Money.rupees(format(value.quantize(_PAISA), "f"))  # "1000.100" -> "1000.10"
     except (ValueError, ArithmeticError):
         raise CasRejected(f"{name}: bad amount {value}") from None
 
