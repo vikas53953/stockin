@@ -6,8 +6,10 @@ and the chart beside them cannot disagree (tests re-derive the sentence from
 `numbers`). No model writes a number. Stockin is read-only: a sentence may
 explain or suggest, never instruct a trade.
 
-Percentages are basis points (Bps) and money is paise throughout; the only
-rounding is `div_half_even`.
+Money is paise. A percentage in a sentence is tenths of a percent, rounded
+once (half-even) from the paise it comes from, so "97.652%" prints 97.7%,
+never a rounded-twice 97.6%. Chart series carry basis points or paise. The
+only rounding is `div_half_even`.
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ from datetime import date, timedelta
 from typing import Literal
 
 from .book import Book
-from .facts import Buy, Coverage, Income, Isin, Sell, Txn
-from .money import Bps, Money, Qty, Value, div_half_even
+from .facts import AccountId, Buy, Coverage, Income, Isin, Sell, Txn
+from .money import Bps, Money, Value, div_half_even
 from .prices import PriceBook
 
 Kind = Literal[
@@ -64,9 +66,13 @@ class Weight(Value):
 # ----------------------------------------------------------------- helpers
 
 
-def pct(bps: int) -> str:
-    """Bps to a percent with one decimal, half-even: 8183 -> '81.8%'."""
-    tenths = div_half_even(bps, 10)
+def tenths_of(part: int, whole: int) -> int:
+    """part / whole in tenths of a percent, rounded once, half-even."""
+    return div_half_even(part * 1_000, whole)
+
+
+def pct(tenths: int) -> str:
+    """Tenths of a percent to text: 818 -> '81.8%'."""
     sign = "-" if tenths < 0 else ""
     whole, frac = divmod(abs(tenths), 10)
     return f"{sign}{whole}.{frac}%"
@@ -96,7 +102,15 @@ def _group(kind: str, asset_class: str) -> str:
 
 
 def _short_name(name: str) -> str:
-    for cut in (" - Direct", " Direct Plan", " - Regular", " Fund -", " LIMITED", " LTD"):
+    for cut in (
+        " - Direct",
+        " Direct Plan",
+        " - Regular",
+        " Fund -",
+        " - EQ",
+        " LIMITED",
+        " LTD",
+    ):
         i = name.find(cut)
         if i > 0:
             name = name[:i]
@@ -136,37 +150,73 @@ def weights(book: Book, prices: PriceBook) -> tuple[tuple[Weight, ...], Money, t
     return out, total, tuple(sorted(unpriced))
 
 
+def _names(names: list[str]) -> str:
+    """'A', 'A and B', 'A, B and C'."""
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _unpriced_note(book: Book, unpriced: tuple[Isin, ...]) -> str:
+    if not unpriced:
+        return ""
+    names: list[str] = []
+    for i in unpriced:
+        inst = book.instrument(i)
+        names.append(_short_name(inst.name) if inst else i)
+    return (
+        f" {_plural(len(unpriced), 'holding')} ({_names(sorted(names))}) "
+        f"{'has' if len(unpriced) == 1 else 'have'} no price yet and "
+        f"{'is' if len(unpriced) == 1 else 'are'} left out."
+    )
+
+
 # ---------------------------------------------------------------- insights
 
 
 def concentration(book: Book, prices: PriceBook) -> Insight | None:
-    ws, total, _ = weights(book, prices)
+    """Largest holding and top 3 as shares of the priced value. Holdings with
+    no price are named and left out, and the sentence says "priced"."""
+    ws, total, unpriced = weights(book, prices)
     if not ws or total.paise <= 0:
         return None
     top = ws[0]
-    top3 = Bps(div_half_even(sum(w.value.paise for w in ws[:3]) * 10_000, total.paise))
-    hot = top.bps > CONCENTRATED_ONE or top3 > CONCENTRATED_TOP3
-    if top.bps > CONCENTRATED_ONE:
-        headline = f"One holding is {pct(top.bps)} of your money."
+    top_t = tenths_of(top.value.paise, total.paise)
+    top3_value = sum(w.value.paise for w in ws[:3])
+    top3_t = tenths_of(top3_value, total.paise)
+    fall10_t = tenths_of(top.value.paise, total.paise * 10)  # 10% of its share
+    over_one = top.value.paise * 10_000 > CONCENTRATED_ONE * total.paise
+    over_three = len(ws) > 3 and top3_value * 10_000 > CONCENTRATED_TOP3 * total.paise
+    of = "of what's priced" if unpriced else "of your money"
+    if over_one:
+        headline = f"One holding is {pct(top_t)} {of}."
     else:
-        headline = f"Your largest holding is {pct(top.bps)} of your money."
-    drop = div_half_even(top.bps, 10)  # a 10% fall in it moves the whole by bps/10
+        headline = f"Your largest holding is {pct(top_t)} {of}."
+    group = f"Your top 3 holdings are {pct(top3_t)} together. " if len(ws) > 3 else ""
     detail = (
-        f"{top.name}. Your top 3 holdings are {pct(top3)} together. "
-        f"If {top.name} falls 10%, your whole portfolio falls about {pct(drop)}. "
+        f"{top.name}. {group}"
+        f"If {top.name} falls 10%, your whole portfolio falls about {pct(fall10_t)}. "
         "A common rule of thumb is no more than 25% in one holding."
+        + _unpriced_note(book, unpriced)
     )
     return Insight(
         kind="concentration",
-        tone="warn" if hot else "good",
+        tone="warn" if over_one or over_three else "good",
         headline=headline,
         detail=detail,
         numbers={
-            "top_bps": top.bps,
-            "top3_bps": top3,
-            "fall10_bps": drop,
+            "top_tenths": top_t,
+            "top3_tenths": top3_t,
+            "fall10_tenths": fall10_t,
             "top_isin": top.isin,
+            "top_paise": top.value.paise,
             "total_paise": total.paise,
+            "holdings": len(ws),
+            "unpriced": len(unpriced),
         },
         unit="paise",
         series=tuple(
@@ -175,63 +225,75 @@ def concentration(book: Book, prices: PriceBook) -> Insight | None:
     )
 
 
+def _gain_words(gain: Money, cost: Money) -> tuple[str, int | None]:
+    """('up ₹2,726.72 (5.5%)', tenths) or ('even', 0). No percent when the
+    cost is zero (bonus units): a share of nothing is not a number."""
+    if gain.paise == 0:
+        return "even", (0 if cost.paise else None)
+    word = "up" if gain.paise > 0 else "down"
+    text = f"{word} {rupees(Money(paise=abs(gain.paise)))}"
+    if cost.paise <= 0:
+        return text, None
+    t = tenths_of(abs(gain.paise), cost.paise)
+    return f"{text} ({pct(t)})", t
+
+
 def cost_coverage(book: Book, prices: PriceBook) -> Insight | None:
-    ws, total, _ = weights(book, prices)
+    """Of the priced value, how much has a known cost, and the gain on it.
+    Unknown cost (bought before your statements) and no price are told apart."""
+    ws, total, unpriced = weights(book, prices)
     if not ws or total.paise <= 0:
         return None
     known = [w for w in ws if w.cost is not None]
     known_value = Money(paise=sum(w.value.paise for w in known))
     known_cost = Money(paise=sum(w.cost.paise for w in known if w.cost is not None))
+    unknown_value = total.paise - known_value.paise
     gain = known_value - known_cost
-    unknown_bps = Bps(10_000 - known_value.share_of(total)) if known else Bps(10_000)
-    gain_bps = Bps(div_half_even(gain.paise * 10_000, known_cost.paise)) if known_cost.paise else 0
+    unknown_t = tenths_of(unknown_value, total.paise)
+    words, gain_t = _gain_words(gain, known_cost)
     numbers: dict[str, int | str] = {
-        "unknown_bps": unknown_bps,
+        "unknown_tenths": unknown_t,
+        "unknown_value_paise": unknown_value,
+        "priced_value_paise": total.paise,
         "known_value_paise": known_value.paise,
         "known_cost_paise": known_cost.paise,
         "gain_paise": gain.paise,
-        "gain_bps": gain_bps,
+        "unpriced": len(unpriced),
     }
-    word = "up" if gain.paise >= 0 else "down"
-    if unknown_bps > 0:
-        headline = f"Gain is unknown for {pct(unknown_bps)} of your money."
+    if gain_t is not None:
+        numbers["gain_tenths"] = gain_t
+    of = "of what's priced" if unpriced else "of your money"
+    if unknown_value > 0:
+        headline = f"Gain is unknown for {pct(unknown_t)} {of}."
         detail = (
             "Your statements start after these holdings were bought, so their cost "
             "isn't known. A statement from your first investment fixes this."
         )
         if known:
-            detail += (
-                f" On the rest you're {word} {rupees(Money(paise=abs(gain.paise)))} "
-                f"({pct(abs(gain_bps))})."
-            )
+            detail += f" On the rest you're {words}."
         tone: Tone = "unknown"
     else:
-        headline = (
-            f"You're {word} {rupees(Money(paise=abs(gain.paise)))} "
-            f"({pct(abs(gain_bps))}) on what you hold."
-        )
+        what = "what's priced" if unpriced else "what you hold"
+        headline = f"You're {words} on {what}."
         detail = "Value at the latest closing prices, minus what you paid (FIFO, with charges)."
-        tone = "good" if gain.paise >= 0 else "warn"
+        tone = "good" if gain.paise > 0 else "warn" if gain.paise < 0 else "info"
+    detail += _unpriced_note(book, unpriced)
     return Insight(
         kind="cost_coverage",
         tone=tone,
         headline=headline,
         detail=detail,
         numbers=numbers,
-        unit="bps",
+        unit="paise",
         series=(
-            Point(label="cost known", value=10_000 - unknown_bps),
-            Point(label="cost unknown", value=unknown_bps),
+            Point(label="cost known", value=known_value.paise),
+            Point(label="cost unknown", value=unknown_value),
         ),
     )
 
 
 def _txns(book: Book) -> list[Txn]:
     return [f for f in book.facts if isinstance(f, Txn)]
-
-
-def _coverage_ends(book: Book) -> list[date]:
-    return sorted({f.end for f in book.facts if isinstance(f, Coverage)})
 
 
 def _month(d: date) -> tuple[int, int]:
@@ -250,29 +312,54 @@ def _months(a: tuple[int, int], b: tuple[int, int]) -> list[tuple[int, int]]:
 _MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
+def _reinvested(book: Book) -> set[tuple[AccountId, Isin, date]]:
+    """(account, ISIN, day) of dividend reinvestments: the import writes them
+    as an Income and a Buy on the same day. That Buy is not new money, and
+    that Income was not paid out."""
+    income = {(t.account, t.isin, t.on) for t in _txns(book) if isinstance(t.event, Income)}
+    buys = {(t.account, t.isin, t.on) for t in _txns(book) if isinstance(t.event, Buy)}
+    return income & buys
+
+
+def _day(d: date) -> str:
+    return f"{d.day} {_MON[d.month - 1]} {d.year}"
+
+
 def what_changed(book: Book) -> Insight | None:
     """Money in and out since the previous statement. The market's share of
     the change needs prices on both dates, which Stockin does not keep yet,
     so this insight says only what you did."""
-    ends = _coverage_ends(book)
+    covs = [f for f in book.facts if isinstance(f, Coverage)]
     txns = _txns(book)
-    if not ends or not txns:
+    if not covs or not txns:
         return None
+    ends = sorted({c.end for c in covs})
     end = ends[-1]
-    start = ends[-2] + timedelta(days=1) if len(ends) > 1 else min(t.on for t in txns)
+    start = ends[-2] + timedelta(days=1) if len(ends) > 1 else min(c.start for c in covs)
     window = [t for t in txns if start <= t.on <= end]
-    added = sum(t.event.amount.paise for t in window if isinstance(t.event, Buy))
+    re_ = _reinvested(book)
+
+    def fresh(t: Txn) -> bool:
+        return (t.account, t.isin, t.on) not in re_
+
+    added = sum(t.event.amount.paise for t in window if isinstance(t.event, Buy) and fresh(t))
     out = sum(t.event.amount.paise for t in window if isinstance(t.event, Sell))
-    income = sum(t.event.amount.paise for t in window if isinstance(t.event, Income))
-    buys = sum(1 for t in window if isinstance(t.event, Buy))
-    since = f"{start.day} {_MON[start.month - 1]} {start.year}"
-    until = f"{end.day} {_MON[end.month - 1]} {end.year}"
-    headline = f"From {since} to {until}: you added {rupees(Money(paise=added))}" + (
+    income = sum(t.event.amount.paise for t in window if isinstance(t.event, Income) and fresh(t))
+    again = sum(
+        t.event.amount.paise for t in window if isinstance(t.event, Income) and not fresh(t)
+    )
+    buys = sum(1 for t in window if isinstance(t.event, Buy) and fresh(t))
+    sells = sum(1 for t in window if isinstance(t.event, Sell))
+    headline = f"From {_day(start)} to {_day(end)}: you added {rupees(Money(paise=added))}" + (
         f" and took out {rupees(Money(paise=out))}." if out else "."
     )
-    detail = f"{buys} purchase{'s' if buys != 1 else ''}"
+    detail = _plural(buys, "purchase")
+    if sells:
+        detail += f", {_plural(sells, 'sale')}"
     if income:
-        detail += f" and {rupees(Money(paise=income))} paid out as dividends"
+        detail += f", {rupees(Money(paise=income))} paid out as dividends"
+    if again:
+        detail += f", {rupees(Money(paise=again))} of dividends reinvested"
     detail += (
         ". How much the market moved your money needs prices on both dates; "
         "that arrives when Stockin keeps price history."
@@ -288,7 +375,9 @@ def what_changed(book: Book) -> Insight | None:
             "added_paise": added,
             "out_paise": out,
             "income_paise": income,
+            "reinvested_paise": again,
             "buys": buys,
+            "sells": sells,
         },
         unit="paise",
         series=(
@@ -298,27 +387,63 @@ def what_changed(book: Book) -> Insight | None:
     )
 
 
+STOPPED_AFTER = 3
+"""A SIP with this many missed months in a row up to the latest statement is
+treated as stopped, not as missing instalments."""
+
+
 def sip_discipline(book: Book) -> Insight | None:
-    """A SIP is a (account, ISIN) with purchases in at least 3 different months.
-    Expected months run from its first purchase month to the month of the
-    latest statement; each month with a purchase is paid."""
-    ends = _coverage_ends(book)
-    if not ends:
-        return None
-    last = _month(ends[-1])
-    by_pair: dict[tuple[str, str], set[tuple[int, int]]] = defaultdict(set)
+    """A SIP is a mutual fund in one account bought (new money, not a dividend
+    reinvestment) in at least 3 different months.
+
+    A month is due from the first purchase month up to the latest statement
+    for that fund, but the statement's own month only once the statement
+    reaches the SIP's day (the day of the latest purchase). A sold-out fund
+    is due up to its last purchase. 3 or more missed months in a row at the
+    end means the SIP stopped: those months are not counted as missed, and
+    the stop is said instead."""
+    re_ = _reinvested(book)
+    cover_end: dict[tuple[AccountId, Isin], date] = {}
+    for c in book.facts:
+        if isinstance(c, Coverage):
+            k = (c.account, c.isin)
+            cover_end[k] = max(cover_end.get(k, c.end), c.end)
+    held = {(h.account, h.isin) for h in book.holdings()}
+    buys: dict[tuple[AccountId, Isin], list[date]] = defaultdict(list)
     for t in _txns(book):
-        if isinstance(t.event, Buy):
-            by_pair[(t.account, t.isin)].add(_month(t.on))
-    sips = {p: ms for p, ms in by_pair.items() if len(ms) >= 3}
+        if isinstance(t.event, Buy) and (t.account, t.isin, t.on) not in re_:
+            inst = book.instrument(t.isin)
+            if inst is not None and inst.kind == "mutual_fund":
+                buys[(t.account, t.isin)].append(t.on)
+    sips = {k: sorted(v) for k, v in buys.items() if len({_month(d) for d in v}) >= 3}
     if not sips:
         return None
     expected = paid = 0
+    stopped: list[str] = []
     series: list[Point] = []
-    for (acct, isin), months in sorted(sips.items()):
+    for (acct, isin), days in sorted(sips.items()):
         inst = book.instrument(Isin(isin))
         name = _short_name(inst.name) if inst else isin
-        for ym in _months(min(months), last):
+        months = {_month(d) for d in days}
+        last_buy = days[-1]
+        if (acct, isin) in held and (acct, isin) in cover_end:
+            end = cover_end[(acct, isin)]
+            last = _month(end)
+            if end.day < last_buy.day and last > _month(last_buy):
+                y, m = last
+                last = (y - 1, 12) if m == 1 else (y, m - 1)  # not due yet this month
+        else:
+            last = _month(last_buy)
+        due = _months(min(months), max(last, _month(last_buy)))
+        trailing = 0
+        for ym in reversed(due):
+            if ym in months:
+                break
+            trailing += 1
+        if trailing >= STOPPED_AFTER:
+            stopped.append(name)
+            due = due[: len(due) - trailing]
+        for ym in due:
             expected += 1
             ok = ym in months
             paid += ok
@@ -332,22 +457,34 @@ def sip_discipline(book: Book) -> Insight | None:
             )
     missed = expected - paid
     n = len(sips)
+    across = f"across {_plural(n, 'SIP')}"
     headline = (
-        f"All {expected} SIP instalments paid across {n} SIP{'s' if n != 1 else ''}."
+        f"All {expected} SIP instalments paid {across}."
         if not missed
-        else f"{missed} of {expected} SIP instalments missed across {n} SIP{'s' if n != 1 else ''}."
+        else f"{missed} of {expected} SIP instalments missed {across}."
     )
     detail = (
         "Paying every month means you buy more units when prices are low."
         if not missed
         else "A missed month is a month you didn't buy, often when prices were lower."
     )
+    if stopped:
+        detail += (
+            f" {_names(sorted(stopped))} {'looks' if len(stopped) == 1 else 'look'} stopped: "
+            f"no purchase in the last {STOPPED_AFTER} or more months."
+        )
     return Insight(
         kind="sip_discipline",
         tone="good" if not missed else "warn",
         headline=headline,
         detail=detail,
-        numbers={"expected": expected, "paid": paid, "missed": missed, "sips": n},
+        numbers={
+            "expected": expected,
+            "paid": paid,
+            "missed": missed,
+            "sips": n,
+            "stopped": len(stopped),
+        },
         unit="count",
         series=tuple(series),
     )
@@ -355,17 +492,19 @@ def sip_discipline(book: Book) -> Insight | None:
 
 def long_term_from(acquired: date) -> date:
     """Equity is long-term when held more than 12 months: from the day after
-    the first anniversary (29 Feb rolls to 1 Mar)."""
+    the first anniversary. A 29 Feb purchase's anniversary is 28 Feb, so it
+    turns long-term on 1 Mar, like every other date's 366th-or-later day."""
     try:
         anniversary = acquired.replace(year=acquired.year + 1)
     except ValueError:
-        anniversary = date(acquired.year + 1, 3, 1)
+        anniversary = date(acquired.year + 1, 2, 28)
     return anniversary + timedelta(days=1)
 
 
 def tax_clock(book: Book, today: date) -> Insight | None:
-    """The next equity lots to turn long-term after `today`."""
-    upcoming: dict[date, list[tuple[str, Qty, Money]]] = defaultdict(list)
+    """The next equity lots to turn long-term after `today`. The chart is the
+    cost turning long-term on each upcoming date; the headline is its first bar."""
+    upcoming: dict[date, list[tuple[str, Money]]] = defaultdict(list)
     for h in book.holdings():
         inst = book.instrument(h.isin)
         if inst is None or inst.asset_class != "equity":
@@ -377,19 +516,17 @@ def tax_clock(book: Book, today: date) -> Insight | None:
                 continue
             lt = long_term_from(lot.acquired_on)
             if lt > today:
-                upcoming[lt].append((_short_name(inst.name), lot.qty, lot.cost))
+                upcoming[lt].append((_short_name(inst.name), lot.cost))
     if not upcoming:
         return None
     when = min(upcoming)
     lots = upcoming[when]
-    names = sorted({n for n, _, _ in lots})
-    cost = Money(paise=sum(c.paise for _, _, c in lots))
-    what = f"{rupees(cost)} (at cost) of "
-    on = f"{when.day} {_MON[when.month - 1]} {when.year}"
-    headline = f"{what}{' and '.join(names)} turn long-term on {on}."
+    names = sorted({n for n, _ in lots})
+    cost = Money(paise=sum(c.paise for _, c in lots))
     days = (when - today).days
+    headline = f"{rupees(cost)} (at cost) of {_names(names)} turn long-term on {_day(when)}."
     detail = (
-        f"That's in {days} days. Selling before then is taxed as short-term gains. "
+        f"That's in {_plural(days, 'day')}. Selling before then is taxed as short-term gains. "
         "Worked out from your purchase dates, oldest first. Units bought before your "
         "statements start are left out, because their purchase date isn't known."
     )
@@ -406,7 +543,7 @@ def tax_clock(book: Book, today: date) -> Insight | None:
         },
         unit="paise",
         series=tuple(
-            Point(label=f"{d.day} {_MON[d.month - 1]} {d.year}", value=len(v), key=d.isoformat())
+            Point(label=_day(d), value=sum(c.paise for _, c in v), key=d.isoformat())
             for d, v in sorted(upcoming.items())[:12]
         ),
     )

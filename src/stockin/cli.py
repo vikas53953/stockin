@@ -300,6 +300,7 @@ def holdings(as_json: JsonFlag = False) -> None:
 
 class InsightsView(Value):
     priced_on: str | None  # latest price date used, None before any fetch
+    unpriced: tuple[Isin, ...]  # held, but no price yet: left out of value insights
     insights: tuple[Insight, ...]
 
 
@@ -314,7 +315,10 @@ def insights_cmd(as_json: JsonFlag = False) -> None:
     prices = _price_book(held) or PriceBook(quotes={})
     found = all_insights(book, prices, date.today())
     days = [q.on for q in prices.quotes.values()]
-    view = InsightsView(priced_on=max(days).isoformat() if days else None, insights=found)
+    unpriced = tuple(sorted(i for i in held if prices.get(i) is None))
+    view = InsightsView(
+        priced_on=max(days).isoformat() if days else None, unpriced=unpriced, insights=found
+    )
     if as_json:
         typer.echo(view.model_dump_json(indent=2))
         return
@@ -324,6 +328,12 @@ def insights_cmd(as_json: JsonFlag = False) -> None:
         typer.echo(f"    {i.detail}")
     if view.priced_on is None:
         typer.echo("(no prices yet: run `stockin prices fetch` for value-based insights)")
+    elif unpriced:
+        n = len(unpriced)
+        typer.echo(
+            f"({n} holding{'s have' if n != 1 else ' has'} no price yet and "
+            f"{'are' if n != 1 else 'is'} left out of value: run `stockin prices fetch`)"
+        )
 
 
 prices_app = typer.Typer(no_args_is_help=True, help="End-of-day prices for what you hold.")

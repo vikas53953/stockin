@@ -30,6 +30,7 @@ from stockin.book import Book
 from stockin.cli import app
 from stockin.facts import Isin, parse_isin
 from stockin.insights import (
+    Insight,
     all_insights,
     concentration,
     cost_coverage,
@@ -39,6 +40,7 @@ from stockin.insights import (
     rupees,
     sip_discipline,
     tax_clock,
+    tenths_of,
     weights,
     what_changed,
 )
@@ -72,89 +74,135 @@ def _prices(navs: dict[str, int]) -> PriceBook:
 
 nav = st.integers(1_000_000, 5_000 * 1_000_000)  # ₹1 to ₹5,000 a unit
 navs = st.fixed_dictionaries({fx.HDFC_MF: nav, fx.ICICI_MF: nav})
+ALL = (fx.HDFC_MF, fx.ICICI_MF, *STOCKS)
+# some holdings may have no price: each ISIN is priced or not
+some_navs = st.fixed_dictionaries({}, optional={i: nav for i in ALL})
+
+_RUPEES = re.compile(r"₹[\d,]+(?:\.\d\d)?")
+_PCT = re.compile(r"\d+\.\d%")
+_DATE = re.compile(r"\d{1,2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}")
+
+
+def _day(iso: str) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d.day} {d.strftime('%b')} {d.year}"
+
+
+def _model(book: Book, ps: dict[str, int]) -> tuple[list[tuple[int, int | None]], int]:
+    """An independent count: (value, cost or None) per priced ISIN, largest
+    first, and how many held ISINs have no price."""
+    units: dict[str, int] = {}
+    costs: dict[str, int | None] = {}
+    for h in book.holdings():
+        units[h.isin] = units.get(h.isin, 0) + h.qty.micros
+        prev = costs.get(h.isin, 0)
+        costs[h.isin] = None if prev is None or h.cost is None else prev + h.cost.paise
+    rows = [
+        (Money.of(Qty(micros=u), Price(micro_rupees=ps[i])).paise, costs[i])
+        for i, u in units.items()
+        if i in ps
+    ]
+    return sorted(rows, key=lambda r: -r[0]), sum(1 for i in units if i not in ps)
+
+
+def _check_sentence_numbers(ins: Insight) -> None:
+    """Every %, ₹ amount, date and day count in the words is one of `numbers`."""
+    n = ins.numbers
+    text = ins.headline + " " + ins.detail
+    tenths = [abs(int(v)) for k, v in n.items() if k.endswith("_tenths")]
+    for found in _PCT.findall(text):
+        assert any(pct(v) == found for v in tenths), (found, ins)
+    paise = [abs(int(v)) for k, v in n.items() if k.endswith("_paise")]
+    for found in _RUPEES.findall(text):
+        assert any(rupees(Money(paise=v)) == found for v in paise), (found, ins)
+    dates = [_day(str(v)) for k, v in n.items() if k in ("start", "end", "date")]
+    for found in _DATE.findall(text):
+        assert found in dates, (found, ins)
+    for found in re.findall(r"in (\d+) days?", text):
+        assert int(found) == n["days"], (found, ins)
 
 
 # ------------------------------------------------------------- properties
 
 
-@given(histories(), windows, navs)
+@given(histories(), demat_months(), windows, some_navs)
 def test_every_sentence_is_built_from_its_own_numbers(
-    history: dict[str, list[Trade]], ws: list[tuple[int, int]], ps: dict[str, int]
-) -> None:
-    book = _book([_statement(history, a, b) for a, b in ws])
-    for ins in all_insights(book, _prices(ps), TODAY):
-        n = ins.numbers
-        text = ins.headline + " " + ins.detail
-        if ins.kind == "concentration":
-            assert pct(int(n["top_bps"])) in ins.headline
-            assert pct(int(n["top3_bps"])) in ins.detail
-            assert sum(p.value for p in ins.series) == n["total_paise"]
-            assert [p.value for p in ins.series] == sorted(
-                (p.value for p in ins.series), reverse=True
-            )
-            # recomputed here from the chart's own series, not read back
-            vals = [p.value for p in ins.series]
-            total = sum(vals)
-            assert n["top_bps"] == div_half_even(vals[0] * 10_000, total)
-            assert n["top3_bps"] == div_half_even(sum(vals[:3]) * 10_000, total)
-            over_one = int(n["top_bps"]) > 2_500
-            assert ins.headline.startswith("One holding is") == over_one
-            assert (ins.tone == "warn") == (over_one or int(n["top3_bps"]) > 5_000)
-        elif ins.kind == "cost_coverage":
-            if int(n["unknown_bps"]) > 0:
-                assert pct(int(n["unknown_bps"])) in ins.headline
-            assert sum(p.value for p in ins.series) == 10_000
-            assert int(n["gain_paise"]) == int(n["known_value_paise"]) - int(n["known_cost_paise"])
-            if int(n["known_cost_paise"]) > 0:
-                # the sign is said in words ("up"/"down"); the figure is the size
-                assert pct(abs(int(n["gain_bps"]))) in text
-                assert ("down" in text) == (int(n["gain_paise"]) < 0)
-        elif ins.kind == "what_changed":
-            assert rupees(Money(paise=int(n["added_paise"]))) in ins.headline
-        elif ins.kind == "sip_discipline":
-            assert str(n["expected"]) in ins.headline
-            assert int(n["paid"]) + int(n["missed"]) == int(n["expected"])
-            assert sum(p.value for p in ins.series) == n["paid"]
-        elif ins.kind == "invested":
-            assert rupees(Money(paise=abs(int(n["net_paise"])))) in ins.headline
-            assert str(n["fy"]) in ins.headline
-        # numbers never appear in a sentence unless they came from `numbers`
-        for found in re.findall(r"\d+\.\d%", text):
-            sizes = [abs(int(v)) for k, v in n.items() if k.endswith("bps")]
-            assert any(pct(v) == found for v in sizes), found
-
-
-@given(
-    histories(),
-    demat_months(),
-    windows,
-    st.fixed_dictionaries({i: nav for i in (fx.HDFC_MF, fx.ICICI_MF, *STOCKS)}),
-)
-def test_concentration_matches_an_independent_count_over_up_to_five_holdings(
     history: dict[str, list[Trade]],
     held: list[dict[str, int]],
     ws: list[tuple[int, int]],
     ps: dict[str, int],
 ) -> None:
     book = _book([_statement(history, a, b) for a, b in ws] + [_demat(held, a, b) for a, b in ws])
-    micros: dict[str, int] = {}  # units per ISIN across accounts
-    for h in book.holdings():
-        micros[h.isin] = micros.get(h.isin, 0) + h.qty.micros
-    vals = sorted(
-        (Money.of(Qty(micros=u), Price(micro_rupees=ps[i])).paise for i, u in micros.items()),
-        reverse=True,
-    )
-    ins = concentration(book, _prices(ps))
-    if not vals or sum(vals) <= 0:
-        assert ins is None
+    for ins in all_insights(book, _prices(ps), TODAY):
+        _check_sentence_numbers(ins)
+        n = ins.numbers
+        if ins.kind == "tax_clock":
+            # the headline's money is the chart's first bar, on the same date
+            assert ins.series[0].value == n["cost_paise"]
+            assert ins.series[0].key == n["date"]
+            assert [p.key for p in ins.series] == sorted(p.key for p in ins.series)
+        elif ins.kind == "sip_discipline":
+            assert int(n["paid"]) + int(n["missed"]) == int(n["expected"])
+            assert sum(p.value for p in ins.series) == n["paid"]
+            assert len(ins.series) == n["expected"]
+        elif ins.kind == "what_changed":
+            assert ins.series[0].value == n["added_paise"]
+            assert ins.series[1].value == -int(n["out_paise"])
+        elif ins.kind == "invested":
+            assert any(p.value == n["net_paise"] for p in ins.series)
+
+
+@given(histories(), demat_months(), windows, some_navs)
+def test_value_insights_match_an_independent_count(
+    history: dict[str, list[Trade]],
+    held: list[dict[str, int]],
+    ws: list[tuple[int, int]],
+    ps: dict[str, int],
+) -> None:
+    book = _book([_statement(history, a, b) for a, b in ws] + [_demat(held, a, b) for a, b in ws])
+    rows, unpriced = _model(book, ps)
+    total = sum(v for v, _ in rows)
+    conc = concentration(book, _prices(ps))
+    cov = cost_coverage(book, _prices(ps))
+    if not rows or total <= 0:
+        assert conc is None and cov is None
         return
-    assert ins is not None
-    total = sum(vals)
-    top = div_half_even(vals[0] * 10_000, total)
-    top3 = div_half_even(sum(vals[:3]) * 10_000, total)
-    assert (ins.numbers["top_bps"], ins.numbers["top3_bps"]) == (top, top3)
-    assert ins.headline.startswith("One holding is") == (top > 2_500)
-    assert (ins.tone == "warn") == (top > 2_500 or top3 > 5_000)
+    assert conc is not None and cov is not None
+    top, top3 = rows[0][0], sum(v for v, _ in rows[:3])
+    c = conc.numbers
+    assert c["top_tenths"] == div_half_even(top * 1_000, total)
+    assert c["top3_tenths"] == div_half_even(top3 * 1_000, total)
+    assert c["fall10_tenths"] == div_half_even(top * 100, total)
+    assert (c["unpriced"], c["holdings"]) == (unpriced, len(rows))
+    assert conc.headline.startswith("One holding is") == (top * 4 > total)
+    assert (conc.tone == "warn") == (top * 4 > total or (len(rows) > 3 and top3 * 2 > total))
+    assert ("of what's priced" in conc.headline) == (unpriced > 0)
+    assert ("Your top 3" in conc.detail) == (len(rows) > 3)
+    assert ("no price yet" in conc.detail) == (unpriced > 0)
+
+    known = [(v, k) for v, k in rows if k is not None]
+    kv, kc = sum(v for v, _ in known), sum(k for _, k in known)
+    unknown = total - kv
+    g = cov.numbers
+    assert (g["known_value_paise"], g["known_cost_paise"]) == (kv, kc)
+    assert g["unknown_tenths"] == div_half_even(unknown * 1_000, total)
+    assert g["gain_paise"] == kv - kc
+    text = cov.headline + " " + cov.detail
+    if kv - kc > 0:
+        assert " up " in text and " down " not in text
+    elif kv - kc < 0:
+        assert " down " in text and " up " not in text
+    elif known:
+        assert "even" in text
+    if kc > 0 and kv != kc:
+        assert g["gain_tenths"] == div_half_even(abs(kv - kc) * 1_000, kc)
+    if kc == 0:
+        assert "gain_tenths" not in g or kv == kc  # no percent of a zero cost
+    # "start after these were bought" only when some priced value has no cost
+    assert ("Your statements start after" in cov.detail) == (unknown > 0)
+    if unknown == 0:
+        expect = "good" if kv > kc else "warn" if kv < kc else "info"
+        assert cov.tone == expect
 
 
 @given(histories(), windows, navs, st.randoms(use_true_random=False))
@@ -185,21 +233,63 @@ def test_weights_add_up_to_the_priced_total(
 # ------------------------------------------------------------------ units
 
 
-def _sip_history(months: list[int]) -> dict[str, list[Trade]]:
+def _trade(month: int, day: int, buy: bool = True, rupees_: str = "1000.00") -> Trade:
     from decimal import Decimal
 
-    return {
-        fx.HDFC_MF: [Trade(m, 5, True, Decimal("10.000"), Decimal("1000.00"), None) for m in months]
-    }
+    return Trade(month, day, buy, Decimal("10.000" if buy else "1.000"), Decimal(rupees_), None)
+
+
+def _sip_history(months: list[int], day: int = 5) -> dict[str, list[Trade]]:
+    return {fx.HDFC_MF: [_trade(m, day) for m in months]}
 
 
 def test_a_missed_sip_month_is_counted() -> None:
     book = _book([_statement(_sip_history([1, 2, 4, 5]), 1, 5)])
     ins = sip_discipline(book)
     assert ins is not None
-    assert ins.numbers == {"expected": 5, "paid": 4, "missed": 1, "sips": 1}
+    assert ins.numbers == {"expected": 5, "paid": 4, "missed": 1, "sips": 1, "stopped": 0}
     assert ins.tone == "warn"
     assert ins.headline == "1 of 5 SIP instalments missed across 1 SIP."
+
+
+def test_a_missed_last_month_counts_once_the_statement_passes_the_sip_day() -> None:
+    # SIP on the 5th: Jan to Mar paid, Apr not, statement to 30 Apr
+    book = _book([_statement(_sip_history([1, 2, 3]), 1, 4)])
+    ins = sip_discipline(book)
+    assert ins is not None
+    assert (ins.numbers["expected"], ins.numbers["missed"]) == (4, 1)
+
+
+def test_the_statement_month_is_not_due_before_the_sip_day() -> None:
+    # SIP on the 20th, Jan to Mar paid; a statement to 10 Apr: April isn't due yet
+    history = {fx.HDFC_MF: [_trade(m, 20) for m in (1, 2, 3)]}
+    stmt = _statement(history, 1, 4)
+    stmt = stmt.model_copy(
+        update={"statement_period": stmt.statement_period.model_copy(update={"to": "10-Apr-2026"})}
+    )
+    ins = sip_discipline(_book([stmt]))
+    assert ins is not None
+    assert ins.numbers["missed"] == 0
+    assert ins.headline == "All 3 SIP instalments paid across 1 SIP."
+
+
+def test_a_sip_with_three_quiet_months_is_stopped_not_missed() -> None:
+    book = _book([_statement(_sip_history([1, 2, 3]), 1, 6)])
+    ins = sip_discipline(book)
+    assert ins is not None
+    assert (ins.numbers["expected"], ins.numbers["missed"], ins.numbers["stopped"]) == (3, 0, 1)
+    assert "HDFC Flexi Cap Fund looks stopped" in ins.detail
+
+
+def test_a_sold_out_sip_is_due_only_to_its_last_purchase() -> None:
+    history = {fx.HDFC_MF: [_trade(1, 5), _trade(2, 5), _trade(3, 5)]}
+    history[fx.HDFC_MF].append(_trade(4, 6, buy=False, rupees_="1000.00"))
+    from decimal import Decimal
+
+    history[fx.HDFC_MF][-1] = Trade(4, 6, False, Decimal("30.000"), Decimal("1000.00"), None)
+    ins = sip_discipline(_book([_statement(history, 1, 5)]))
+    assert ins is not None
+    assert (ins.numbers["expected"], ins.numbers["missed"]) == (3, 0)
 
 
 def test_two_purchases_are_not_a_sip() -> None:
@@ -208,7 +298,9 @@ def test_two_purchases_are_not_a_sip() -> None:
 
 def test_long_term_starts_the_day_after_the_first_anniversary() -> None:
     assert long_term_from(date(2026, 1, 5)) == date(2027, 1, 6)
-    assert long_term_from(date(2024, 2, 29)) == date(2025, 3, 2)
+    assert long_term_from(date(2024, 2, 28)) == date(2025, 3, 1)
+    assert long_term_from(date(2024, 2, 29)) == date(2025, 3, 1)  # 366 days, like the rest
+    assert (long_term_from(date(2025, 1, 5)) - date(2025, 1, 5)).days == 366
 
 
 def test_tax_clock_names_the_next_known_lot_and_skips_unknown_dates() -> None:
@@ -220,6 +312,29 @@ def test_tax_clock_names_the_next_known_lot_and_skips_unknown_dates() -> None:
     assert ins.numbers["date"] == "2027-03-06"  # the March lot, not the unknown-date opening units
     assert ins.headline.startswith("₹1,000 (at cost) of HDFC Flexi Cap")
     assert tax_clock(book, date(2027, 3, 6)) is None  # already long-term
+
+
+def test_tax_clock_takes_the_next_date_and_charts_cost_per_date() -> None:
+    book = _book([_statement({fx.HDFC_MF: [_trade(1, 5), _trade(1, 9, rupees_="300.00")]}, 1, 2)])
+    ins = tax_clock(book, date(2026, 12, 1))
+    assert ins is not None
+    assert ins.numbers["date"] == "2027-01-06"  # the earlier of 6 and 10 Jan
+    assert [(p.key, p.value) for p in ins.series] == [
+        ("2027-01-06", 100_000),
+        ("2027-01-10", 30_000),
+    ]
+    assert ins.detail.startswith("That's in 36 days.")
+    one = tax_clock(book, date(2027, 1, 5))
+    assert one is not None and one.detail.startswith("That's in 1 day.")
+
+
+def test_tax_clock_is_equity_only() -> None:
+    st_ = cas.from_casparser(_statement({fx.ICICI_MF: [_trade(1, 5)]}, 1, 1), "sha")
+    insts = tuple(i.model_copy(update={"asset_class": "debt"}) for i in st_.instruments)
+    equity = Book.of(tuple(st_.facts), tuple(st_.instruments), tuple(st_.accounts))
+    debt = Book.of(tuple(st_.facts), insts, tuple(st_.accounts))
+    assert tax_clock(equity, TODAY) is not None
+    assert tax_clock(debt, TODAY) is None
 
 
 def test_invested_is_net_by_financial_year() -> None:
@@ -251,25 +366,54 @@ def test_what_changed_covers_only_the_newest_statement_months() -> None:
     assert ins.headline == "From 1 Mar 2026 to 31 Mar 2026: you added ₹1,000."
 
 
-def test_concentration_tone_follows_the_25_percent_line() -> None:
+def test_what_changed_counts_sales_and_starts_at_the_statement_start() -> None:
     from decimal import Decimal
 
-    one = {fx.HDFC_MF: [Trade(1, 5, True, Decimal("10.000"), Decimal("1000.00"), None)]}
-    book = _book([_statement(one, 1, 1)])
+    history = {
+        fx.HDFC_MF: [
+            _trade(2, 10),
+            Trade(2, 20, False, Decimal("4.000"), Decimal("450.00"), None),
+        ]
+    }
+    ins = what_changed(_book([_statement(history, 1, 2)]))
+    assert ins is not None
+    assert ins.numbers["start"] == "2026-01-01"
+    assert (ins.numbers["out_paise"], ins.numbers["sells"]) == (45_000, 1)
+    assert ins.headline == "From 1 Jan 2026 to 28 Feb 2026: you added ₹1,000 and took out ₹450."
+    assert ins.detail.startswith("1 purchase, 1 sale.")
+
+
+def test_concentration_tone_follows_the_25_percent_line() -> None:
+    book = _book([_statement({fx.HDFC_MF: [_trade(1, 5)]}, 1, 1)])
     ins = concentration(book, _prices({fx.HDFC_MF: 100_000_000}))
     assert ins is not None
     assert ins.tone == "warn"
     assert ins.headline == "One holding is 100.0% of your money."
+    assert "Your top 3" not in ins.detail  # one holding has no "top 3"
     assert concentration(book, PriceBook(quotes={})) is None
     cov = cost_coverage(book, _prices({fx.HDFC_MF: 150_000_000}))
     assert cov is not None
     assert cov.headline == "You're up ₹500 (50.0%) on what you hold."
+    even = cost_coverage(book, _prices({fx.HDFC_MF: 100_000_000}))
+    assert even is not None
+    assert even.headline == "You're even on what you hold." and even.tone == "info"
+
+
+def test_a_holding_without_a_price_is_named_not_counted_as_unknown_cost() -> None:
+    buy = _trade(1, 5)
+    book = _book([_statement({fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}, 1, 1)])
+    ps = _prices({fx.HDFC_MF: 110_000_000})  # ICICI has no price
+    conc = concentration(book, ps)
+    cov = cost_coverage(book, ps)
+    assert conc is not None and cov is not None
+    assert conc.headline == "One holding is 100.0% of what's priced."
+    assert "1 holding (ICICI Bluechip) has no price yet and is left out." in conc.detail
+    assert cov.headline == "You're up ₹100 (10.0%) on what's priced."
+    assert "statements start after" not in cov.detail
 
 
 def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
-    from decimal import Decimal
-
-    buy = Trade(1, 5, True, Decimal("10.000"), Decimal("1000.00"), None)
+    buy = _trade(1, 5)
     mf = {fx.HDFC_MF: [buy], fx.ICICI_MF: [buy]}
     shares: list[dict[str, int]] = [{i: 100 for i in STOCKS}] * MONTHS
     book = _book([_statement(mf, 1, 1), _demat(shares, 1, 1)])
@@ -278,15 +422,24 @@ def test_five_equal_holdings_are_not_called_one_big_holding() -> None:
     ins = concentration(book, _prices(every))
     assert ins is not None
     assert ins.headline == "Your largest holding is 20.0% of your money."
-    assert ins.numbers["top3_bps"] == 6_000
+    assert ins.numbers["top3_tenths"] == 600
     assert ins.tone == "warn"  # the top 3 are over half
 
 
-def test_pct_rounds_half_even_to_one_decimal() -> None:
-    assert pct(8183) == "81.8%"
-    assert pct(8185) == "81.8%"  # 818.5 tenths -> 818 (even)
-    assert pct(8195) == "82.0%"
-    assert pct(-25) == "-0.2%"
+def test_percentages_round_once_from_the_money() -> None:
+    assert pct(818) == "81.8%"
+    assert pct(-2) == "-0.2%"
+    assert tenths_of(97_652, 100_000) == 977  # 97.652% -> 97.7%, not 97.6% via 9765 bps
+    assert tenths_of(8_185, 10_000) == 818  # 81.85% -> half-even 81.8%
+    assert tenths_of(8_195, 10_000) == 820
+
+
+def test_names_read_naturally() -> None:
+    from stockin.insights import _names, _short_name  # pyright: ignore[reportPrivateUsage]
+
+    assert _names(["A", "B", "C"]) == "A, B and C"
+    assert _names(["A", "B"]) == "A and B"
+    assert _short_name("STATE BANK OF INDIA - EQ NEW RE. 1/-") == "STATE BANK OF INDIA"
 
 
 def test_insights_cli_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
