@@ -39,7 +39,7 @@ def test_amfi_rejects_a_file_that_is_not_navall() -> None:
 def test_bhavcopy_reads_close_and_prefers_eq_series(name: str) -> None:
     quotes = {q.isin: q for q in eod.parse_bhavcopy((EOD / name).read_bytes())}
     infy = quotes[parse_isin("INE009A01021")]
-    assert infy.price == Price.rupees("1500.55")  # EQ, not the BL row
+    assert infy.price == Price.rupees("1500.55")  # EQ, not the higher BL row
     assert infy.on == date(2026, 11, 14)
     assert infy.source == "bhavcopy"
     assert len(quotes) == 4
@@ -139,3 +139,20 @@ def test_doctor_reports_prices_once_fetched(
     }
     assert checks["quotes"]["status"] == "ok"
     assert "2026-11-14" in checks["quotes"]["detail"]
+
+
+def test_gain_is_value_minus_cost_and_unknown_when_either_is() -> None:
+    from stockin.book import Holding
+    from stockin.cli import _valued  # pyright: ignore[reportPrivateUsage]
+    from stockin.facts import AccountId
+
+    isin = parse_isin("INE009A01021")
+    book = PriceBook.best([_q("INE009A01021", date(2026, 11, 14), "150", "bhavcopy")])
+    held = Holding(
+        account=AccountId("a"), isin=isin, qty=Qty.parse("10"), cost=Money.rupees("1000")
+    )
+    v = _valued(held, book)
+    assert v.value == Money.rupees("1500")
+    assert v.gain == Money.rupees("500")
+    assert _valued(held.model_copy(update={"cost": None}), book).gain is None
+    assert _valued(held, PriceBook(quotes={})).gain is None
