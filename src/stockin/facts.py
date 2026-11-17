@@ -173,6 +173,12 @@ class Coverage(Value):
     start: date
     end: date
 
+    @model_validator(mode="after")
+    def _ordered(self) -> Coverage:
+        if self.end < self.start:
+            raise ValueError("coverage window ends before it starts")
+        return self
+
 
 class Complete(Value):
     """ "The Balances I carry for `account` on `on` are ALL its holdings."

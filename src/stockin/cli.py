@@ -7,6 +7,7 @@ output is rendered from, so the verify skill and the owner see one truth.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
@@ -25,7 +26,7 @@ app = typer.Typer(
 Status = Literal["ok", "warn", "fail"]
 
 
-class Check(Value):
+class DoctorCheck(Value):
     name: str
     status: Status
     detail: str
@@ -36,7 +37,7 @@ class Doctor(Value):
     version: str
     data_dir: str
     ok: bool
-    checks: tuple[Check, ...]
+    checks: tuple[DoctorCheck, ...]
 
 
 def data_dir() -> Path:
@@ -46,36 +47,45 @@ def data_dir() -> Path:
 
 def diagnose(root: Path) -> Doctor:
     """Read-only. Never creates, writes or deletes anything."""
-    checks: list[Check] = []
+    checks: list[DoctorCheck] = []
     py = sys.version_info
     checks.append(
-        Check(name="python", status="ok", detail=f"{py.major}.{py.minor}.{py.micro}")
+        DoctorCheck(name="python", status="ok", detail=f"{py.major}.{py.minor}.{py.micro}")
         if py >= (3, 12)
-        else Check(
+        else DoctorCheck(
             name="python",
             status="fail",
             detail=f"{py.major}.{py.minor}",
             hint="Stockin needs Python 3.12 or newer",
         )
     )
-    if not root.is_dir():
+    if root.exists() and not root.is_dir():
         checks.append(
-            Check(
+            DoctorCheck(
+                name="data_dir",
+                status="fail",
+                detail=f"{root} is a file, not a folder",
+                hint="set STOCKIN_DATA to a folder",
+            )
+        )
+    elif not root.is_dir():
+        checks.append(
+            DoctorCheck(
                 name="data_dir",
                 status="fail",
                 detail=f"{root} does not exist",
-                hint=f"mkdir -p {root} (or set STOCKIN_DATA)",
+                hint=f"mkdir -p {shlex.quote(str(root))} (or set STOCKIN_DATA)",
             )
         )
     elif not os.access(root, os.W_OK):
-        checks.append(Check(name="data_dir", status="fail", detail=f"{root} is not writable"))
+        checks.append(DoctorCheck(name="data_dir", status="fail", detail=f"{root} is not writable"))
     else:
-        checks.append(Check(name="data_dir", status="ok", detail=str(root)))
+        checks.append(DoctorCheck(name="data_dir", status="ok", detail=str(root)))
     ledger = root / "ledger.db"
     checks.append(
-        Check(name="ledger", status="ok", detail=str(ledger))
+        DoctorCheck(name="ledger", status="ok", detail=str(ledger))
         if ledger.is_file()
-        else Check(
+        else DoctorCheck(
             name="ledger",
             status="warn",
             detail="no ledger yet",
@@ -83,7 +93,7 @@ def diagnose(root: Path) -> Doctor:
         )
     )
     checks.append(
-        Check(
+        DoctorCheck(
             name="quotes",
             status="warn",
             detail="no live quote source configured",
@@ -116,10 +126,14 @@ def doctor(as_json: JsonFlag = False) -> None:
     raise typer.Exit(0 if report.ok else 1)
 
 
+class Version(Value):
+    version: str
+
+
 @app.command()
-def version() -> None:
+def version(as_json: JsonFlag = False) -> None:
     """Print the installed version."""
-    typer.echo(__version__)
+    typer.echo(Version(version=__version__).model_dump_json() if as_json else __version__)
 
 
 def main() -> None:

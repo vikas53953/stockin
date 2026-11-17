@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -78,3 +79,25 @@ def test_thesis_needs_a_rule() -> None:
         recorded_on=date(2026, 11, 17),
     )
     assert t.invalidate_below is not None
+
+
+def test_coverage_window_must_be_ordered() -> None:
+    from stockin.facts import Coverage
+
+    with pytest.raises(ValidationError):
+        Coverage(
+            account=_sip().account,
+            isin=_sip().isin,
+            start=date(2026, 10, 31),
+            end=date(2026, 10, 1),
+        )
+
+
+def test_facts_load_back_only_through_json() -> None:
+    """Strict mode: stored facts must be loaded with validate_json. Pinned so a
+    store that loads dicts instead fails here, not on real data."""
+    adapter: TypeAdapter[Fact] = TypeAdapter(Fact)
+    body = adapter.dump_json(_sip())
+    assert adapter.validate_json(body) == _sip()
+    with pytest.raises(ValidationError):
+        adapter.validate_python(json.loads(body))

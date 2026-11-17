@@ -19,14 +19,21 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 Bps = NewType("Bps", int)
 """Basis points, 1/100 of a percent. Weights, drift, FD rates, XIRR."""
 
-_DECIMAL = re.compile(r"^(-)?(\d+)(?:\.(\d+))?$")
+_DECIMAL = re.compile(r"^(-)?([0-9]+)(?:\.([0-9]+))?$")
+_GROUPED = re.compile(
+    r"^-?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,2}(?:,[0-9]{2})*,[0-9]{3})(?:\.[0-9]+)?$"
+)
+"""Western (1,234,567) or Indian (12,34,567) grouping, nothing else."""
 
 
 def _parse_scaled(text: str, places: int, *, signed: bool) -> int:
-    """'1,350.50' -> 135050 at places=2. Commas (Indian or Western grouping)
-    are ignored. More than `places` decimals, a sign when unsigned, or
-    anything that is not a plain decimal raises ValueError."""
-    match = _DECIMAL.match(text.strip().replace(",", ""))
+    """'1,350.50' -> 135050 at places=2. ASCII digits only. Commas must form
+    Western or Indian grouping. More than `places` decimals, a sign when
+    unsigned, or anything that is not a plain decimal raises ValueError."""
+    raw = text.strip()
+    if "," in raw and not _GROUPED.match(raw):
+        raise ValueError(f"misplaced comma: {text!r}")
+    match = _DECIMAL.match(raw.replace(",", ""))
     if match is None:
         raise ValueError(f"not a decimal number: {text!r}")
     sign, whole, frac = match.group(1), match.group(2), match.group(3) or ""
@@ -34,7 +41,7 @@ def _parse_scaled(text: str, places: int, *, signed: bool) -> int:
         raise ValueError(f"must not be negative: {text!r}")
     if len(frac) > places:
         raise ValueError(f"more than {places} decimal places: {text!r}")
-    value = int(whole) * 10**places + int(frac.ljust(places, "0") or "0")
+    value = int(whole) * 10**places + int(frac.ljust(places, "0"))
     return -value if sign else value
 
 
@@ -103,7 +110,17 @@ class Money(Value):
     def __str__(self) -> str:
         sign = "-" if self.paise < 0 else ""
         rupees, paise = divmod(abs(self.paise), 100)
-        return f"{sign}{rupees:,}.{paise:02d}"
+        return f"{sign}{_indian_grouping(rupees)}.{paise:02d}"
+
+
+def _indian_grouping(n: int) -> str:
+    """845000 -> '8,45,000'. Last three digits, then pairs."""
+    digits = str(n)
+    if len(digits) <= 3:
+        return digits
+    head, tail = digits[:-3], digits[-3:]
+    pairs = [head[max(0, i - 2) : i] for i in range(len(head), 0, -2)]
+    return ",".join(reversed(pairs)) + "," + tail
 
 
 class Qty(Value):

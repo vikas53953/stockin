@@ -58,5 +58,20 @@ def test_share_and_percent() -> None:
 
 
 def test_str() -> None:
-    assert str(Money(paise=84_500_050)) == "845,000.50"
+    assert str(Money(paise=84_500_050)) == "8,45,000.50"
     assert str(Money(paise=-5)) == "-0.05"
+
+
+@pytest.mark.parametrize("bad", ["१२३", "\uff11\uff12", ",5", "12,34.5,0", "1,2345", "12,3"])
+def test_rejects_foreign_digits_and_bad_commas(bad: str) -> None:
+    with pytest.raises(ValueError):
+        Money.rupees(bad)
+
+
+@pytest.mark.parametrize("good", ["1,234,567", "12,34,567", "1,000.50", "-8,45,000"])
+def test_accepts_western_and_indian_grouping(good: str) -> None:
+    Money.rupees(good)
+
+
+def test_str_uses_indian_grouping() -> None:
+    assert str(Money(paise=1_23_45_678_90)) == "1,23,45,678.90"
