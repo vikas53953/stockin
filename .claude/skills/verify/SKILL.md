@@ -54,9 +54,11 @@ The per-feature recipes are in [features/README.md](features/README.md).
   const video = page.video();
   await ctx.close();                   // closing the context writes the .webm
   await video.saveAs(`${EV}/<feature>-flow.webm`);
+  await video.delete();                // drop Playwright's own copy in $EV/video
   await browser.close();
+  require('fs').rmSync(`${EV}/video`, { recursive: true, force: true });
   ```
-- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then run `sha256sum` **in that folder, after copying** (the share adds metadata to PNGs, so a hash taken before the copy will not match). Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
+- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then fingerprint it with `python3 .claude/skills/verify/evidence_hash.py <folder> > <folder>/EVIDENCE.sha256` and post that list. The share inserts its own `caBX` provenance chunk into each PNG at an unpredictable time after the copy (seen from seconds to about 27 minutes), so a plain `sha256sum` of a PNG goes stale. The script hashes every byte of a PNG except the one `caBX` chunk straight after IHDR, where the share puts it, so changes to pixels, size, colour chunks, animation frames or chunk order still change the hash; every other file is hashed whole. Anyone re-checks with `evidence_hash.py <folder> --check <folder>/EVIDENCE.sha256`, which also fails on files added or removed since. Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
 - Fixtures only: screenshots must show synthetic data. Never screenshot a real ledger.
 
 ## Cleanup

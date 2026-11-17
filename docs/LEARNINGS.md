@@ -70,9 +70,15 @@ themselves are in `CLAUDE.md`; their history is in [PIPELINE.md](PIPELINE.md).
 - **What happened:** the #11 verifier injected 10 bugs of its own; the new properties caught 4. One property could not fail (share + rest equals the total by construction), about half the retract examples checked nothing, exact .5 ties were almost never drawn, and nothing checked money in the ledger.
 - **Lesson:** the author's mutation check uses bugs the author already thought of; the verifier's finds the ones they did not.
 - **Rule:** every new or changed test is mutation-checked by the verifier with its own mutations (PIPELINE #10).
-- **Caught since:** #14 closes all six gaps, including a ledger read (`Ledger._latest`) that had no test at all.
+- **Caught since:** the #14 verifier confirmed five of the six gaps closed, including a ledger read (`Ledger._latest`) that had no test at all; the sixth (Indian grouping) is caught by a unit test. Its own new mutations then found per-lot proceeds unchecked (#15).
 
 ### 13. History needs checking too
 - **What happened:** the first version of this file and PIPELINE.md said two PRs had failed verification; the record shows #3 and #4's first FAIL as well. One claim ("no PDF had ever gone through the app") overstated what was true.
 - **Lesson:** a log written from memory drifts from the record, and a flattering log teaches the wrong lesson.
 - **Rule:** docs about our own process are verified against PR comments and git history (PIPELINE #11).
+
+### 14. Evidence files can change after you hash them
+- **What happened:** the #13 verifier found that the project share adds a metadata chunk to PNG screenshots a few seconds after they are copied. Hashes taken right after the copy failed `sha256sum -c` twenty seconds later, though the pixels were identical.
+- **Lesson:** a hash proves nothing if the file can legitimately change under it; the evidence store has to be settled before it is fingerprinted.
+- **Rule:** fingerprint evidence with `evidence_hash.py`, which hashes every byte of a PNG except the share's own `caBX` chunk, and only where the share puts it (PIPELINE #13).
+- **Caught since:** two fixes failed verification on #16. "Wait until two hashes 30 seconds apart agree" passed, then the share rewrote every PNG at about two minutes (other times it took eleven and twenty-seven): timing rules for a process you do not control are guesses. Then hashing only the image data let the verifier add APNG frames that make an "after" screenshot show the "before" page, with the fingerprint unchanged. Exclude exactly what you must, and nothing more.
