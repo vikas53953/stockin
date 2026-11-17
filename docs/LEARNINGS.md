@@ -1,0 +1,78 @@
+# Learnings
+
+What this project has taught us about building it, newest at the bottom.
+Each entry is a moment something went wrong or the owner pushed back, the
+lesson, the rule it produced, and what that rule has caught since. Add entries
+at every sprint retro and whenever the owner corrects the process. The rules
+themselves are in `CLAUDE.md`; their history is in [PIPELINE.md](PIPELINE.md).
+
+## Sprint 1, drop 1 (2026-11-17)
+
+### 1. Passing tests did not mean a working import
+- **What happened:** pytest was green, but the first run of the installed `stockin import cas` printed casparser enums as `TransactionType.PURCHASE`, because the library returns enum members and plain strings in different paths.
+- **Lesson:** the real surface finds what unit tests built from our own assumptions cannot.
+- **Rule:** a change is done when it has run on the installed binary through the `verify` skill (PIPELINE #1).
+- **Caught since:** the busy-port crash in `stockin web`, phone overflow on the reconcile table.
+
+### 2. The author is a poor judge of their own change
+- **What happened:** three PRs that looked finished failed independent verification before the PDF work: #3 (the docs promised `--json` on every command, `version` had none), #4 twice (the fold depended on the order facts arrived in, then a phantom holding after a flagged zero), and #9 (a PDF error class the check missed).
+- **Lesson:** an agent that did not write the code must verify it, and its verdict, not the author's, gates the merge.
+- **Rule:** independent verifier, head-SHA guard, at most two fix-forwards (PIPELINE #2).
+- **Caught since:** every fix in #6, #7, #9 and #10 came from verifier notes.
+
+### 3. A claim was written before the check ran
+- **What happened:** the #10 PR body described a browser check that had not been run yet. It passed when run, but the order was wrong.
+- **Lesson:** a check reported before it runs is a fake green, even if it later passes.
+- **Rule:** never claim a check that has not run; evidence is attached, not described (PIPELINE #4, #7).
+
+### 4. The owner asked whether we had tested it ourselves
+- **Pushback:** the owner was handed a checklist to test real CAS PDFs. No statement-layout PDF had ever been imported: the imports had used casparser JSON, and the only PDFs through the app were a blank one, junk bytes and an encrypted dummy, all checking rejections.
+- **Lesson:** never ask the owner to be the first person to try something. The owner's run is confirmation, not discovery.
+- **Rule:** an agent runs the owner's exact steps first, as an end user, on realistic password-protected synthetic PDFs, in a browser (PIPELINE #6).
+- **Caught since:** TDS on an IDCW payout rejected the whole statement (#12); cost shows unknown for funds held before the statement period; the checklist itself gave the wrong CDSL password advice.
+
+### 5. Test the instructions, not just the app
+- **What happened:** running the owner's checklist ourselves showed two wrong instructions: "CDSL password is sometimes PAN + DOB" (CDSL's FAQ says PAN), and "cover at least 6 months" (cost needs the statement to start before the first investment).
+- **Lesson:** a UAT checklist is part of the product and needs the same testing.
+- **Rule:** covered by agent-first UAT; checklist fixes ship with the run that found them.
+
+### 6. Make fake green impossible
+- **Pushback:** the owner asked for before and after screenshots, and then video, so that no agent can report a pass without proof.
+- **Lesson:** evidence must be something a reader can check: files with hashes, not a sentence.
+- **Rule:** before/after screenshots, video for multi-step browser flows, raw output with exit codes, sha256 in the verdict; no evidence means no merge (PIPELINE #7, #8).
+
+### 7. A new test can pass for the wrong reason
+- **What happened:** the first set of property tests passed with the #4 fix reverted, so they did not guard against the bug that motivated them.
+- **Lesson:** a test only counts once you have seen it fail on the bug it is meant to catch.
+- **Rule:** property tests are a gate, and every new test is mutation-checked by reverting the fix (PIPELINE #5).
+- **Caught since:** the gap itself; a demat property was added and now catches the revert.
+
+### 8. Small drops, real QA between them
+- **Pushback:** no large codebase without real QA; split features into small batches the owner tests end to end.
+- **Lesson:** merged is not released. Main can move fast; a version tag waits for the owner.
+- **Rule:** drop 1 / drop 2 split, `v0.N` tag only after the owner's run, retro at sprint end (PIPELINE #3).
+
+### 9. The repository is public
+- **Lesson:** every fixture, screenshot and log could be read by anyone. Synthetic data only, invented names, a fake PAN; the owner never sends a PDF or password.
+- **Rule:** hard rules in `CLAUDE.md`; evidence screenshots show synthetic data only.
+
+### 10. A fix can be wrong in a case nobody looked at
+- **What happened:** #12 fixed TDS on an IDCW payout, but also took TDS off a reinvested IDCW, whose amount is already net. The verifier's own property test found it, shrunk to a 1-paisa example. Before the fix such a CAS was rejected; after it, it would have imported a wrong amount silently, and re-importing the same file cannot correct a stored fact.
+- **Lesson:** the riskiest bug turns a loud rejection into a quiet wrong number.
+- **Rule:** fix-forward with a test asserting Income equals the net Buy; the verifier mutation-checks it.
+
+### 11. Commit before a mutation check
+- **What happened:** during a mutation check, `git checkout -- file` restored the file to the last commit and wiped the uncommitted fix along with the mutation. It was noticed from `git diff --stat` and re-applied.
+- **Lesson:** mutations are reverted with git, so the real change must already be in git.
+- **Rule:** commit (a WIP commit is fine) before injecting mutations.
+
+### 12. Properties can look strong and still miss most bugs
+- **What happened:** the #11 verifier injected 10 bugs of its own; the new properties caught 4. One property could not fail (share + rest equals the total by construction), about half the retract examples checked nothing, exact .5 ties were almost never drawn, and nothing checked money in the ledger.
+- **Lesson:** the author's mutation check uses bugs the author already thought of; the verifier's finds the ones they did not.
+- **Rule:** every new or changed test is mutation-checked by the verifier with its own mutations (PIPELINE #10).
+- **Caught since:** #14 closes all six gaps, including a ledger read (`Ledger._latest`) that had no test at all.
+
+### 13. History needs checking too
+- **What happened:** the first version of this file and PIPELINE.md said two PRs had failed verification; the record shows #3 and #4's first FAIL as well. One claim ("no PDF had ever gone through the app") overstated what was true.
+- **Lesson:** a log written from memory drifts from the record, and a flattering log teaches the wrong lesson.
+- **Rule:** docs about our own process are verified against PR comments and git history (PIPELINE #11).

@@ -45,7 +45,18 @@ The per-feature recipes are in [features/README.md](features/README.md).
 - For each command, save the command, its stdout, stderr and exit code to `$RUN/evidence/<feature>-<step>.txt`.
 - For a command that writes, also save a second read-only view of the result, such as `stockin doctor --json` or, once it lands, `stockin reconcile --json`.
 - **Before and after, always.** For every step that writes or shows something, capture the state before the step and after it: a Playwright screenshot of the page for web steps (`page.screenshot({path, fullPage: true})`), and a read-only `--json` view for CLI steps. Name them `<step>-before.png` / `<step>-after.png` (or `.txt`).
-- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/` and put `sha256sum` of every file in the verdict comment, with the key lines. A verdict without this list is not a verdict.
+- **Video for multi-step flows.** When a recipe drives more than one page in the browser, record it. With `EV` set to `$RUN/evidence`:
+
+  ```js
+  const ctx = await browser.newContext({ recordVideo: { dir: `${EV}/video`, size: { width: 1280, height: 900 } } });
+  const page = await ctx.newPage();
+  // ... drive the flow, screenshotting before and after each step ...
+  const video = page.video();
+  await ctx.close();                   // closing the context writes the .webm
+  await video.saveAs(`${EV}/<feature>-flow.webm`);
+  await browser.close();
+  ```
+- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then run `sha256sum` **in that folder, after copying** (the share adds metadata to PNGs, so a hash taken before the copy will not match). Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
 - Fixtures only: screenshots must show synthetic data. Never screenshot a real ledger.
 
 ## Cleanup
