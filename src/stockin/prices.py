@@ -87,6 +87,31 @@ class PricesMissing(FileNotFoundError):
     """Raised by a read handle when no prices have been fetched yet."""
 
 
+class PricesDamaged(ValueError):
+    """prices.db exists but is not a Stockin price file (or not SQLite)."""
+
+
+_COLUMNS = ("isin", "on_date", "source", "micro_rupees")
+
+
+def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
+    """True if the quotes table is there with our columns; False if the file
+    has no tables at all (new or 0 bytes). Anything else is PricesDamaged:
+    never guess at, or write into, a file we did not make."""
+    try:
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        cols = tuple(r[1] for r in conn.execute("PRAGMA table_info(quotes)"))
+    except sqlite3.DatabaseError as exc:
+        conn.close()
+        raise PricesDamaged(f"{path} is not a Stockin price file ({exc})") from None
+    if not tables:
+        return False
+    if cols != _COLUMNS:
+        conn.close()
+        raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
+    return True
+
+
 class PriceStore:
     """prices.db. `book()` for readers; `put()` only for the price job."""
 
@@ -100,13 +125,7 @@ class PriceStore:
                 raise PricesMissing(f"no prices at {path}; run `stockin prices fetch`")
             conn = sqlite3.connect(path)
             conn.execute("PRAGMA query_only=ON")
-            try:
-                has = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quotes'"
-                ).fetchone()
-            except sqlite3.DatabaseError:
-                has = None
-            if has is None:  # an empty or foreign file: treat as no prices yet
+            if not _check_shape(conn, path):  # an empty file: nothing fetched yet
                 conn.close()
                 raise PricesMissing(f"{path} holds no prices; run `stockin prices fetch`")
             return cls(conn)
@@ -115,6 +134,7 @@ class PriceStore:
         conn = sqlite3.connect(path, isolation_level=None)
         if fresh:
             path.chmod(0o600)  # which ISINs you hold is private, like ledger.db
+        _check_shape(conn, path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         conn.isolation_level = "DEFERRED"

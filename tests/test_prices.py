@@ -1,4 +1,6 @@
+import io
 import json
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -351,12 +353,11 @@ def test_a_week_with_no_nse_file_is_reported(monkeypatch: pytest.MonkeyPatch) ->
         eod.fetch_bhavcopy(date(2026, 11, 16))
 
 
-@pytest.mark.parametrize("content", [b"", b"not a database at all, just text"])
-def test_an_empty_or_foreign_prices_db_means_no_prices_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+def test_an_empty_prices_db_means_no_prices_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _ledger_with_mf_and_demat(tmp_path, monkeypatch)
-    (tmp_path / "prices.db").write_bytes(content)
+    (tmp_path / "prices.db").write_bytes(b"")
     doctor = runner.invoke(app, ["doctor", "--json"])
     checks = {c["name"]: c for c in json.loads(doctor.output)["checks"]}
     assert checks["quotes"]["detail"] == "no prices yet"
@@ -395,3 +396,169 @@ def test_fetch_keeps_amfi_when_nse_keeps_cutting_off(
     report = json.loads(result.output)
     assert report["read"] == len(amfi)
     assert len(report["failed"]) == 1 and report["failed"][0].startswith("NSE")
+
+
+def _foreign_sqlite(path: Path) -> None:
+    import sqlite3
+
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TABLE quotes(a, b)")
+
+
+@pytest.mark.parametrize("kind", ["text", "other-sqlite"])
+def test_a_prices_db_we_did_not_make_is_reported_and_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    db = tmp_path / "prices.db"
+    if kind == "text":
+        db.write_bytes(b"not a database at all, just text, long enough to have a header")
+    else:
+        _foreign_sqlite(db)
+    before = db.read_bytes()
+    checks = {
+        c["name"]: c for c in json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+    }
+    assert checks["quotes"]["status"] == "fail"
+    assert "not a Stockin price file" in checks["quotes"]["detail"]
+    for args in (
+        ["holdings"],
+        ["prices", "import", str(EOD / "bhavcopy-sample.csv")],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 2, (args, result.output)
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "move prices.db aside" in result.output
+    assert db.read_bytes() == before
+
+
+def test_a_404_from_the_server_means_no_file_that_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+
+    calls: list[str] = []
+
+    def answer(code: int):  # type: ignore[no-untyped-def]
+        def urlopen(req: object, timeout: float) -> _Resp:
+            calls.append("x")
+            raise urllib.error.HTTPError("https://x", code, "no", {}, None)  # type: ignore[arg-type]
+
+        return urlopen
+
+    monkeypatch.setattr(eod, "_sleep", lambda s: None)
+    monkeypatch.setattr(eod.urllib.request, "urlopen", answer(404))
+    assert eod._get("https://example.invalid/x") is None  # pyright: ignore[reportPrivateUsage]
+    assert len(calls) == 1  # a 404 is an answer, not retried
+    calls.clear()
+    monkeypatch.setattr(eod.urllib.request, "urlopen", answer(403))
+    with pytest.raises(urllib.error.HTTPError):
+        eod._get("https://example.invalid/x")  # pyright: ignore[reportPrivateUsage]
+    assert len(calls) == 1  # a 4xx other than 404 is not retried either
+
+
+def test_retries_wait_2_then_4_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+
+    def down(req: object, timeout: float) -> _Resp:
+        raise ConnectionResetError(104, "Connection reset by peer")
+
+    monkeypatch.setattr(eod.urllib.request, "urlopen", down)
+    monkeypatch.setattr(eod, "_sleep", waits.append)
+    with pytest.raises(ConnectionResetError):
+        eod._get("https://example.invalid/x")  # pyright: ignore[reportPrivateUsage]
+    assert waits == [2, 4]
+
+
+def test_the_lookback_reaches_a_full_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = (EOD / "bhavcopy-sample.csv.zip").read_bytes()
+
+    def get(url: str) -> bytes | None:
+        return data if "_20261109_" in url else None  # only the Monday a week ago
+
+    monkeypatch.setattr(eod, "_get", get)
+    assert eod.fetch_bhavcopy(date(2026, 11, 16))
+
+
+def _zip_edits() -> dict[str, bytes]:
+    whole = bytearray((EOD / "bhavcopy-sample.csv.zip").read_bytes())
+    out: dict[str, bytes] = {}
+    enc = bytearray(whole)
+    enc[6] |= 0x01  # local header general-purpose flag: "encrypted"
+    cd = whole.rfind(b"PK\x01\x02")
+    enc[cd + 8] |= 0x01  # and the same flag in the central directory
+    out["encrypted-flag"] = bytes(enc)
+    bad_off = bytearray(whole)
+    eocd = whole.rfind(b"PK\x05\x06")
+    bad_off[eocd + 16 : eocd + 20] = (0xFFFFFFF0).to_bytes(4, "little")
+    out["central-directory-offset"] = bytes(bad_off)
+    flipped = bytearray(whole)
+    name_len = int.from_bytes(whole[26:28], "little")
+    extra_len = int.from_bytes(whole[28:30], "little")
+    start = 30 + name_len + extra_len
+    flipped[start + 3] ^= 0x01  # the fixture is stored: a changed byte fails the CRC
+    out["stored-byte-crc"] = bytes(flipped)
+    # NSE deflates its zips: a reserved block type is a broken stream (zlib.error)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("BhavCopy.csv", (EOD / "bhavcopy-sample.csv").read_bytes())
+    deflated = bytearray(buf.getvalue())
+    name_len = int.from_bytes(deflated[26:28], "little")
+    extra_len = int.from_bytes(deflated[28:30], "little")
+    deflated[30 + name_len + extra_len] = 0xFF  # BFINAL=1, BTYPE=11 (reserved)
+    out["deflate-stream"] = bytes(deflated)
+    return out
+
+
+@pytest.mark.parametrize("name", sorted(_zip_edits()))
+def test_damaged_zip_headers_and_streams_are_rejected(name: str) -> None:
+    with pytest.raises(eod.EodRejected):
+        eod.parse_bhavcopy(_zip_edits()[name])
+
+
+def test_every_single_byte_flip_of_a_bhavcopy_zip_parses_or_is_rejected() -> None:
+    whole = (EOD / "bhavcopy-sample.csv.zip").read_bytes()
+    good = eod.parse_bhavcopy(whole)
+    for i in range(len(whole)):
+        for bit in (0x01, 0x80):
+            data = bytearray(whole)
+            data[i] ^= bit
+            try:
+                eod.parse_bhavcopy(bytes(data))
+            except eod.EodRejected:
+                continue
+            # accepted: only bytes the zip format ignores (times, comments) may change
+            assert eod.parse_bhavcopy(bytes(data)) == good, (i, bit)
+
+
+def test_a_csv_cut_off_mid_row_is_rejected() -> None:
+    text = (EOD / "bhavcopy-sample.csv").read_bytes()
+    with pytest.raises(eod.EodRejected, match="mid-row"):
+        eod.parse_bhavcopy(text[:-7])
+
+
+def test_a_navall_saved_with_a_byte_order_mark_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    nav = tmp_path / "NAVAll-bom.txt"
+    nav.write_bytes(b"\xef\xbb\xbf" + (EOD / "NAVAll-sample.txt").read_bytes())
+    result = runner.invoke(app, ["prices", "import", str(nav), "--json"])
+    assert result.exit_code == 0, result.output
+    assert "(amfi)" in json.loads(result.output)["source"]
+
+
+def test_an_unexpected_error_in_one_source_keeps_the_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    amfi = eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text())
+
+    def boom(today: date) -> tuple[Quote, ...]:
+        raise KeyError("something nobody planned for")
+
+    monkeypatch.setattr(eod, "fetch_amfi", lambda: amfi)
+    monkeypatch.setattr(eod, "fetch_bhavcopy", boom)
+    result = runner.invoke(app, ["prices", "fetch", "--json"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["read"] == len(amfi)
+    assert report["failed"] == ["NSE: unexpected KeyError: 'something nobody planned for'"]

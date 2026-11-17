@@ -19,7 +19,7 @@ from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .money import Money, Value
-from .prices import PriceBook, PricesMissing, PriceStore, Quote
+from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, Quote
 from .sources import cas, eod
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
 
@@ -108,6 +108,9 @@ def diagnose(root: Path) -> Doctor:
     )
 
 
+_DAMAGED_HINT = "move prices.db aside (prices download again) and run `stockin prices fetch`"
+
+
 def _quotes_check(path: Path) -> DoctorCheck:
     hint = "run `stockin prices fetch` (AMFI NAVs and the NSE bhavcopy)"
     if not path.is_file():
@@ -117,6 +120,8 @@ def _quotes_check(path: Path) -> DoctorCheck:
             latest, n = store.latest_day(), store.count()
     except PricesMissing:
         latest, n = None, 0
+    except PricesDamaged as exc:
+        return DoctorCheck(name="quotes", status="fail", detail=str(exc), hint=_DAMAGED_HINT)
     if latest is None:
         return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
     return DoctorCheck(name="quotes", status="ok", detail=f"{n} end-of-day prices, latest {latest}")
@@ -229,6 +234,8 @@ def _price_book(isins: frozenset[Isin]) -> PriceBook | None:
             return store.book(isins)
     except PricesMissing:
         return None
+    except PricesDamaged as exc:
+        raise _fail(str(exc), _DAMAGED_HINT) from None
 
 
 import_app = typer.Typer(no_args_is_help=True, help="Import a statement into your ledger.")
@@ -318,10 +325,13 @@ def _held_isins() -> frozenset[Isin]:
 
 def _store_quotes(source: str, quotes: tuple[Quote, ...], held: frozenset[Isin]) -> PricesReport:
     kept = eod.only(quotes, held)
-    with PriceStore.open(prices_path(), write=True) as store:
-        changed = store.put(kept)
-        book = store.book(held)
-        latest = store.latest_day()
+    try:
+        with PriceStore.open(prices_path(), write=True) as store:
+            changed = store.put(kept)
+            book = store.book(held)
+            latest = store.latest_day()
+    except PricesDamaged as exc:
+        raise _fail(str(exc), _DAMAGED_HINT) from None
     unpriced = tuple(sorted(i for i in held if book.get(i) is None))
     return PricesReport(
         source=source,
@@ -367,6 +377,8 @@ def prices_fetch(as_json: JsonFlag = False) -> None:
             got.extend(fetch())
         except (OSError, http.client.HTTPException, eod.EodRejected) as exc:
             failed.append(f"{name}: {exc}")
+        except Exception as exc:  # one source's surprise must not cost the other's prices
+            failed.append(f"{name}: unexpected {type(exc).__name__}: {exc}")
     if len(failed) == 2:
         raise _fail(
             "could not download prices: " + "; ".join(failed), "check your internet and try again"
@@ -384,8 +396,9 @@ def prices_import(
     held = _held_isins()
     data = file.read_bytes()
     try:
-        if data.startswith(b"Scheme Code;"):
-            quotes, source = eod.parse_amfi(data.decode("utf-8", errors="replace")), "amfi"
+        if data.removeprefix(b"\xef\xbb\xbf").startswith(b"Scheme Code;"):
+            text = data.decode("utf-8-sig", errors="replace")
+            quotes, source = eod.parse_amfi(text), "amfi"
         else:
             quotes, source = eod.parse_bhavcopy(data), "nse"
     except (eod.EodRejected, UnicodeDecodeError, OSError) as exc:

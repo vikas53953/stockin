@@ -102,11 +102,19 @@ def _csv_text(data: bytes) -> str:
                 if len(names) != 1:
                     raise EodRejected("bhavcopy zip should hold exactly one CSV")
                 data = z.read(names[0])
-        return data.decode("utf-8-sig")
-    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as exc:
-        raise EodRejected(f"the bhavcopy zip is damaged or incomplete ({exc})") from None
+        text = data.decode("utf-8-sig")
+        if text and not text.endswith("\n"):
+            # NSE's files end with a newline; one that stops mid-row was cut off
+            raise EodRejected("the bhavcopy CSV ends mid-row (an incomplete download?)")
+        return text
     except UnicodeDecodeError:
         raise EodRejected("the bhavcopy is not UTF-8 text") from None
+    except EodRejected:
+        raise
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError, ValueError, RuntimeError) as exc:
+        # zipfile reports a damaged archive as any of these (a flipped
+        # "encrypted" bit is RuntimeError, a bad directory offset ValueError)
+        raise EodRejected(f"the bhavcopy zip is damaged or incomplete ({exc})") from None
 
 
 def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
@@ -167,7 +175,7 @@ def fetch_amfi() -> tuple[Quote, ...]:
     data = _get(AMFI_URL)
     if data is None:
         raise EodRejected("AMFI NAVAll.txt was not found")
-    return parse_amfi(data.decode("utf-8", errors="replace"))
+    return parse_amfi(data.decode("utf-8-sig", errors="replace"))
 
 
 def fetch_bhavcopy(today: date, days_back: int = 7) -> tuple[Quote, ...]:
