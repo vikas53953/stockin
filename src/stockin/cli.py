@@ -18,6 +18,7 @@ import typer
 from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
+from .insights import Insight, all_insights
 from .money import Money, Value
 from .prices import PriceBook, PricesMissing, PriceStore, Quote
 from .sources import cas, eod
@@ -295,6 +296,34 @@ def holdings(as_json: JsonFlag = False) -> None:
         typer.echo(line)
     if prices is None:
         typer.echo("(no prices yet: run `stockin prices fetch` to see value and gain)")
+
+
+class InsightsView(Value):
+    priced_on: str | None  # latest price date used, None before any fetch
+    insights: tuple[Insight, ...]
+
+
+@app.command("insights")
+def insights_cmd(as_json: JsonFlag = False) -> None:
+    """What your numbers say: what changed, concentration, unknown cost, SIPs, tax dates."""
+    from datetime import date
+
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    held = frozenset(h.isin for h in book.holdings())
+    prices = _price_book(held) or PriceBook(quotes={})
+    found = all_insights(book, prices, date.today())
+    days = [q.on for q in prices.quotes.values()]
+    view = InsightsView(priced_on=max(days).isoformat() if days else None, insights=found)
+    if as_json:
+        typer.echo(view.model_dump_json(indent=2))
+        return
+    marks = {"warn": "!", "unknown": "?", "good": "+", "info": "-"}
+    for i in found:
+        typer.echo(f"{marks[i.tone]} {i.headline}")
+        typer.echo(f"    {i.detail}")
+    if view.priced_on is None:
+        typer.echo("(no prices yet: run `stockin prices fetch` for value-based insights)")
 
 
 prices_app = typer.Typer(no_args_is_help=True, help="End-of-day prices for what you hold.")
