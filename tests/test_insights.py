@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -13,7 +14,16 @@ import cas_fixtures as fx
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from test_properties import MONTHS, Trade, _statement, histories, windows  # type: ignore[attr-defined]
+from test_properties import (  # type: ignore[attr-defined]
+    MONTHS,
+    STOCKS,
+    Trade,
+    _demat,
+    _statement,
+    demat_months,
+    histories,
+    windows,
+)
 from typer.testing import CliRunner
 
 from stockin.book import Book
@@ -32,14 +42,16 @@ from stockin.insights import (
     weights,
     what_changed,
 )
-from stockin.money import Money, Price, div_half_even
+from stockin.money import Money, Price, Qty, div_half_even
 from stockin.prices import PriceBook, Quote
 from stockin.sources import cas
 
 TODAY = date(2026, 11, 17)
 
 
-def _book(statements: list[fx.CASData], shuffle: random.Random | None = None) -> Book:
+def _book(
+    statements: Sequence[fx.CASData | fx.NSDLCASData], shuffle: random.Random | None = None
+) -> Book:
     facts, insts, accts = [], {}, {}
     for s in statements:
         st_ = cas.from_casparser(s, "sha")
@@ -110,6 +122,39 @@ def test_every_sentence_is_built_from_its_own_numbers(
         for found in re.findall(r"\d+\.\d%", text):
             sizes = [abs(int(v)) for k, v in n.items() if k.endswith("bps")]
             assert any(pct(v) == found for v in sizes), found
+
+
+@given(
+    histories(),
+    demat_months(),
+    windows,
+    st.fixed_dictionaries({i: nav for i in (fx.HDFC_MF, fx.ICICI_MF, *STOCKS)}),
+)
+def test_concentration_matches_an_independent_count_over_up_to_five_holdings(
+    history: dict[str, list[Trade]],
+    held: list[dict[str, int]],
+    ws: list[tuple[int, int]],
+    ps: dict[str, int],
+) -> None:
+    book = _book([_statement(history, a, b) for a, b in ws] + [_demat(held, a, b) for a, b in ws])
+    micros: dict[str, int] = {}  # units per ISIN across accounts
+    for h in book.holdings():
+        micros[h.isin] = micros.get(h.isin, 0) + h.qty.micros
+    vals = sorted(
+        (Money.of(Qty(micros=u), Price(micro_rupees=ps[i])).paise for i, u in micros.items()),
+        reverse=True,
+    )
+    ins = concentration(book, _prices(ps))
+    if not vals or sum(vals) <= 0:
+        assert ins is None
+        return
+    assert ins is not None
+    total = sum(vals)
+    top = div_half_even(vals[0] * 10_000, total)
+    top3 = div_half_even(sum(vals[:3]) * 10_000, total)
+    assert (ins.numbers["top_bps"], ins.numbers["top3_bps"]) == (top, top3)
+    assert ins.headline.startswith("One holding is") == (top > 2_500)
+    assert (ins.tone == "warn") == (top > 2_500 or top3 > 5_000)
 
 
 @given(histories(), windows, navs, st.randoms(use_true_random=False))
