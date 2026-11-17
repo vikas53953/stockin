@@ -20,7 +20,7 @@ from typing import Any
 
 import cas_fixtures as fx
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from stockin.book import Book, reconcile
@@ -52,10 +52,20 @@ def test_half_even_division_matches_exact_rounding(num: int, den: int) -> None:
     assert div_half_even(num, den) == round(Fraction(num, den))  # round() is half-even
 
 
+@given(st.integers(-(10**12), 10**12), st.integers(1, 10**6))
+def test_exact_halves_round_to_even(q: int, d: int) -> None:
+    """Random draws almost never land on an exact .5, so build ties directly."""
+    num, den = q * 2 * d + d, 2 * d  # num / den == q + 1/2
+    assert div_half_even(num, den) == round(Fraction(num, den))
+
+
 @given(paise, st.integers(1, 10**12), st.data())
-def test_a_split_never_leaks_a_paisa(p: int, whole: int, data: st.DataObject) -> None:
-    part = data.draw(st.integers(0, whole))
+def test_a_split_share_is_the_half_even_share_and_never_leaks(
+    p: int, whole: int, data: st.DataObject
+) -> None:
+    part = data.draw(st.integers(0, whole) | st.just(whole // 2))
     share, rest = Money(paise=p).split(Qty(micros=part), Qty(micros=whole))
+    assert share.paise == round(Fraction(p * part, whole))
     assert share + rest == Money(paise=p)
 
 
@@ -77,14 +87,21 @@ MONTHS = 6
 
 
 @st.composite
-def histories(draw: st.DrawFn) -> dict[str, list[Trade]]:
-    """A true, valid history per scheme: units never go below zero."""
+def histories(draw: st.DrawFn, one_trade_a_day: bool = False) -> dict[str, list[Trade]]:
+    """A true, valid history per scheme: units never go below zero. With
+    `one_trade_a_day`, no two trades of a scheme share a date, so FIFO order
+    is the statement order (same-day lots are ordered by fact id instead)."""
     out: dict[str, list[Trade]] = {}
     for isin in draw(st.sampled_from([[fx.HDFC_MF], [fx.ICICI_MF], list(SCHEMES)])):
         held = Decimal(0)
         trades: list[Trade] = []
         raw = draw(
-            st.lists(st.tuples(st.integers(1, MONTHS), st.integers(1, 28)), min_size=1, max_size=12)
+            st.lists(
+                st.tuples(st.integers(1, MONTHS), st.integers(1, 28)),
+                min_size=1,
+                max_size=12,
+                unique=one_trade_a_day,
+            )
         )
         for month, day in sorted(raw):
             sell = held > 0 and draw(st.booleans())
@@ -120,12 +137,16 @@ def _rows(t: Trade) -> list[dict[str, Any]]:
     return rows
 
 
-def _statement(history: dict[str, list[Trade]], first: int, last: int) -> fx.CASData:
-    """The CAS that CAMS would issue for months first..last."""
+def _statement(
+    history: dict[str, list[Trade]], first: int, last: int, *, dated_names: bool = False
+) -> fx.CASData:
+    """The CAS that CAMS would issue for months first..last. With
+    `dated_names`, each statement names the scheme after its last month, the
+    way a fund renamed mid-year shows its new name only in later statements."""
     schemes = [
         fx.scheme(
             isin,
-            SCHEMES[isin],
+            f"{SCHEMES[isin]} (as of {last})" if dated_names else SCHEMES[isin],
             str(_units(trades, first - 1)),
             str(_units(trades, last)),
             [r for t in trades if first <= t.month <= last for r in _rows(t)],
@@ -235,8 +256,7 @@ def test_retract_is_the_exact_inverse_of_ingest(
 ) -> None:
     statements = [_statement(history, a, b) for a, b in ws]
     extra = _statement(history, *data.draw(windows)[0])
-    if _sha(extra) in {_sha(s) for s in statements}:
-        return  # retracting a statement already present would remove it twice over
+    assume(_sha(extra) not in {_sha(s) for s in statements})  # else it is not "extra"
     with tempfile.TemporaryDirectory() as tmp, LedgerWriter.open(Path(tmp) / "l.db") as w:
         for s in statements:
             w.ingest(cas.from_casparser(s, _sha(s)))
@@ -258,6 +278,72 @@ def test_holdings_do_not_depend_on_fact_order(
     one, two = Book.of(tuple(facts)), Book.of(tuple(shuffled))
     assert one.holdings() == two.holdings()
     assert reconcile(one) == reconcile(two)
+    latest = max(b for _, b in ws)
+    expected = {
+        isin: Qty.parse(str(_units(trades, latest)))
+        for isin, trades in history.items()
+        if _units(trades, latest)
+    }
+    assert {h.isin: h.qty for h in one.holdings()} == expected  # right, not just consistent
+
+
+def _fifo(trades: list[Trade], upto: int) -> tuple[int, int]:
+    """An independent model of cost: (cost paise of what is held, total
+    proceeds paise of every sell). FIFO lots; stamp duty adds to a buy's cost,
+    STT comes off a sell's proceeds; a part-lot's cost is its half-even share."""
+    lots: list[list[int]] = []  # [micros, cost paise]
+    proceeds = 0
+    for t in trades:
+        if t.month > upto:
+            continue
+        micros, paise = int(t.units * 1_000_000), int(t.amount * 100)
+        tax = int(t.tax * 100) if t.tax is not None else 0
+        if t.buy:
+            lots.append([micros, paise + tax])
+            continue
+        proceeds += paise - tax
+        while micros:
+            lot = lots[0]
+            take = min(lot[0], micros)
+            share = round(Fraction(lot[1] * take, lot[0]))
+            lot[0], lot[1], micros = lot[0] - take, lot[1] - share, micros - take
+            if not lot[0]:
+                lots.pop(0)
+    return sum(c for _, c in lots), proceeds
+
+
+@given(histories(one_trade_a_day=True), st.integers(1, MONTHS))
+def test_cost_and_proceeds_match_an_independent_fifo_model(
+    history: dict[str, list[Trade]], last: int
+) -> None:
+    """Money, not just units: a statement from the first month on gives every
+    lot, so cost and proceeds are fully known and must match the model."""
+    book = Book.of(cas.from_casparser(_statement(history, 1, last), "sha").facts)
+    held = {h.isin: h for h in book.holdings()}
+    for acct, isin in book.pairs():
+        cost, proceeds = _fifo(history[isin], last)
+        timeline = book.timeline(acct, isin)
+        got = sum(d.proceeds.paise for d in timeline.disposals if d.proceeds is not None)
+        assert got == proceeds
+        if isin in held:
+            assert held[isin].cost == Money(paise=cost)
+
+
+@given(histories(), windows, st.randoms(use_true_random=False))
+def test_instrument_details_come_from_the_latest_statement_in_any_order(
+    history: dict[str, list[Trade]], ws: list[tuple[int, int]], rnd: random.Random
+) -> None:
+    statements = [_statement(history, a, b, dated_names=True) for a, b in ws]
+    rnd.shuffle(statements)
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "l.db"
+        _ingest_all(db, statements)
+        with Ledger.open(db) as led:
+            book = led.book()
+    latest = max(b for _, b in ws)
+    for isin in history:
+        inst = book.instrument(isin)  # type: ignore[arg-type]
+        assert inst is not None and inst.name == f"{SCHEMES[isin]} (as of {latest})"
 
 
 # ------------------------------------------------------------- demat CAS
