@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Literal
 
 from casparser import read_cas_pdf  # pyright: ignore[reportUnknownVariableType]
+from casparser.exceptions import IncorrectPasswordError, ParserException
 from casparser.types import CASData, DematAccount, NSDLCASData, Scheme, TransactionData
 
 from ..facts import (
@@ -69,7 +70,7 @@ def read(path: Path, password: str = "") -> Statement:
         try:
             parsed: object = read_cas_pdf(str(path), password)
         except Exception as exc:  # casparser raises several types; never echo the password
-            raise CasRejected(f"could not read {path.name}: {type(exc).__name__}") from None
+            raise CasRejected(_pdf_reason(path.name, exc)) from None
         if not isinstance(parsed, CASData | NSDLCASData):
             raise CasRejected("unexpected parser output")
         data = parsed
@@ -94,6 +95,21 @@ def _from_json(raw: bytes) -> CASData | NSDLCASData:
         return NSDLCASData.model_validate(body)
     except (ValueError, ArithmeticError) as exc:  # pydantic's ValidationError is a ValueError
         raise CasRejected(f"not a valid casparser statement ({_why(exc)})") from None
+    except (AttributeError, TypeError):  # casparser's own validators on a null section
+        raise CasRejected("not a valid casparser statement (a section is empty)") from None
+
+
+def _pdf_reason(filename: str, exc: BaseException) -> str:
+    """Plain words for the PDF failures people actually hit. Never includes
+    the password: casparser's own messages are not passed through."""
+    if isinstance(exc, IncorrectPasswordError):
+        return f"wrong password for {filename} (it is usually your PAN in capitals)"
+    if isinstance(exc, ParserException):
+        return (
+            f"{filename} does not look like a CAS from CAMS, KFintech, NSDL or CDSL "
+            "(download the detailed CAS PDF, not a portfolio summary or screenshot)"
+        )
+    return f"could not read {filename} ({type(exc).__name__})"
 
 
 def _why(exc: BaseException) -> str:

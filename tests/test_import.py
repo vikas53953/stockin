@@ -257,6 +257,32 @@ def test_malformed_files_are_rejected_not_crashed(
     assert "Traceback" not in r.output
 
 
+def test_null_scheme_is_rejected_not_crashed(tmp_path: Path) -> None:
+    body = json.loads(fx.JAN.model_dump_json(by_alias=True))
+    body["folios"][0]["schemes"][0] = None  # casparser's validator calls .items() on it
+    path = tmp_path / "n.json"
+    path.write_text(json.dumps(body))
+    with pytest.raises(cas.CasRejected):
+        cas.read(path)
+
+
+_BLANK_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+
+
+@pytest.mark.parametrize("body", [_BLANK_PDF, b"\x00\x01 not a pdf at all " * 50])
+def test_a_pdf_that_is_not_a_cas_is_said_in_plain_words(tmp_path: Path, body: bytes) -> None:
+    path = tmp_path / "statement.pdf"
+    path.write_bytes(body)
+    with pytest.raises(cas.CasRejected, match="does not look like a CAS") as err:
+        cas.read(path, "some-password")
+    assert "some-password" not in str(err.value)
+
+
 def test_ledger_file_is_private(tmp_path: Path) -> None:
     db = _ledger(tmp_path, "mf-2026-01.json")
     assert db.stat().st_mode & 0o077 == 0
