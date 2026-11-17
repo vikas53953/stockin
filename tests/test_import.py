@@ -257,6 +257,23 @@ def test_malformed_files_are_rejected_not_crashed(
     assert "Traceback" not in r.output
 
 
+def test_null_scheme_is_rejected_not_crashed(tmp_path: Path) -> None:
+    body = json.loads(fx.JAN.model_dump_json(by_alias=True))
+    body["folios"][0]["schemes"][0] = None  # casparser's validator calls .items() on it
+    path = tmp_path / "n.json"
+    path.write_text(json.dumps(body))
+    with pytest.raises(cas.CasRejected):
+        cas.read(path)
+
+
+def test_wrong_pdf_password_is_said_in_plain_words() -> None:
+    class IncorrectPasswordError(Exception):
+        pass
+
+    msg = cas._pdf_reason("my.pdf", IncorrectPasswordError("pw=secret"))  # pyright: ignore[reportPrivateUsage]
+    assert "wrong password for my.pdf" in msg and "secret" not in msg
+
+
 def test_ledger_file_is_private(tmp_path: Path) -> None:
     db = _ledger(tmp_path, "mf-2026-01.json")
     assert db.stat().st_mode & 0o077 == 0

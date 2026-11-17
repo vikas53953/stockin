@@ -69,7 +69,7 @@ def read(path: Path, password: str = "") -> Statement:
         try:
             parsed: object = read_cas_pdf(str(path), password)
         except Exception as exc:  # casparser raises several types; never echo the password
-            raise CasRejected(f"could not read {path.name}: {type(exc).__name__}") from None
+            raise CasRejected(_pdf_reason(path.name, exc)) from None
         if not isinstance(parsed, CASData | NSDLCASData):
             raise CasRejected("unexpected parser output")
         data = parsed
@@ -77,7 +77,8 @@ def read(path: Path, password: str = "") -> Statement:
         return from_casparser(data, sha)
     except CasRejected:
         raise
-    except (ValueError, ArithmeticError) as exc:  # a value our domain types refuse
+    except (ValueError, ArithmeticError, AttributeError, TypeError) as exc:
+        # a value our domain types refuse, or a field casparser left empty
         raise CasRejected(_why(exc)) from None
 
 
@@ -92,8 +93,21 @@ def _from_json(raw: bytes) -> CASData | NSDLCASData:
         if "folios" in body:
             return CASData.model_validate(body)
         return NSDLCASData.model_validate(body)
-    except (ValueError, ArithmeticError) as exc:  # pydantic's ValidationError is a ValueError
+    except (ValueError, ArithmeticError, AttributeError, TypeError) as exc:
+        # pydantic's ValidationError is a ValueError; casparser's own
+        # validators raise AttributeError on a null object
         raise CasRejected(f"not a valid casparser statement ({_why(exc)})") from None
+
+
+def _pdf_reason(filename: str, exc: BaseException) -> str:
+    """Plain words for the PDF failures people actually hit. Never includes
+    the password: casparser's own messages are not passed through."""
+    kind = type(exc).__name__
+    if "Password" in kind:
+        return f"wrong password for {filename} (it is usually your PAN in capitals)"
+    if "Header" in kind or "Incomplete" in kind or "Unsupported" in kind:
+        return f"{filename} does not look like a CAS from CAMS, KFintech, NSDL or CDSL"
+    return f"could not read {filename} ({kind})"
 
 
 def _why(exc: BaseException) -> str:

@@ -1,10 +1,10 @@
 <div class="scroll"><table>
-  <thead><tr><th>ISIN</th><th>Name</th><th class="num">Units</th><th class="num">Cost (₹)</th></tr></thead>
+  <thead><tr><th>Holding</th><th class="num">Units</th><th class="num">Cost (₹)</th></tr></thead>
   <tbody>
   {% for g in groups %}
-    <tr><td class="acct" colspan="4">{{ g.label }}</td></tr>
+    <tr><td class="acct" colspan="3">{{ g.label }}</td></tr>
     {% for r in g.rows %}
-    <tr><td class="isin">{{ r.isin }}</td><td class="name">{{ r.name }}</td><td class="num">{{ r.qty }}</td>
+    <tr><td class="name">{{ r.name }}<br><span class="isin">{{ r.isin }}</span></td><td class="num">{{ r.qty }}</td>
       <td class="num">{% if r.cost is not none %}{{ r.cost }}{% else %}<span class="unknown">unknown</span>{% endif %}</td></tr>
     {% endfor %}
   {% endfor %}

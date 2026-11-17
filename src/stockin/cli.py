@@ -269,10 +269,15 @@ def web(
     """Open the local web app: upload a CAS, see holdings and reconcile.
 
     Listens on 127.0.0.1 only, so nothing outside this computer can reach it."""
+    import socket
+
     import uvicorn
 
     from .web import create_app
 
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise _fail(f"port {port} is already in use", f"try: stockin web --port {port + 1}")
     typer.echo(f"Stockin is running at http://127.0.0.1:{port}  (Ctrl+C to stop)")
     uvicorn.run(create_app(ledger_path(), port), host="127.0.0.1", port=port, log_level="warning")
 

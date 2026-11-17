@@ -161,13 +161,13 @@ def create_app(db: Path, port: int) -> FastAPI:
         )
 
     @app.post("/import", response_class=HTMLResponse)
-    async def import_statement(
+    def import_statement(
         statement: Annotated[UploadFile, File()],
         password: Annotated[str, Form()] = "",
     ) -> Response:
         filename = Path(statement.filename or "statement").name
         suffix = ".json" if filename.lower().endswith(".json") else ".pdf"
-        body = await statement.read(MAX_UPLOAD + 1)
+        body = statement.file.read(MAX_UPLOAD + 1)  # sync handler: runs in a worker thread
         if len(body) > MAX_UPLOAD:
             return page(
                 "import.html",
