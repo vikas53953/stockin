@@ -56,8 +56,9 @@ The per-feature recipes are in [features/README.md](features/README.md).
   await video.saveAs(`${EV}/<feature>-flow.webm`);
   await video.delete();                // drop Playwright's own copy in $EV/video
   await browser.close();
+  require('fs').rmSync(`${EV}/video`, { recursive: true, force: true });
   ```
-- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then hash **in that folder, after the share has finished with the files**: the share adds a metadata chunk to each PNG a few seconds after the copy (pixels unchanged), so wait until `sha256sum` gives the same answer twice 30 seconds apart, then save it as `SHA256SUMS` and re-check it with `sha256sum -c` before posting. Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
+- Copy `$RUN/evidence/` to `/mnt/project-files/stockin/evidence/pr-<N>/`, then fingerprint it with `python3 .claude/skills/verify/evidence_hash.py <folder> > <folder>/EVIDENCE.sha256` and post that list. The share adds a metadata chunk to PNGs at an unpredictable time after the copy (seen from under 20 s to about 2 minutes), so a plain `sha256sum` of a PNG goes stale; the script hashes a PNG's image data only, which never changes, and every other file whole. Anyone re-checks with `evidence_hash.py <folder> --check <folder>/EVIDENCE.sha256`. Put the list in the verdict comment, with the key lines. A verdict without this list is not a verdict.
 - Fixtures only: screenshots must show synthetic data. Never screenshot a real ledger.
 
 ## Cleanup
