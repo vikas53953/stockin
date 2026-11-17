@@ -134,7 +134,7 @@ class Position(Value):
 ManualAsset = StatedBalance | FixedDeposit | GoldHolding
 
 
-def _fact_date(fact: Fact) -> date:
+def fact_date(fact: Fact) -> date:
     match fact:
         case Txn() | Balance() | Complete():
             return fact.on
@@ -225,7 +225,7 @@ class Book:
         accounts: tuple[Account, ...] = (),
         as_of: date | None = None,
     ) -> Book:
-        kept = facts if as_of is None else tuple(f for f in facts if _fact_date(f) <= as_of)
+        kept = facts if as_of is None else tuple(f for f in facts if fact_date(f) <= as_of)
         unique = tuple({fact_id(f): f for f in kept}.values())  # asserted twice is one fact
         return cls(
             unique,

@@ -1,0 +1,114 @@
+{
+  "statement_period": {
+    "from": "01-Jan-2026",
+    "to": "28-Feb-2026"
+  },
+  "folios": [
+    {
+      "folio": "9000001/01",
+      "amc": "HDFC Mutual Fund",
+      "name": null,
+      "PAN": null,
+      "KYC": null,
+      "PANKYC": null,
+      "schemes": [
+        {
+          "scheme": "HDFC Flexi Cap Fund - Direct Growth",
+          "advisor": null,
+          "rta_code": "X1",
+          "rta": "CAMS",
+          "type": "EQUITY",
+          "isin": "INF179K01BE2",
+          "amfi": null,
+          "nominees": [],
+          "open": "0",
+          "close": "130.5",
+          "close_calculated": "130.5",
+          "valuation": {
+            "date": "2026-01-31",
+            "nav": "100",
+            "cost": null,
+            "value": "0"
+          },
+          "transactions": [
+            {
+              "date": "2026-01-05",
+              "description": "Purchase_Sip",
+              "amount": "10000.00",
+              "units": "100.5",
+              "nav": null,
+              "balance": null,
+              "type": "PURCHASE_SIP",
+              "dividend_rate": null,
+              "gift_folio": null
+            },
+            {
+              "date": "2026-01-05",
+              "description": "Stamp_Duty_Tax",
+              "amount": "0.50",
+              "units": null,
+              "nav": null,
+              "balance": null,
+              "type": "STAMP_DUTY_TAX",
+              "dividend_rate": null,
+              "gift_folio": null
+            },
+            {
+              "date": "2026-01-20",
+              "description": "Purchase",
+              "amount": "5000.00",
+              "units": "50",
+              "nav": null,
+              "balance": null,
+              "type": "PURCHASE",
+              "dividend_rate": null,
+              "gift_folio": null
+            },
+            {
+              "date": "2026-01-20",
+              "description": "Stamp_Duty_Tax",
+              "amount": "0.25",
+              "units": null,
+              "nav": null,
+              "balance": null,
+              "type": "STAMP_DUTY_TAX",
+              "dividend_rate": null,
+              "gift_folio": null
+            },
+            {
+              "date": "2026-02-10",
+              "description": "Redemption",
+              "amount": "2100.00",
+              "units": "-20",
+              "nav": null,
+              "balance": null,
+              "type": "REDEMPTION",
+              "dividend_rate": null,
+              "gift_folio": null
+            },
+            {
+              "date": "2026-02-10",
+              "description": "Stt_Tax",
+              "amount": "0.02",
+              "units": null,
+              "nav": null,
+              "balance": null,
+              "type": "STT_TAX",
+              "dividend_rate": null,
+              "gift_folio": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investor_info": {
+    "name": "Test Investor",
+    "email": "test@example.invalid",
+    "address": "-",
+    "mobile": "-"
+  },
+  "cas_type": "DETAILED",
+  "file_type": "CAMS",
+  "parse_warnings": []
+}

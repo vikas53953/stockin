@@ -25,6 +25,8 @@ Stockin keeps its data in `./data`, or wherever `STOCKIN_DATA` points.
 
 ### 2. Import your holdings
 
+> **Working.** `stockin import cas` and `stockin holdings` run today. A PDF asks for its password (or reads `$STOCKIN_CAS_PASSWORD`), uses it once, and never stores it.
+
 Download your latest CAS from CAMS or KFintech (mutual funds) and NSDL or CDSL (demat, all brokers), then import each one:
 
 ```bash
@@ -32,7 +34,9 @@ stockin import cas ~/data/cas/2026-10-cams.pdf
 stockin import cas ~/data/cas/2026-10-nsdl.pdf
 ```
 
-Importing the same file twice changes nothing. You see one line per holding, grouped by account.
+Importing the same file twice changes nothing, and overlapping months are never double counted. You see one line per holding, grouped by account. `stockin holdings` shows them again at any time.
+
+Demat statements list balances, not trades, so cost shows as `unknown` for demat holdings until a tradebook importer exists. Stockin never invents a cost.
 
 ### 3. Add what the CAS does not cover
 
@@ -44,6 +48,8 @@ stockin asset add gold --grams 20
 ```
 
 ### 4. Check it matches
+
+> **Working.**
 
 ```bash
 stockin reconcile

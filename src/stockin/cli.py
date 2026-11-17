@@ -15,11 +15,15 @@ from typing import Annotated, Literal
 import typer
 
 from . import __version__
+from .book import Holding, ReconcileReport, reconcile
 from .money import Value
+from .sources import cas
+from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
     help="Private, read-only add/trim/exit decisions for your holdings.",
 )
 
@@ -134,6 +138,128 @@ class Version(Value):
 def version(as_json: JsonFlag = False) -> None:
     """Print the installed version."""
     typer.echo(Version(version=__version__).model_dump_json() if as_json else __version__)
+
+
+def ledger_path() -> Path:
+    return data_dir() / "ledger.db"
+
+
+def _fail(message: str, hint: str | None = None) -> typer.Exit:
+    typer.echo(f"error: {message}", err=True)
+    if hint:
+        typer.echo(f"  {hint}", err=True)
+    return typer.Exit(2)
+
+
+def _open_ledger() -> Ledger:
+    try:
+        return Ledger.open(ledger_path())
+    except LedgerMissing:
+        raise _fail(
+            f"no ledger at {ledger_path()}", "import a statement first: stockin import cas FILE"
+        ) from None
+
+
+def _holding_lines(ledger: Ledger, holdings: tuple[Holding, ...]) -> list[str]:
+    book = ledger.book()
+    lines: list[str] = []
+    current = None
+    for h in sorted(holdings, key=lambda h: (h.account, h.isin)):
+        if h.account != current:
+            current = h.account
+            acct = book.account(h.account)
+            lines.append(acct.masked if acct else h.account)
+        inst = book.instrument(h.isin)
+        name = inst.name if inst else h.isin
+        cost = f"cost {h.cost}" if h.cost is not None else "cost unknown"
+        lines.append(f"  {h.isin}  {name[:40]:<40} {h.qty!s:>16}  {cost}")
+    return lines
+
+
+import_app = typer.Typer(no_args_is_help=True, help="Import a statement into your ledger.")
+app.add_typer(import_app, name="import")
+
+
+@import_app.command("cas")
+def import_cas(
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    as_json: JsonFlag = False,
+) -> None:
+    """Import a CAMS/KFintech or NSDL/CDSL CAS (PDF, or casparser JSON).
+
+    A PDF's password is read from $STOCKIN_CAS_PASSWORD, else prompted for
+    without echo. It is used once and never stored or logged. Importing the
+    same file twice, or overlapping months, adds nothing the second time."""
+    password = ""
+    if file.suffix.lower() != ".json":
+        password = os.environ.get("STOCKIN_CAS_PASSWORD") or typer.prompt(
+            "CAS password", hide_input=True, default="", show_default=False
+        )
+    try:
+        statement = cas.read(file, password)
+    except cas.CasRejected as exc:
+        raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
+    with LedgerWriter.open(ledger_path()) as writer:
+        report: ImportReport = writer.ingest(statement)
+        lines = _holding_lines(writer, report.holdings)
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+    period = f"{report.period_start} to {report.period_end}"
+    typer.echo(f"{file.name}: {report.source}, {period}")
+    if report.seen_before:
+        typer.echo("  already imported; nothing changed")
+    typer.echo(
+        f"  {report.facts_added} new facts, {report.facts_already_present} already in your ledger"
+    )
+    for w in report.warnings:
+        typer.echo(f"  note: {w}")
+    for line in lines:
+        typer.echo(line)
+
+
+class HoldingsView(Value):
+    holdings: tuple[Holding, ...]
+
+
+@app.command()
+def holdings(as_json: JsonFlag = False) -> None:
+    """Units held per account and ISIN, folded from every imported statement."""
+    with _open_ledger() as ledger:
+        rows = ledger.book().holdings()
+        if as_json:
+            typer.echo(HoldingsView(holdings=rows).model_dump_json(indent=2))
+            return
+        if not rows:
+            typer.echo("no holdings")
+        for line in _holding_lines(ledger, rows):
+            typer.echo(line)
+
+
+@app.command("reconcile")
+def reconcile_cmd(as_json: JsonFlag = False) -> None:
+    """Check every statement balance against the transactions. Exit 1 on any mismatch."""
+    with _open_ledger() as ledger:
+        book = ledger.book()
+        report: ReconcileReport = reconcile(book)
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+    else:
+        counts = {s: sum(c.status == s for c in report.checks) for s in ("match", "inferred")}
+        typer.echo(
+            ("OK  " if report.ok else "")
+            + f"{len(report.checks)} checks: {counts['match']} match, "
+            f"{counts['inferred']} inferred, {len(report.mismatches)} mismatch"
+        )
+        for c in report.mismatches:
+            inst = book.instrument(c.isin)
+            acct = book.account(c.account)
+            typer.echo(
+                f"  MISMATCH {c.kind} {c.on} {c.isin} {inst.name if inst else ''} "
+                f"({acct.masked if acct else c.account}): statement {c.stated}, "
+                f"transactions {c.computed}"
+            )
+    raise typer.Exit(0 if report.ok else 1)
 
 
 def main() -> None:
