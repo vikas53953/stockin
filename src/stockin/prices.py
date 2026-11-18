@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, Self
+
+from pydantic import model_validator
 
 from .facts import Isin
 from .money import Money, Price, Qty, Value
@@ -31,6 +34,13 @@ _RANK: dict[str, int] = {"bhavcopy": 0, "amfi": 1}
 beats the AMFI NAV. Only an ETF has both."""
 
 
+MAX_PRICE_RUPEES = 10**7
+"""₹1 crore a unit. The dearest Indian share and the largest NAV are far
+below it; a price above it can only come from a damaged file, and it would
+not fit SQLite's integer as micro-rupees much further up."""
+MAX_PRICE_MICROS = MAX_PRICE_RUPEES * 10**6
+
+
 class Quote(Value):
     """The close of one instrument on one trading day, from one source."""
 
@@ -38,6 +48,12 @@ class Quote(Value):
     on: date
     price: Price
     source: Source
+
+    @model_validator(mode="after")
+    def _real_price(self) -> Self:
+        if self.price.micro_rupees > MAX_PRICE_MICROS:
+            raise ValueError(f"{self.isin}: price above ₹{MAX_PRICE_RUPEES:,} a unit")
+        return self
 
 
 class PriceBook(Value):
@@ -91,59 +107,93 @@ class PricesDamaged(ValueError):
     """prices.db exists but is not a Stockin price file (or not SQLite)."""
 
 
-_COLUMNS = ("isin", "on_date", "source", "micro_rupees")
+_COLUMNS = (("isin", 1), ("on_date", 2), ("source", 3), ("micro_rupees", 0))  # (name, pk position)
 
 
 def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
-    """True if the quotes table is there with our columns; False if the file
-    has no tables at all (new or 0 bytes). Anything else is PricesDamaged:
-    never guess at, or write into, a file we did not make."""
+    """True if prices.db is ours and intact; False if the file has no tables
+    at all (new or 0 bytes). Anything else is PricesDamaged: a file another
+    program made (even with our column names), a damaged page, or a row we
+    could not have written. Never guess at, or write into, such a file."""
     try:
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        cols = tuple(r[1] for r in conn.execute("PRAGMA table_info(quotes)"))
+        if not tables:
+            return False
+        cols = tuple((r[1], r[5]) for r in conn.execute("PRAGMA table_info(quotes)"))
+        if cols != _COLUMNS:
+            raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
+        check = [r[0] for r in conn.execute("PRAGMA quick_check")]
+        if check != ["ok"]:
+            raise PricesDamaged(f"{path} is damaged ({'; '.join(check[:2])})")
+        odd = conn.execute(
+            """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR length(isin) != 12
+                 OR typeof(on_date) != 'text'
+                 OR on_date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]'
+                 OR source NOT IN ('bhavcopy', 'amfi') OR typeof(micro_rupees) != 'integer'
+                 OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
+            (MAX_PRICE_MICROS,),
+        ).fetchone()
+        if odd is not None:
+            raise PricesDamaged(f"{path} holds rows Stockin could not have written")
     except sqlite3.DatabaseError as exc:
         conn.close()
         raise PricesDamaged(f"{path} is not a Stockin price file ({exc})") from None
-    if not tables:
-        return False
-    if cols != _COLUMNS:
+    except PricesDamaged:
         conn.close()
-        raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
+        raise
     return True
+
+
+@contextmanager
+def _guard(path: Path) -> Generator[None]:
+    """A read or write that still fails on the file (it changed under us, or
+    a date in it does not parse) is PricesDamaged, never a traceback."""
+    try:
+        yield
+    except (sqlite3.DatabaseError, ValueError) as exc:
+        if isinstance(exc, PricesDamaged):
+            raise
+        raise PricesDamaged(f"{path} could not be read as a Stockin price file ({exc})") from None
 
 
 class PriceStore:
     """prices.db. `book()` for readers; `put()` only for the price job."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, path: Path) -> None:
         self._conn = conn
+        self._path = path
 
     @classmethod
     def open(cls, path: Path, *, write: bool = False) -> Self:
         if not write:
             if not path.is_file():
                 raise PricesMissing(f"no prices at {path}; run `stockin prices fetch`")
-            conn = sqlite3.connect(path)
-            conn.execute("PRAGMA query_only=ON")
+            with _guard(path):
+                conn = sqlite3.connect(path)
+                conn.execute("PRAGMA query_only=ON")
             if not _check_shape(conn, path):  # an empty file: nothing fetched yet
                 conn.close()
                 raise PricesMissing(f"{path} holds no prices; run `stockin prices fetch`")
-            return cls(conn)
+            return cls(conn, path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not path.is_file():
+            raise PricesDamaged(f"{path} is not a file")
         fresh = not path.exists()
-        conn = sqlite3.connect(path, isolation_level=None)
+        with _guard(path):
+            conn = sqlite3.connect(path, isolation_level=None)
         if fresh:
             path.chmod(0o600)  # which ISINs you hold is private, like ledger.db
         _check_shape(conn, path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
+        with _guard(path):
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(_SCHEMA)
         conn.isolation_level = "DEFERRED"
-        return cls(conn)
+        return cls(conn, path)
 
     def put(self, quotes: Iterable[Quote]) -> int:
         """Upsert keyed (isin, on, source). Returns rows added or changed."""
         changed = 0
-        with self._conn:
+        with _guard(self._path), self._conn:
             for q in quotes:
                 cur = self._conn.execute(
                     """INSERT INTO quotes VALUES (?,?,?,?)
@@ -159,31 +209,39 @@ class PriceStore:
         """The best quote per ISIN on or before `on_or_before` (default: any)."""
         wanted = sorted(set(isins))
         quotes: list[Quote] = []
-        for isin in wanted:
-            sql = "SELECT on_date, source, micro_rupees FROM quotes WHERE isin=?"
-            args: tuple[str, ...] = (isin,)
-            if on_or_before is not None:
-                sql += " AND on_date <= ?"
-                args += (on_or_before.isoformat(),)
-            sql += " ORDER BY on_date DESC LIMIT 2"
-            for on, source, micros in self._conn.execute(sql, args):
-                quotes.append(
-                    Quote(
-                        isin=isin,
-                        on=date.fromisoformat(on),
-                        price=Price(micro_rupees=int(micros)),
-                        source=source,
-                    )
-                )
+        with _guard(self._path):
+            for isin in wanted:
+                quotes.extend(self._quotes(isin, on_or_before))
         return PriceBook.best(quotes)
 
+    def _quotes(self, isin: Isin, on_or_before: date | None) -> list[Quote]:
+        quotes: list[Quote] = []
+        sql = "SELECT on_date, source, micro_rupees FROM quotes WHERE isin=?"
+        args: tuple[str, ...] = (isin,)
+        if on_or_before is not None:
+            sql += " AND on_date <= ?"
+            args += (on_or_before.isoformat(),)
+        sql += " ORDER BY on_date DESC LIMIT 2"
+        for on, source, micros in self._conn.execute(sql, args):
+            quotes.append(
+                Quote(
+                    isin=isin,
+                    on=date.fromisoformat(on),
+                    price=Price(micro_rupees=int(micros)),
+                    source=source,
+                )
+            )
+        return quotes
+
     def latest_day(self) -> date | None:
-        (on,) = self._conn.execute("SELECT max(on_date) FROM quotes").fetchone()
-        return None if on is None else date.fromisoformat(on)
+        with _guard(self._path):
+            (on,) = self._conn.execute("SELECT max(on_date) FROM quotes").fetchone()
+            return None if on is None else date.fromisoformat(on)
 
     def count(self) -> int:
-        (n,) = self._conn.execute("SELECT count(*) FROM quotes").fetchone()
-        return int(n)
+        with _guard(self._path):
+            (n,) = self._conn.execute("SELECT count(*) FROM quotes").fetchone()
+            return int(n)
 
     def digest(self) -> str:
         h = hashlib.sha256()

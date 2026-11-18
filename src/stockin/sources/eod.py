@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta
 
 from ..facts import Isin, parse_isin
 from ..money import Price
-from ..prices import Quote
+from ..prices import MAX_PRICE_MICROS, Quote
 
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 NSE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip"
@@ -48,24 +48,40 @@ def _isin(text: str) -> Isin | None:
         return None
 
 
-def _price(text: str) -> Price | None:
+def _price(text: str, where: str) -> Price | None:
+    """None for a cell that is not a positive number ("N.A.", "-"). A
+    number above MAX_PRICE_RUPEES a unit is not a real Indian price; it is
+    a damaged file, so the whole file is rejected rather than stored."""
     try:
         price = Price.rupees(text)
     except ValueError:
         return None
+    if price.micro_rupees > MAX_PRICE_MICROS:
+        raise EodRejected(f"{where}: price {text.strip()} is beyond any real price (damaged file?)")
     return price
 
 
 def parse_amfi(text: str) -> tuple[Quote, ...]:
     """Every (ISIN, NAV, date) in a NAVAll file. Rows whose NAV is not a
-    positive number (e.g. "N.A.") or whose ISIN is "-" are skipped. Both ISIN
+    positive number (e.g. "N.A.") or whose ISIN is "-" are skipped. Every
+    row has exactly as many fields as the header, or the file is rejected. Both ISIN
     columns get the NAV: payout/growth and reinvestment units share it."""
     lines = text.splitlines()
     if not lines or not lines[0].startswith("Scheme Code;"):
         raise EodRejected("not an AMFI NAVAll file (first line is not its header)")
+    width = lines[0].count(";") + 1
     out: dict[Isin, Quote] = {}
-    for line in lines[1:]:
+    for n, line in enumerate(lines[1:], start=2):
+        if ";" not in line:
+            continue  # a section heading or a blank line
         cells = [c.strip() for c in line.split(";")]
+        if len(cells) != width:
+            # two rows run together, or a lost semicolon: the NAV and date
+            # would be read from the wrong place
+            raise EodRejected(
+                f"NAVAll line {n} has {len(cells)} fields but the header has {width} "
+                "(damaged file?)"
+            )
         if len(cells) < 6:
             continue
         nav, on_text = cells[-2], cells[-1]
@@ -73,7 +89,7 @@ def parse_amfi(text: str) -> tuple[Quote, ...]:
             on = datetime.strptime(on_text, "%d-%b-%Y").date()
         except ValueError:
             continue
-        price = _price(nav)
+        price = _price(nav, f"NAVAll line {n}")
         if price is None:
             continue
         for cell in (cells[1], cells[2]):
@@ -108,7 +124,9 @@ def _csv_text(data: bytes) -> str:
             raise EodRejected("the bhavcopy CSV ends mid-row (an incomplete download?)")
         return text
     except UnicodeDecodeError:
-        raise EodRejected("the bhavcopy is not UTF-8 text") from None
+        raise EodRejected(
+            "not UTF-8 text, so neither an NSE bhavcopy nor an AMFI NAVAll file"
+        ) from None
     except EodRejected:
         raise
     except (zipfile.BadZipFile, zlib.error, EOFError, OSError, ValueError, RuntimeError) as exc:
@@ -128,22 +146,41 @@ def parse_bhavcopy(data: bytes) -> tuple[Quote, ...]:
         raise EodRejected(f"the bhavcopy CSV is damaged ({exc})") from None
 
 
+_NEED = ("TradDt", "ISIN", "SctySrs", "ClsPric")
+
+
 def _bhavcopy_rows(text: str) -> tuple[Quote, ...]:
-    reader = csv.DictReader(io.StringIO(text))
-    need = {"TradDt", "ISIN", "SctySrs", "ClsPric"}
-    if reader.fieldnames is None or not need <= set(reader.fieldnames):
+    """Columns are found by header name, and every row must have exactly as
+    many fields as the header: a lost or extra comma anywhere (header or
+    row) would otherwise shift a column, and the day's low or open would be
+    stored as the close without any error."""
+    rows = csv.reader(io.StringIO(text), strict=True)
+    first = next(rows, None)
+    header = [] if first is None else [h.strip() for h in first]
+    if not set(_NEED) <= set(header):
         raise EodRejected("not an NSE UDiFF bhavcopy (missing TradDt/ISIN/SctySrs/ClsPric)")
+    if len(set(header)) != len(header):
+        raise EodRejected("the bhavcopy header names a column twice (damaged file?)")
+    at = {name: header.index(name) for name in _NEED}
     best: dict[Isin, tuple[int, Quote]] = {}
-    for row in reader:
-        isin = _isin(row["ISIN"] or "")
-        price = _price(row["ClsPric"] or "")
+    for n, row in enumerate(rows, start=2):
+        if any("\n" in cell or "\r" in cell for cell in row):
+            # NSE never quotes a line break; a stray quote has swallowed rows
+            raise EodRejected(f"bhavcopy row {n} runs over several lines (damaged file?)")
+        if len(row) != len(header):
+            raise EodRejected(
+                f"bhavcopy row {n} has {len(row)} fields but the header has {len(header)} "
+                "(damaged file?)"
+            )
+        isin = _isin(row[at["ISIN"]])
+        price = _price(row[at["ClsPric"]], f"bhavcopy row {n}")
         if isin is None or price is None:
             continue
         try:
-            on = date.fromisoformat(row["TradDt"].strip())
+            on = date.fromisoformat(row[at["TradDt"]].strip())
         except ValueError:
             continue
-        rank = _SERIES_RANK.get((row["SctySrs"] or "").strip(), 9)
+        rank = _SERIES_RANK.get(row[at["SctySrs"]].strip(), 9)
         quote = Quote(isin=isin, on=on, price=price, source="bhavcopy")
         prev = best.get(isin)
         key = (rank, -quote.price.micro_rupees)

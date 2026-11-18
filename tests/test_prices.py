@@ -1,6 +1,9 @@
+import bisect
 import io
 import json
+import re
 import zipfile
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
@@ -565,21 +568,147 @@ def test_an_unexpected_error_in_one_source_keeps_the_other(
     assert report["failed"] == ["NSE: unexpected KeyError: 'something nobody planned for'"]
 
 
-def test_every_single_byte_flip_of_a_bhavcopy_csv_parses_or_is_rejected() -> None:
-    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
-    good = eod.parse_bhavcopy(whole)
+def _isins_on(line: bytes) -> set[str]:
+    return {m.decode("latin-1") for m in re.findall(rb"[A-Z]{2}[A-Z0-9]{9}[0-9]", line)}
+
+
+def _only_that_line_changed(
+    good: tuple[Quote, ...], got: tuple[Quote, ...], before: bytes, after: bytes
+) -> bool:
+    """A one-byte change may alter what its own line says, nothing else: every
+    quote for an ISIN that is not on the damaged line must be exactly the
+    good one, and a damaged header line may change nothing at all."""
+    touched = _isins_on(before) | _isins_on(after)
+    a = {q.isin: q for q in good if q.isin not in touched}
+    b = {q.isin: q for q in got if q.isin not in touched}
+    return a == b
+
+
+def _one_byte_damage(whole: bytes) -> Iterator[tuple[int, bytes, bytes, bytes]]:
+    """(byte, damaged file, its line before, its line after) for every byte
+    and four kinds of change: CR, quote, NUL and one flipped bit."""
+    starts = [0, *(i + 1 for i, c in enumerate(whole) if c == 0x0A)]
     for i in range(len(whole)):
-        for new in (0x0D, 0x22, 0x00, whole[i] ^ 0x01):  # CR, quote, NUL, a bit
+        line_no = bisect.bisect_right(starts, i) - 1
+        lo = starts[line_no]
+        # a damaged line break joins this line with the next: both are touched
+        hi = whole.find(b"\n", i + 1 if whole[i] == 0x0A else lo)
+        hi = len(whole) if hi < 0 else hi
+        for new in (0x0D, 0x22, 0x00, whole[i] ^ 0x01):
             data = bytearray(whole)
             data[i] = new
-            try:
-                got = eod.parse_bhavcopy(bytes(data))
-            except eod.EodRejected:
-                continue
-            # a plain CSV has no checksum: a changed digit can still parse, but
-            # nothing may escape as an exception other than EodRejected
-            assert isinstance(got, tuple), (i, new)
-    assert good
+            yield i, bytes(data), whole[lo:hi], bytes(data[lo:hi])
+
+
+def test_every_single_byte_change_of_a_bhavcopy_csv_is_rejected_or_stays_on_its_line() -> None:
+    """Verifier 4: a comma lost from the header shifted every column, and the
+    day's low was stored as the close with exit 0. The header and each row
+    must agree on the number of fields, so a shifted column is rejected."""
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    good = eod.parse_bhavcopy(whole)
+    for i, data, before, after in _one_byte_damage(whole):
+        try:
+            got = eod.parse_bhavcopy(data)
+        except eod.EodRejected:
+            continue
+        assert _only_that_line_changed(good, got, before, after), (i, after)
+
+
+def test_every_single_byte_change_of_a_navall_is_rejected_or_stays_on_its_line() -> None:
+    """Lesson 18's rule for the AMFI file too: decoded the way fetch decodes
+    it, every damaged copy parses or is rejected, and a change reaches only
+    the line it is on."""
+    whole = (EOD / "NAVAll-sample.txt").read_bytes()
+    good = eod.parse_amfi(whole.decode("utf-8-sig"))
+    for i, data, before, after in _one_byte_damage(whole):
+        try:
+            got = eod.parse_amfi(data.decode("utf-8-sig", errors="replace"))
+        except eod.EodRejected:
+            continue
+        assert _only_that_line_changed(good, got, before, after), (i, after)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b"OpnPric,HghPric", b"OpnPric-HghPric"),  # verifier 4: a header comma lost
+        (b"HghPric,LwPric", b"HghPric,,LwPric"),  # one added
+        (b"INFY LTD,1,1,1,1500.55", b"INFY LTD,1,1,1500.55"),  # one lost in a row
+    ],
+    ids=["header-comma-lost", "header-comma-added", "row-comma-lost"],
+)
+def test_a_shifted_column_is_rejected_not_stored_as_the_close(old: bytes, new: bytes) -> None:
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    assert old in whole
+    with pytest.raises(eod.EodRejected, match="fields but the header has"):
+        eod.parse_bhavcopy(whole.replace(old, new, 1))
+
+
+def test_a_stray_quote_cannot_swallow_the_rows_after_it() -> None:
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    first_row_end = whole.index(b"\n", whole.index(b"\n") + 1)
+    damaged = whole[:first_row_end] + b'"' + whole[first_row_end + 1 :]
+    with pytest.raises(eod.EodRejected):
+        eod.parse_bhavcopy(damaged)
+
+
+def test_two_navall_rows_run_together_are_rejected() -> None:
+    text = (EOD / "NAVAll-sample.txt").read_text()
+    joined = text.replace("14-Nov-2026\n118969", "14-Nov-2026\x00118969", 1)
+    assert joined != text
+    with pytest.raises(eod.EodRejected, match="fields but the header has"):
+        eod.parse_amfi(joined)
+
+
+def test_columns_are_found_by_name_in_any_order() -> None:
+    """Verifier 4's crafted file: TradDt last, then a short row. Columns in
+    any order parse; the short row is rejected, not an AttributeError."""
+    good = b"ISIN,ClsPric,SctySrs,TradDt\nINE009A01021,1500.55,EQ,2026-11-14\n"
+    (q,) = eod.parse_bhavcopy(good)
+    assert (q.isin, q.price, q.on) == ("INE009A01021", Price.rupees("1500.55"), date(2026, 11, 14))
+    with pytest.raises(eod.EodRejected, match="row 3 has 2 fields"):
+        eod.parse_bhavcopy(good + b"INE009A01021,1500.55\n")
+    with pytest.raises(eod.EodRejected, match="names a column twice"):
+        eod.parse_bhavcopy(b"ISIN,ClsPric,SctySrs,TradDt,ISIN\nA,1,EQ,2026-11-14,B\n")
+
+
+@pytest.mark.parametrize("source", ["nse", "amfi"])
+def test_a_price_beyond_any_real_price_rejects_the_file(source: str) -> None:
+    """Verifier 4: a 14-digit close crashed SQLite with OverflowError. ₹1
+    crore a unit is the ceiling; one cell above it rejects the file."""
+    huge = "12345678901234.5"
+    if source == "nse":
+        data = b"TradDt,ISIN,SctySrs,ClsPric\n2026-11-14,INE009A01021,EQ," + huge.encode() + b"\n"
+        with pytest.raises(eod.EodRejected, match="beyond any real price"):
+            eod.parse_bhavcopy(data)
+    else:
+        text = (EOD / "NAVAll-sample.txt").read_text().replace("2100.1234", huge)
+        with pytest.raises(eod.EodRejected, match="beyond any real price"):
+            eod.parse_amfi(text)
+    edge = f"{eod.MAX_PRICE_MICROS // 10**6}"
+    row = b"TradDt,ISIN,SctySrs,ClsPric\n2026-11-14,INE009A01021,EQ," + edge.encode() + b"\n"
+    assert eod.parse_bhavcopy(row)  # exactly the ceiling is still a price
+    with pytest.raises(ValueError):
+        Quote(
+            isin=parse_isin("INE009A01021"),
+            on=date(2026, 11, 14),
+            price=Price(micro_rupees=eod.MAX_PRICE_MICROS + 1),
+            source="bhavcopy",
+        )
+
+
+def test_fetch_keeps_amfi_when_the_nse_file_has_an_absurd_price(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    navall = (EOD / "NAVAll-sample.txt").read_bytes()
+    bad = b"TradDt,ISIN,SctySrs,ClsPric\n2026-11-14,INE009A01021,EQ,99999999999999\n"
+    monkeypatch.setattr(eod, "_get", lambda url: navall if "amfi" in url else bad)
+    result = runner.invoke(app, ["prices", "fetch", "--json"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["read"] == len(eod.parse_amfi(navall.decode()))  # AMFI's prices survived
+    assert len(report["failed"]) == 1 and "beyond any real price" in report["failed"][0]
 
 
 @pytest.mark.parametrize(
@@ -614,3 +743,73 @@ def test_fetch_amfi_reads_a_navall_with_a_byte_order_mark(monkeypatch: pytest.Mo
     body = b"\xef\xbb\xbf" + (EOD / "NAVAll-sample.txt").read_bytes()
     monkeypatch.setattr(eod, "_get", lambda url: body)
     assert eod.fetch_amfi() == eod.parse_amfi((EOD / "NAVAll-sample.txt").read_text())
+
+
+def _store_with_rows(path: Path, n: int = 400) -> None:
+    """A real prices.db, big enough to span several pages."""
+    with PriceStore.open(path, write=True) as store:
+        store.put(
+            _q(_with_digit(f"INE{i:08d}"), date(2026, 11, 14), "100", "bhavcopy") for i in range(n)
+        )
+
+
+def _with_digit(body: str) -> str:
+    for d in "0123456789":
+        try:
+            return parse_isin(body + d)
+        except ValueError:
+            continue
+    raise AssertionError(body)
+
+
+def _damage(kind: str, db: Path) -> None:
+    import sqlite3
+
+    if kind == "second-page":
+        _store_with_rows(db)
+        data = bytearray(db.read_bytes())
+        page = int.from_bytes(data[16:18], "big")
+        data[page : page * 2] = b"\xab" * page  # page 2 overwritten
+        db.write_bytes(bytes(data))
+    elif kind in ("text-price", "bad-date", "unknown-source", "no-primary-key"):
+        with sqlite3.connect(db) as c:
+            pk = "" if kind == "no-primary-key" else ", PRIMARY KEY(isin, on_date, source)"
+            c.execute(f"CREATE TABLE quotes(isin, on_date, source, micro_rupees{pk})")
+            row = {
+                "text-price": ("INE009A01021", "2026-11-14", "bhavcopy", "lots"),
+                "bad-date": ("INE009A01021", "14/11/2026", "bhavcopy", 1),
+                "unknown-source": ("INE009A01021", "2026-11-14", "broker", 1),
+                "no-primary-key": ("INE009A01021", "2026-11-14", "bhavcopy", 1),
+            }[kind]
+            c.execute("INSERT INTO quotes VALUES (?,?,?,?)", row)
+    elif kind == "directory":
+        db.mkdir()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["second-page", "text-price", "bad-date", "unknown-source", "no-primary-key", "directory"],
+)
+def test_a_damaged_or_foreign_prices_db_is_reported_and_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Verifier 4: a damaged second page crashed doctor, holdings and import
+    with DatabaseError (and import rewrote the file); a foreign file with our
+    column names passed the shape check; a directory crashed import."""
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    db = tmp_path / "prices.db"
+    _damage(kind, db)
+    before = None if kind == "directory" else db.read_bytes()
+    commands = [["prices", "import", str(EOD / "bhavcopy-sample.csv")]]
+    if kind != "directory":  # a directory is not a price file to read: holdings run unpriced
+        commands.append(["holdings"])
+        checks = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+        (quotes,) = [c for c in checks if c["name"] == "quotes"]
+        assert quotes["status"] == "fail", quotes
+    for args in commands:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 2, (args, result.output)
+        assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+        assert "move prices.db aside" in result.output
+    if before is not None:
+        assert db.read_bytes() == before
