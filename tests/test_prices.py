@@ -1296,3 +1296,103 @@ def test_importing_the_right_file_undoes_a_damaged_one(
         assert state("damaged") != want  # the damage did get in
     assert state("damaged", "right") == want
     assert state("right", "damaged", "right") == want
+
+
+# ------------------------------------- verifier 5's surviving mutants (its N1)
+
+
+@pytest.mark.parametrize("call", ["book", "stored", "replace", "take", "latest_day", "count"])
+def test_a_prices_db_that_changes_under_an_open_store_is_reported(
+    tmp_path: Path, call: str
+) -> None:
+    """Each store method turns SQLite failing mid-use into PricesDamaged.
+    Here another program drops the table after the store was opened."""
+    import sqlite3
+
+    from stockin.prices import PricesDamaged
+
+    db = tmp_path / "prices.db"
+    quote = _q("INE009A01021", date(2026, 11, 14), "1500.55", "bhavcopy")
+    other = _file(_q("INE009A01021", date(2026, 11, 14), "1500", "bhavcopy"))
+    with PriceStore.open(db, write=True) as store:
+        store.replace(_file(quote))
+        with sqlite3.connect(db) as elsewhere:
+            elsewhere.execute("DROP TABLE quotes")
+        calls = {
+            "book": lambda: store.book([quote.isin]),
+            "stored": lambda: store.stored("bhavcopy", quote.on),
+            "replace": lambda: store.replace(other),
+            "take": lambda: store.take(other),
+            "latest_day": store.latest_day,
+            "count": store.count,
+        }
+        with pytest.raises(PricesDamaged, match=r"not a Stockin price file \(no such table"):
+            calls[call]()
+
+
+@pytest.mark.parametrize("side", ["-journal", "-wal"])
+def test_a_prices_db_that_cannot_be_written_is_reported_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str
+) -> None:
+    """Opening for writing can fail after the file has passed its checks.
+    Here SQLite cannot make its journal because that name is a directory."""
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    (tmp_path / "prices.db").touch()
+    (tmp_path / f"prices.db{side}").mkdir()
+    result = runner.invoke(app, ["prices", "import", str(EOD / "bhavcopy-sample.csv")])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+    assert "not a Stockin price file" in result.output
+    assert (tmp_path / "prices.db").read_bytes() == b""
+
+
+def test_a_file_that_is_not_text_says_so() -> None:
+    with pytest.raises(eod.EodRejected, match="neither an NSE bhavcopy nor an AMFI NAVAll"):
+        eod.parse_bhavcopy(b"TradDt,ISIN\n\xff\xfe,x\n", TODAY)
+
+
+@pytest.mark.parametrize("source", ["nse", "amfi"])
+def test_the_price_ceiling_is_exactly_one_crore(source: str) -> None:
+    """Verifier 5: the ceiling could be raised tenfold and no test failed."""
+    assert eod.MAX_PRICE_MICROS == 10_000_000 * 10**6
+
+    def parse(price: str) -> PriceFile:
+        if source == "nse":
+            return eod.parse_bhavcopy(_bhav_rows(f"INE009A01021,EQ,{price}"), TODAY)
+        row = f"1;INF179K01UT0;-;Fund;Direct Plan;Growth;{price};14-Nov-2026"
+        return eod.parse_amfi(_nav(row), TODAY)
+
+    assert parse("10000000.000000").quotes[0].price.micro_rupees == eod.MAX_PRICE_MICROS
+    for above in ("10000000.000001", "10000001", "99999999"):
+        with pytest.raises(eod.EodRejected, match="beyond any real price"):
+            parse(above)
+
+
+def test_a_navall_row_shorter_than_the_header_is_rejected() -> None:
+    """Verifier 5: only longer rows were tested. One short row, and a file
+    whose every row is one field short of its header, are both rejected: the
+    width comes from the header, never from the rows."""
+    good = "1;INF179K01UT0;-;Fund;Direct Plan;Growth;10.5;14-Nov-2026"
+    short = "2;INF179K01VY8;-;Fund;Direct Plan;43.5;14-Nov-2026"
+    with pytest.raises(eod.EodRejected, match="line 6 has 7 fields but the header has 8"):
+        eod.parse_amfi(_nav(good, short), TODAY)
+    with pytest.raises(eod.EodRejected, match="line 5 has 7 fields but the header has 8"):
+        eod.parse_amfi(_nav(short, short.replace("VY8", "UT0")), TODAY)
+
+
+def test_an_older_navall_without_plan_and_option_columns_is_read() -> None:
+    header = "Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;"
+    old = header + "Net Asset Value;Date\n1;INF179K01UT0;-;Fund;10.5;14-Nov-2026\n"
+    (q,) = eod.parse_amfi(old, TODAY).quotes
+    assert (q.price, q.on) == (Price.rupees("10.5"), date(2026, 11, 14))
+    # fewer columns than that is not a NAVAll: the ISINs, NAV and date would overlap
+    with pytest.raises(eod.EodRejected, match="not an AMFI NAVAll file"):
+        eod.parse_amfi(
+            "Scheme Code;ISIN;Name;Net Asset Value;Date\n1;INF179K01UT0;F;10.5;x\n", TODAY
+        )
+
+
+def test_bhavcopy_header_names_may_be_padded() -> None:
+    padded = b" TradDt , ISIN ,SctySrs , ClsPric\n2026-11-14,INE009A01021,EQ,1500.55\n"
+    (q,) = eod.parse_bhavcopy(padded, TODAY).quotes
+    assert q.price == Price.rupees("1500.55")
