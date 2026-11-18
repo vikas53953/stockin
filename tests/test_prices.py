@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 from stockin.cli import app
 from stockin.facts import parse_isin
 from stockin.money import Money, Price, Qty
-from stockin.prices import PriceBook, PriceFile, PriceStore, Quote
+from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, india_today
 from stockin.sources import eod
 
 FIX = Path(__file__).parent / "fixtures"
@@ -803,6 +803,7 @@ def _with_digit(body: str) -> str:
     raise AssertionError(body)
 
 
+_TOMORROW = (india_today() + timedelta(days=1)).isoformat()
 _ROWS = {
     "text-price": ("INE009A01021", "bhavcopy", "2026-11-14", "2026-11-14", "lots"),
     "bad-date": ("INE009A01021", "bhavcopy", "2026-11-14", "14/11/2026", 1),
@@ -826,6 +827,11 @@ _ROWS = {
     "30-february": ("INE009A01021", "amfi", "2026-11-14", "2026-02-30", 1),
     "file-day-month-13": ("INE009A01021", "amfi", "2026-13-39", "2026-11-14", 1),
     "bhavcopy-day-differs": ("INE009A01021", "bhavcopy", "2026-11-14", "2026-11-13", 1),
+    # verifier 6 (F1): a row dated after today would be the newest file for ever,
+    # and no later import could replace it
+    "file-day-after-today": ("INE009A01021", "amfi", _TOMORROW, "2026-11-14", 1),
+    "on-date-after-today": ("INE009A01021", "amfi", "2026-11-14", _TOMORROW, 1),
+    "one-digit-to-2029": ("INE009A01021", "bhavcopy", "2029-11-17", "2029-11-17", 1),
 }
 
 
@@ -970,6 +976,30 @@ def test_a_bhavcopy_dated_after_today_is_rejected() -> None:
         eod.parse_bhavcopy(_bhav_for("9026-11-14"), TODAY)
 
 
+def test_prices_import_rejects_a_file_dated_after_today_in_india(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier 6 (N4): nothing checked that `prices import` passes the real
+    day to the parser; passing date.max would have let a future file in."""
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    tomorrow = tmp_path / "tomorrow.csv"
+    tomorrow.write_bytes(_bhav_for(_TOMORROW))
+    result = runner.invoke(app, ["prices", "import", str(tomorrow)])
+    assert result.exit_code == 2, result.output
+    assert "after today" in result.output
+    assert not (tmp_path / "prices.db").exists()
+    tomorrow_nav = tmp_path / "NAVAll.txt"
+    nav_day = date.fromisoformat(_TOMORROW).strftime("%d-%b-%Y")
+    tomorrow_nav.write_text(_nav(f"1;INF179K01UT0;-;Fund;Direct Plan;Growth;10.5;{nav_day}"))
+    result = runner.invoke(app, ["prices", "import", str(tomorrow_nav)])
+    assert result.exit_code == 2, result.output
+    assert "after today" in result.output
+    assert not (tmp_path / "prices.db").exists()
+    today = tmp_path / "today.csv"
+    today.write_bytes(_bhav_for(india_today().isoformat()))
+    assert runner.invoke(app, ["prices", "import", str(today)]).exit_code in (0, 1)
+
+
 @pytest.mark.parametrize(
     ("old", "new"),
     [
@@ -1112,7 +1142,7 @@ def test_today_is_the_day_in_india() -> None:
     there, and a file with that date is not "after today"."""
     from datetime import datetime
 
-    from stockin.cli import _india_day  # pyright: ignore[reportPrivateUsage]
+    from stockin.prices import india_day as _india_day
 
     assert _india_day(datetime(2026, 11, 17, 18, 29, tzinfo=UTC)) == date(2026, 11, 17)
     assert _india_day(datetime(2026, 11, 17, 18, 30, tzinfo=UTC)) == date(2026, 11, 18)

@@ -21,7 +21,7 @@ import hashlib
 import sqlite3
 from collections.abc import Generator, Iterable, Mapping
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, Self
@@ -170,6 +170,19 @@ _COLUMNS = (  # (name, primary-key position)
 )
 
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def india_day(now: datetime) -> date:
+    return now.astimezone(_IST).date()
+
+
+def india_today() -> date:
+    """Today in India, where both price files are dated. Nothing in
+    prices.db may be dated after it."""
+    return india_day(datetime.now(_IST))
+
+
 def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     """True if prices.db is ours and intact; False if the file has no tables
     at all (new or 0 bytes). Anything else is PricesDamaged: a file another
@@ -178,6 +191,9 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
     if not tables:
         return False
+    # a row dated after today would win "newest file" for ever: no later
+    # import could replace it (verifier 6)
+    today = india_today().isoformat()
     cols = tuple((r[1], r[5]) for r in conn.execute("PRAGMA table_info(quotes)"))
     if cols != _COLUMNS:
         raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
@@ -189,9 +205,10 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
              OR source NOT IN ('bhavcopy', 'amfi')
              OR file_day IS NOT date(file_day) OR on_date IS NOT date(on_date)
              OR (source = 'bhavcopy' AND on_date != file_day)
+             OR file_day > ? OR on_date > ?
              OR typeof(micro_rupees) != 'integer'
              OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
-        (MAX_PRICE_MICROS,),
+        (today, today, MAX_PRICE_MICROS),
     ).fetchone()
     if odd is not None:
         raise PricesDamaged(f"{path} holds rows Stockin could not have written")

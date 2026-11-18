@@ -10,7 +10,7 @@ import http.client
 import os
 import shlex
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,6 +28,7 @@ from .prices import (
     PricesMissing,
     PriceStore,
     Quote,
+    india_today,
 )
 from .sources import cas, eod
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
@@ -326,16 +327,9 @@ class PricesReport(Value):
     held: tuple[Jump, ...] = ()  # prices not stored: too far from the last one
 
 
-_IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def _india_day(now: datetime) -> date:
-    return now.astimezone(_IST).date()
-
-
 def _today() -> date:
     """Today in India, where both price files are dated."""
-    return _india_day(datetime.now(_IST))
+    return india_today()
 
 
 def _held_isins() -> frozenset[Isin]:
