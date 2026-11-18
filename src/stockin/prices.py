@@ -122,9 +122,7 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
         cols = tuple((r[1], r[5]) for r in conn.execute("PRAGMA table_info(quotes)"))
         if cols != _COLUMNS:
             raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
-        check = [r[0] for r in conn.execute("PRAGMA quick_check")]
-        if check != ["ok"]:
-            raise PricesDamaged(f"{path} is damaged ({'; '.join(check[:2])})")
+        # a full scan: a damaged page anywhere in the table raises here
         odd = conn.execute(
             """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR length(isin) != 12
                  OR typeof(on_date) != 'text'
@@ -176,8 +174,6 @@ class PriceStore:
                 raise PricesMissing(f"{path} holds no prices; run `stockin prices fetch`")
             return cls(conn, path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and not path.is_file():
-            raise PricesDamaged(f"{path} is not a file")
         fresh = not path.exists()
         with _guard(path):
             conn = sqlite3.connect(path, isolation_level=None)

@@ -652,6 +652,26 @@ def test_a_stray_quote_cannot_swallow_the_rows_after_it() -> None:
         eod.parse_bhavcopy(damaged)
 
 
+def test_a_quoted_field_spanning_rows_is_rejected() -> None:
+    """Two stray quotes can wrap a whole row into one field and keep the
+    field count right; no NSE field spans lines."""
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    lines = whole.split(b"\n")
+    lines[1] = lines[1][:-1] + b'"'  # the last (empty) field opens a quote...
+    lines[2] = lines[2] + b'"'  # ...that closes at the end of the next row
+    with pytest.raises(eod.EodRejected, match="runs over several lines"):
+        eod.parse_bhavcopy(b"\n".join(lines))
+
+
+def test_text_after_a_closing_quote_is_rejected_not_glued_on() -> None:
+    """The lenient CSV reader would read "1500.55"5 as 1500.555."""
+    whole = (EOD / "bhavcopy-sample.csv").read_bytes()
+    damaged = whole.replace(b",1500.55,1500.55,", b',"1500.55"5,1500.55,', 1)
+    assert damaged != whole
+    with pytest.raises(eod.EodRejected, match="damaged"):
+        eod.parse_bhavcopy(damaged)
+
+
 def test_two_navall_rows_run_together_are_rejected() -> None:
     text = (EOD / "NAVAll-sample.txt").read_text()
     joined = text.replace("14-Nov-2026\n118969", "14-Nov-2026\x00118969", 1)
