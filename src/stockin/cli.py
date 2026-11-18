@@ -113,6 +113,10 @@ _DAMAGED_HINT = "move prices.db aside (prices download again) and run `stockin p
 
 def _quotes_check(path: Path) -> DoctorCheck:
     hint = "run `stockin prices fetch` (AMFI NAVs and the NSE bhavcopy)"
+    if path.exists() and not path.is_file():
+        return DoctorCheck(
+            name="quotes", status="fail", detail=f"{path} is not a file", hint=_DAMAGED_HINT
+        )
     if not path.is_file():
         return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
     try:

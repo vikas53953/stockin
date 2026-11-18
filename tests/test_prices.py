@@ -823,9 +823,9 @@ def test_a_damaged_or_foreign_prices_db_is_reported_and_left_alone(
     commands = [["prices", "import", str(EOD / "bhavcopy-sample.csv")]]
     if kind != "directory":  # a directory is not a price file to read: holdings run unpriced
         commands.append(["holdings"])
-        checks = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
-        (quotes,) = [c for c in checks if c["name"] == "quotes"]
-        assert quotes["status"] == "fail", quotes
+    checks = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
+    (quotes,) = [c for c in checks if c["name"] == "quotes"]
+    assert quotes["status"] == "fail", quotes
     for args in commands:
         result = runner.invoke(app, args)
         assert result.exit_code == 2, (args, result.output)
