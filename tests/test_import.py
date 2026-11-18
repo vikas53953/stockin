@@ -597,14 +597,20 @@ def test_a_format1_ledger_with_dividends_is_refused_not_double_counted(
     assert check["status"] == "fail"
 
 
-def test_a_format1_ledger_without_dividends_is_upgraded_and_converges(tmp_path: Path) -> None:
-    txns = [fx.txn("2026-01-05", "PURCHASE", "10", "1000")]
+def test_a_format1_ledger_without_a_reinvestment_is_upgraded_and_converges(
+    tmp_path: Path,
+) -> None:
+    """A payout on a day with no purchase cannot have been a reinvestment."""
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-25", "DIVIDEND_PAYOUT", None, "80"),
+    ]
     db = _format1_ledger(tmp_path / "ledger.db", txns)
     with Ledger.open(db) as led:
         assert led.book().holdings()
     with LedgerWriter.open(db) as w:
         report = w.ingest(cas.from_casparser(_rta(txns), "new"))
-    assert report.facts_added == 0
+    assert (report.facts_added, report.facts_already_present) == (0, 5)  # 2 txns, 3 others
     conn = sqlite3.connect(db)
     assert conn.execute("PRAGMA user_version").fetchone() == (2,)
     conn.close()

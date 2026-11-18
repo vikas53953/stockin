@@ -78,17 +78,23 @@ def _check_format(conn: sqlite3.Connection, db: Path) -> None:
     """Format 1 wrote a dividend reinvestment as an unlabelled Income + Buy.
     Today's import writes the same rows with a label, so the facts get new
     ids: importing the statement again would hold the units twice, and
-    insights would call the reinvestment a payout. Which Income facts were
-    reinvestments cannot be told from the ledger alone, so a format 1 ledger
-    with any Income is refused; one without Income is the same in both
-    formats and is upgraded when it is next written."""
+    insights would call the reinvestment a payout. Format 1 always wrote a
+    reinvestment as an Income and a Buy with the same account, fund and
+    day, so a format 1 ledger holding such a pair is refused (it may be a
+    SIP on the day of a payout; rebuilding is safe either way). Without one
+    the ledger is the same in both formats and is upgraded when next
+    written."""
     (version,) = conn.execute("PRAGMA user_version").fetchone()
     if version == 0 or version >= LEDGER_FORMAT:
         return
-    income = conn.execute(
-        """SELECT 1 FROM facts WHERE fact = 'txn' AND body LIKE '%"kind":"income"%' LIMIT 1"""
+    pair = conn.execute(
+        """SELECT 1 FROM facts i JOIN facts b
+             ON b.account = i.account AND b.isin = i.isin AND b.on_date = i.on_date
+           WHERE i.fact = 'txn' AND i.body LIKE '%"kind":"income"%'
+             AND b.fact = 'txn' AND b.body LIKE '%"kind":"buy"%'
+           LIMIT 1"""
     ).fetchone()
-    if income is not None:
+    if pair is not None:
         raise LedgerOutdated(
             f"{db} was written by an older Stockin that did not label dividend reinvestments"
         )

@@ -102,11 +102,13 @@ def test_an_outdated_ledger_says_how_to_rebuild(tmp_path: Path, client: TestClie
     from stockin.store import LedgerWriter
 
     db = tmp_path / "data" / "ledger.db"
-    rows = [fx.txn("2026-01-25", "DIVIDEND_PAYOUT", None, "80")]
+    rows = [
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "1", "80"),
+    ]
     data = fx.rta(
         "01-Jan-2026",
         "31-Jan-2026",
-        [fx.folio("1/1", "AMC", [fx.scheme(fx.HDFC_MF, "F", "1", "1", rows)])],
+        [fx.folio("1/1", "AMC", [fx.scheme(fx.HDFC_MF, "F", "0", "1", rows)])],
     )
     with LedgerWriter.open(db) as w:
         w.ingest(cas.from_casparser(data, "old"))
