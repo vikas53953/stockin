@@ -120,3 +120,9 @@ The owner ran the whole drop 1 checklist on Windows with the synthetic sample PD
 - **Rule:** a parser of downloaded files gets a fuzz test per accepted input form that changes every byte of a fixture and asserts each copy parses or is rejected; one data source failing in any way never costs another's results. Tests for a function drive that function, with only the network faked.
 - **Caught since:** nothing yet; the rule's first fuzz runs are part of #18 itself.
 
+
+### 19. Label a fact where it is known; don't guess it later
+- **What happened:** PR #20 (insights) failed verification three times. The second fix-forward told reinvested dividends apart from new money by pairing a Buy with an Income of the same amount on the same day. The third FAIL showed that a real CAS adds stamp duty to the reinvestment's Buy (₹800.04 against an Income of ₹800), so the pair broke: the app said "₹800 paid out as dividends" and "All 4 SIP instalments paid" when one month was missed. The same guess also took a payout that equalled the SIP amount for a reinvestment. The tests used reinvestments without a stamp-duty row, so nothing caught it. The owner allowed a third fix.
+- **Lesson:** a heuristic that rebuilds a fact the input already stated breaks on the first real detail the test data left out. The importer saw the row type `DIVIDEND_REINVEST`; the insight had only amounts.
+- **Rule:** when a later step needs to know what a row was, the importer records it on the fact, and test histories generate the real rows that come with it (here stamp duty after a reinvestment). A new field with a default is left out of the canonical JSON, so earlier fact ids stay the same, and a test pins that.
+- **Caught since:** nothing yet; the fix is in verification on #20.
