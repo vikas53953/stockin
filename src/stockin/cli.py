@@ -10,6 +10,7 @@ import http.client
 import os
 import shlex
 import sys
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -19,7 +20,15 @@ from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .money import Money, Value
-from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, Quote
+from .prices import (
+    Jump,
+    PriceBook,
+    PriceFile,
+    PricesDamaged,
+    PricesMissing,
+    PriceStore,
+    Quote,
+)
 from .sources import cas, eod
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
 
@@ -113,12 +122,6 @@ _DAMAGED_HINT = "move prices.db aside (prices download again) and run `stockin p
 
 def _quotes_check(path: Path) -> DoctorCheck:
     hint = "run `stockin prices fetch` (AMFI NAVs and the NSE bhavcopy)"
-    if path.exists() and not path.is_file():
-        return DoctorCheck(
-            name="quotes", status="fail", detail=f"{path} is not a file", hint=_DAMAGED_HINT
-        )
-    if not path.is_file():
-        return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
     try:
         with PriceStore.open(path) as store:
             latest, n = store.latest_day(), store.count()
@@ -316,10 +319,23 @@ class PricesReport(Value):
     source: str
     read: int  # quotes in the file(s)
     kept: int  # for ISINs in your ledger
-    changed: int  # rows added or changed in prices.db
+    changed: int  # rows added, changed or removed in prices.db
     latest: str | None
     unpriced: tuple[Isin, ...]  # held ISINs with no price at all
     failed: tuple[str, ...] = ()  # sources that could not be downloaded this time
+    held: tuple[Jump, ...] = ()  # prices not stored: too far from the last one
+
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _india_day(now: datetime) -> date:
+    return now.astimezone(_IST).date()
+
+
+def _today() -> date:
+    """Today in India, where both price files are dated."""
+    return _india_day(datetime.now(_IST))
 
 
 def _held_isins() -> frozenset[Isin]:
@@ -327,11 +343,22 @@ def _held_isins() -> frozenset[Isin]:
         return frozenset(h.isin for h in ledger.book().holdings())
 
 
-def _store_quotes(source: str, quotes: tuple[Quote, ...], held: frozenset[Isin]) -> PricesReport:
-    kept = eod.only(quotes, held)
+def _store_files(
+    source: str, files: tuple[PriceFile, ...], held: frozenset[Isin], accept_jumps: bool
+) -> PricesReport:
+    """Each file replaces what prices.db holds for its source and day. A
+    price more than JUMP_FACTOR away from the last earlier one is held back
+    unless `accept_jumps`."""
+    kept = changed = 0
+    jumps: list[Jump] = []
     try:
         with PriceStore.open(prices_path(), write=True) as store:
-            changed = store.put(kept)
+            for whole in files:
+                file = eod.only(whole, held)
+                kept += len(file.quotes)
+                n, found = store.take(file, accept_jumps)
+                changed += n
+                jumps.extend(found)
             book = store.book(held)
             latest = store.latest_day()
     except PricesDamaged as exc:
@@ -339,46 +366,67 @@ def _store_quotes(source: str, quotes: tuple[Quote, ...], held: frozenset[Isin])
     unpriced = tuple(sorted(i for i in held if book.get(i) is None))
     return PricesReport(
         source=source,
-        read=len(quotes),
-        kept=len(kept),
+        read=sum(len(f.quotes) for f in files),
+        kept=kept,
         changed=changed,
         latest=None if latest is None else latest.isoformat(),
         unpriced=unpriced,
+        held=tuple(jumps),
     )
 
 
 def _print_prices(report: PricesReport, as_json: bool) -> None:
+    """Exit 1 when a price was held back: the rest is stored, but the run
+    needs the owner's eyes."""
     if as_json:
         typer.echo(report.model_dump_json(indent=2))
-        return
-    typer.echo(
-        f"{report.source}: {report.read} prices read, {report.kept} for your holdings, "
-        f"{report.changed} new or changed"
-    )
-    if report.latest:
-        typer.echo(f"  latest price date: {report.latest}")
-    if report.unpriced:
-        typer.echo(f"  no price yet for: {', '.join(report.unpriced)}")
-    for f in report.failed:
-        typer.echo(f"  not downloaded this time: {f} (prices already saved are kept)")
+    else:
+        typer.echo(
+            f"{report.source}: {report.read} prices read, {report.kept} for your holdings, "
+            f"{report.changed} new or changed"
+        )
+        if report.latest:
+            typer.echo(f"  latest price date: {report.latest}")
+        if report.unpriced:
+            typer.echo(f"  no price yet for: {', '.join(report.unpriced)}")
+        for f in report.failed:
+            typer.echo(f"  not downloaded this time: {f} (prices already saved are kept)")
+        for j in report.held:
+            typer.echo(
+                f"  NOT stored: {j.quote.isin} was {_price_text(j.last)} on {j.last.on}, "
+                f"this file says {_price_text(j.quote)} on {j.quote.on}"
+            )
+        if report.held:
+            typer.echo(
+                "  a price more than double or less than half the last one is held back. "
+                "If it is real (a split, a bonus), run again with --accept-jumps; "
+                "if not, the file is damaged: download it again."
+            )
+    if report.held:
+        raise typer.Exit(1)
+
+
+AcceptJumps = Annotated[
+    bool,
+    typer.Option(
+        "--accept-jumps",
+        help="Store prices even when more than double or less than half the last one.",
+    ),
+]
 
 
 @prices_app.command("fetch")
-def prices_fetch(as_json: JsonFlag = False) -> None:
+def prices_fetch(as_json: JsonFlag = False, accept_jumps: AcceptJumps = False) -> None:
     """Download today's AMFI NAVs and the latest NSE bhavcopy (public files, no login).
 
     Only prices for ISINs in your ledger are kept. Safe to run any number of times."""
-    from datetime import date
-
     held = _held_isins()
-    got: list[Quote] = []
+    today = _today()
+    got: list[PriceFile] = []
     failed: list[str] = []
-    for name, fetch in (
-        ("AMFI", eod.fetch_amfi),
-        ("NSE", lambda: eod.fetch_bhavcopy(date.today())),
-    ):
+    for name, fetch in (("AMFI", eod.fetch_amfi), ("NSE", eod.fetch_bhavcopy)):
         try:
-            got.extend(fetch())
+            got.append(fetch(today))
         except (OSError, http.client.HTTPException, eod.EodRejected) as exc:
             failed.append(f"{name}: {exc}")
         except Exception as exc:  # one source's surprise must not cost the other's prices
@@ -387,7 +435,7 @@ def prices_fetch(as_json: JsonFlag = False) -> None:
         raise _fail(
             "could not download prices: " + "; ".join(failed), "check your internet and try again"
         )
-    report = _store_quotes("amfi + nse", tuple(got), held)
+    report = _store_files("amfi + nse", tuple(got), held, accept_jumps)
     _print_prices(report.model_copy(update={"failed": tuple(failed)}), as_json)
 
 
@@ -395,19 +443,23 @@ def prices_fetch(as_json: JsonFlag = False) -> None:
 def prices_import(
     file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
     as_json: JsonFlag = False,
+    accept_jumps: AcceptJumps = False,
 ) -> None:
-    """Import a downloaded AMFI NAVAll.txt or NSE bhavcopy (.csv or .csv.zip)."""
+    """Import a downloaded AMFI NAVAll.txt or NSE bhavcopy (.csv or .csv.zip).
+
+    The file replaces what is stored for its day, so importing the right file
+    corrects a damaged one."""
     held = _held_isins()
     data = file.read_bytes()
     try:
         if data.removeprefix(b"\xef\xbb\xbf").startswith(b"Scheme Code;"):
             text = data.decode("utf-8-sig", errors="replace")
-            quotes, source = eod.parse_amfi(text), "amfi"
+            parsed, source = eod.parse_amfi(text, _today()), "amfi"
         else:
-            quotes, source = eod.parse_bhavcopy(data), "nse"
+            parsed, source = eod.parse_bhavcopy(data, _today()), "nse"
     except (eod.EodRejected, UnicodeDecodeError, OSError) as exc:
         raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
-    _print_prices(_store_quotes(f"{file.name} ({source})", quotes, held), as_json)
+    _print_prices(_store_files(f"{file.name} ({source})", (parsed,), held, accept_jumps), as_json)
 
 
 @app.command("reconcile")
