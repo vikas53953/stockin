@@ -22,7 +22,7 @@ from .insights import Insight, all_insights
 from .money import Money, Value
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, Quote
 from .sources import cas, eod
-from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
+from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
 
 app = typer.Typer(
     add_completion=False,
@@ -89,17 +89,7 @@ def diagnose(root: Path) -> Doctor:
         checks.append(DoctorCheck(name="data_dir", status="fail", detail=f"{root} is not writable"))
     else:
         checks.append(DoctorCheck(name="data_dir", status="ok", detail=str(root)))
-    ledger = root / "ledger.db"
-    checks.append(
-        DoctorCheck(name="ledger", status="ok", detail=str(ledger))
-        if ledger.is_file()
-        else DoctorCheck(
-            name="ledger",
-            status="warn",
-            detail="no ledger yet",
-            hint="created by your first `stockin import cas`",
-        )
-    )
+    checks.append(_ledger_check(root / "ledger.db"))
     checks.append(_quotes_check(root / "prices.db"))
     return Doctor(
         version=__version__,
@@ -174,6 +164,23 @@ def _open_ledger() -> Ledger:
         raise _fail(
             f"no ledger at {ledger_path()}", "import a statement first: stockin import cas FILE"
         ) from None
+    except LedgerOutdated as exc:
+        raise _fail(str(exc), REBUILD_HINT) from None
+
+
+def _ledger_check(ledger: Path) -> DoctorCheck:
+    if not ledger.is_file():
+        return DoctorCheck(
+            name="ledger",
+            status="warn",
+            detail="no ledger yet",
+            hint="created by your first `stockin import cas`",
+        )
+    try:
+        Ledger.open(ledger).close()
+    except LedgerOutdated as exc:
+        return DoctorCheck(name="ledger", status="fail", detail=str(exc), hint=REBUILD_HINT)
+    return DoctorCheck(name="ledger", status="ok", detail=str(ledger))
 
 
 def _holding_lines(
@@ -262,7 +269,11 @@ def import_cas(
         statement = cas.read(file, password)
     except cas.CasRejected as exc:
         raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
-    with LedgerWriter.open(ledger_path()) as writer:
+    try:
+        writer = LedgerWriter.open(ledger_path())
+    except LedgerOutdated as exc:
+        raise _fail(str(exc), f"nothing was imported; {REBUILD_HINT}") from None
+    with writer:
         report: ImportReport = writer.ingest(statement)
         lines = _holding_lines(writer.book(), report.holdings)
     if as_json:

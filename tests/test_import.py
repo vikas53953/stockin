@@ -542,3 +542,79 @@ def test_a_reinvestment_survives_the_ledger_round_trip(tmp_path: Path) -> None:
         if isinstance(f, Txn)
     )
     assert flags == [("Buy", True), ("Income", True)]
+
+
+# ------------------------------------------------------- ledger format 1
+
+
+def _format1_ledger(db: Path, txns: list[dict[str, Any]]) -> Path:
+    """A ledger as Stockin wrote it before reinvestments were labelled:
+    the same tables, user_version 1, and the unlabelled facts it held."""
+    with LedgerWriter.open(db) as w:
+        w.ingest(cas.from_casparser(_rta(txns), "old"))
+    conn = sqlite3.connect(db)
+    for fid, body in list(conn.execute("SELECT id, body FROM facts")):
+        conn.execute(
+            "UPDATE facts SET body = ? WHERE id = ?", (body.replace(',"reinvested":true', ""), fid)
+        )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    return db
+
+
+_REINVEST = [
+    fx.txn("2026-01-05", "PURCHASE", "5", "500"),
+    fx.txn("2026-01-25", "DIVIDEND_REINVEST", "5", "800"),
+    fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+]
+
+
+def test_a_format1_ledger_with_dividends_is_refused_not_double_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stockin.store import LedgerOutdated
+
+    db = _format1_ledger(tmp_path / "data" / "ledger.db", _REINVEST)
+    before = db.read_bytes()
+    with pytest.raises(LedgerOutdated):
+        Ledger.open(db)
+    with pytest.raises(LedgerOutdated):
+        LedgerWriter.open(db)
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path / "data"))
+    stmt = tmp_path / "again.json"
+    fx.write(_rta(_REINVEST), stmt)
+    r = runner.invoke(app, ["import", "cas", str(stmt)])
+    assert r.exit_code == 2 and "Traceback" not in r.output
+    assert "did not label dividend reinvestments" in r.output
+    assert "nothing was imported" in r.output
+    assert db.read_bytes() == before  # the refused import changed nothing
+    for cmd in (["holdings"], ["insights"]):
+        r = runner.invoke(app, cmd)
+        assert r.exit_code == 2 and "import your statements again" in r.output
+    r = runner.invoke(app, ["doctor", "--json"])
+    (check,) = [c for c in json.loads(r.output)["checks"] if c["name"] == "ledger"]
+    assert check["status"] == "fail"
+
+
+def test_a_format1_ledger_without_dividends_is_upgraded_and_converges(tmp_path: Path) -> None:
+    txns = [fx.txn("2026-01-05", "PURCHASE", "10", "1000")]
+    db = _format1_ledger(tmp_path / "ledger.db", txns)
+    with Ledger.open(db) as led:
+        assert led.book().holdings()
+    with LedgerWriter.open(db) as w:
+        report = w.ingest(cas.from_casparser(_rta(txns), "new"))
+    assert report.facts_added == 0
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+    conn.close()
+
+
+def test_a_rebuilt_ledger_holds_a_reinvestment_once(tmp_path: Path) -> None:
+    db = tmp_path / "ledger.db"
+    for sha in ("a", "b"):
+        with LedgerWriter.open(db) as w:
+            w.ingest(cas.from_casparser(_rta(_REINVEST), sha))
+    with Ledger.open(db) as led:
+        (h,) = led.book().holdings()
+    assert h.qty == Qty.parse("10")
