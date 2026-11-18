@@ -5,6 +5,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -13,6 +14,7 @@ from stockin.cli import app
 from stockin.facts import parse_isin
 from stockin.money import Money, Price, Qty
 from stockin.prices import (
+    OLDEST_FILE_DAY,
     PriceBook,
     PriceFile,
     PricesDamaged,
@@ -819,6 +821,8 @@ _ROWS = {
     # verifier 5: each of these passed when its own clause of the scan was removed
     "isin-not-text": (123456789012, "bhavcopy", "2026-11-14", "2026-11-14", 1),
     "isin-short": ("INE009A0102", "bhavcopy", "2026-11-14", "2026-11-14", 1),
+    "isin-lower-case": ("ine009A01021", "bhavcopy", "2026-11-14", "2026-11-14", 1),
+    "file-day-before-1994": ("INE009A01021", "bhavcopy", "1993-12-31", "1993-12-31", 1),
     "price-not-integer": ("INE009A01021", "bhavcopy", "2026-11-14", "2026-11-14", 1.5),
     "price-zero": ("INE009A01021", "bhavcopy", "2026-11-14", "2026-11-14", 0),
     "price-above-ceiling": (
@@ -852,6 +856,15 @@ _ROWS = {
 }
 
 
+def _our_table(c: Any) -> None:
+    """The table Stockin creates, with its CHECK switched off so a test can
+    store a row Stockin never would (as damage to a record could)."""
+    from stockin.prices import _SCHEMA  # pyright: ignore[reportPrivateUsage]
+
+    c.execute(_SCHEMA)
+    c.execute("PRAGMA ignore_check_constraints=ON")
+
+
 def _damage(kind: str, db: Path) -> None:
     import os
     import sqlite3
@@ -883,6 +896,17 @@ def _damage(kind: str, db: Path) -> None:
         data = db.read_bytes()
         assert data.count(b"INE467B01029") == 1
         db.write_bytes(data.replace(b"INE467B01029", b"JNE467B01029"))  # every row still valid
+    elif kind == "our-columns-null-date":  # verifier 3 on #21 (B1): a TypeError on every read
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "CREATE TABLE quotes(isin TEXT, source TEXT, file_day TEXT, on_date TEXT,"
+                " micro_rupees INTEGER, PRIMARY KEY(isin, source, file_day)) WITHOUT ROWID"
+            )
+            c.execute("INSERT INTO quotes VALUES ('INE009A01021', 'amfi', '2026-11-14', NULL, 1)")
+    elif kind == "our-table-plus-a-trigger":
+        with sqlite3.connect(db) as c:
+            _our_table(c)
+            c.execute("CREATE TRIGGER t AFTER INSERT ON quotes BEGIN DELETE FROM quotes; END")
     elif kind == "older-stockin":  # the table this branch wrote before files replaced days
         with sqlite3.connect(db) as c:
             c.execute(
@@ -892,8 +916,10 @@ def _damage(kind: str, db: Path) -> None:
             c.execute("INSERT INTO quotes VALUES ('INE009A01021', '9026-11-17', 'bhavcopy', 1)")
     else:
         with sqlite3.connect(db) as c:
-            pk = "" if kind == "no-primary-key" else ", PRIMARY KEY(isin, source, file_day)"
-            c.execute(f"CREATE TABLE quotes(isin, source, file_day, on_date, micro_rupees{pk})")
+            if kind == "no-primary-key":
+                c.execute("CREATE TABLE quotes(isin, source, file_day, on_date, micro_rupees)")
+            else:
+                _our_table(c)
             c.execute("INSERT INTO quotes VALUES (?,?,?,?,?)", _ROWS[kind])
 
 
@@ -904,10 +930,7 @@ def test_a_row_stockin_writes_passes_the_scan(tmp_path: Path) -> None:
 
     db = tmp_path / "prices.db"
     with sqlite3.connect(db) as c:
-        c.execute(
-            "CREATE TABLE quotes(isin, source, file_day, on_date, micro_rupees,"
-            " PRIMARY KEY(isin, source, file_day))"
-        )
+        _our_table(c)
         c.execute(
             "INSERT INTO quotes VALUES (?,?,?,?,?)",
             ("INE009A01021", "amfi", "2026-11-14", "2026-11-13", eod.MAX_PRICE_MICROS),
@@ -924,18 +947,18 @@ def test_a_row_stockin_writes_passes_the_scan(tmp_path: Path) -> None:
 
 def test_the_oldest_rows_stockin_writes_pass_the_scan(tmp_path: Path) -> None:
     """The control for the low-end cases: the parsers keep a NAV from 30
-    calendar years before its file, and a bhavcopy of any day a date can
-    hold, so the store must read both back."""
+    calendar years before its file, and a bhavcopy from the first day any
+    real file can carry, so the store must read both back."""
     fund, share = parse_isin("INF179K01BE2"), parse_isin("INE009A01021")
     nav = _file(_q(fund, date(1996, 1, 1), "10", "amfi"), day=date(2026, 11, 14))
-    first = _file(_q(share, date.min, "10", "bhavcopy"), day=date.min)
+    first = _file(_q(share, OLDEST_FILE_DAY, "10", "bhavcopy"), day=OLDEST_FILE_DAY)
     db = tmp_path / "prices.db"
     with PriceStore.open(db, write=True) as store:
         store.replace(nav)
         store.replace(first)
     with PriceStore.open(db) as store:
         assert store.book([fund, share]).quotes == {fund: nav.quotes[0], share: first.quotes[0]}
-        assert store.stored("bhavcopy", date.min) == {share: first.quotes[0]}
+        assert store.stored("bhavcopy", OLDEST_FILE_DAY) == {share: first.quotes[0]}
 
 
 @pytest.mark.parametrize(
@@ -980,6 +1003,8 @@ def test_a_value_python_cannot_hold_is_damage_wherever_it_is_read(
         "directory",
         pytest.param("fifo", marks=pytest.mark.skipif(sys.platform == "win32", reason="no FIFO")),
         "older-stockin",
+        "our-columns-null-date",
+        "our-table-plus-a-trigger",
         "schema-not-utf8",
         "key-out-of-order",
         *_ROWS,
@@ -1001,7 +1026,10 @@ def test_a_damaged_or_foreign_prices_db_is_reported_and_left_alone(
     (quotes,) = [c for c in checks if c["name"] == "quotes"]
     assert quotes["status"] == "fail", quotes
     if kind in _ROWS and kind != "no-primary-key":  # the scan's own words, not re-wrapped
-        assert quotes["detail"] == f"{db} holds rows Stockin could not have written"
+        assert quotes["detail"] in (
+            f"{db} holds rows Stockin could not have written",
+            f"{db} is damaged (CHECK constraint failed in quotes)",  # integrity_check
+        )
     for args in (["prices", "import", str(EOD / "bhavcopy-sample.csv")], ["holdings"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 2, (args, result.output)
@@ -1543,3 +1571,51 @@ def test_a_row_dated_today_in_india_is_kept_when_utc_is_still_yesterday(
     _clock_at(monkeypatch, "2030-01-01T18:29:00+00:00")  # still 1 Jan in India
     with pytest.raises(PricesDamaged):
         PriceStore.open(tmp_path / "prices.db")
+
+
+# ---------------------------------------------- crafted inputs (verifier 3 on #21)
+
+
+def test_a_file_dated_before_any_real_file_is_rejected() -> None:
+    """A price file dated 0001-01-01 crashed `prices import` with an
+    OverflowError (the day before it), and with --accept-jumps was stored."""
+    with pytest.raises(eod.EodRejected, match="before any real file"):
+        eod.parse_bhavcopy(_bhav_for("0001-01-01"), TODAY)
+    with pytest.raises(eod.EodRejected, match="before any real file"):
+        eod.parse_bhavcopy(_bhav_for("1993-12-31"), TODAY)
+    assert eod.parse_bhavcopy(_bhav_for("1994-01-01"), TODAY).day == OLDEST_FILE_DAY
+    row = "1;INF179K01UT0;-;Fund;Direct Plan;Growth;10.5;{}"
+    with pytest.raises(eod.EodRejected, match="before any real file"):
+        eod.parse_amfi(_nav(row.format("31-Dec-1993")), TODAY)
+    assert eod.parse_amfi(_nav(row.format("01-Jan-1994")), TODAY).day == OLDEST_FILE_DAY
+
+
+@pytest.mark.parametrize("flag", [[], ["--accept-jumps"]])
+def test_prices_import_of_a_file_dated_year_1_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str]
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    old = tmp_path / "year1.csv"
+    old.write_bytes(_bhav_for("0001-01-01"))
+    result = runner.invoke(app, ["prices", "import", str(old), *flag])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+    assert "before any real file" in result.output
+    assert not (tmp_path / "prices.db").exists()
+
+
+def test_a_bug_in_reading_is_not_reported_as_damage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard maps database and value errors to "damaged"; a programming
+    error must still surface, not send the owner to move a good file aside."""
+    import stockin.prices
+
+    _store_with_rows(tmp_path / "prices.db", n=3)
+
+    def broken(*args: object) -> None:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(stockin.prices, "_quote", broken)
+    with PriceStore.open(tmp_path / "prices.db") as store, pytest.raises(RuntimeError):
+        store.book([parse_isin(_with_digit("INE00000000"))])

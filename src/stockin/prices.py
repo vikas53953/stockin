@@ -43,6 +43,11 @@ below it; a price above it can only come from a damaged file, and it would
 not fit SQLite's integer as micro-rupees much further up."""
 MAX_PRICE_MICROS = MAX_PRICE_RUPEES * 10**6
 
+OLDEST_FILE_DAY = date(1994, 1, 1)
+"""No price file is dated before NSE's first trading year. Checked where a
+file is read (both parsers) and where its rows are kept (the scan on open),
+so a file dated 0001-01-01 is refused, not stored (verifier 3 on #21)."""
+
 OLDEST_NAV_YEARS = 30
 """No real NAV is more than 30 calendar years older than its file's day (see
 eod.AMFI_OLDEST_YEARS). One number, checked where a file is read (the
@@ -175,8 +180,16 @@ _COLUMNS = (  # (name, primary-key position)
 )
 
 
-_FIRST_DAY = date.min.isoformat()
-"""The earliest day a `date` can hold. SQLite's date() also accepts year 0000."""
+_ISIN_GLOB = "[A-Z][A-Z]" + "[A-Z0-9]" * 9 + "[0-9]"
+"""An ISIN's shape: country, nine letters or digits, a check digit."""
+
+_OUR_TABLE = (
+    "table",
+    "quotes",
+    " ".join(_SCHEMA.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE").split()),
+)
+"""sqlite_master's row for the table `_SCHEMA` creates (SQLite keeps the
+statement's text, without IF NOT EXISTS), whitespace aside."""
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -201,9 +214,15 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     at all (new or 0 bytes). Anything else is PricesDamaged: a file another
     program (or an older Stockin) made, a damaged page, or a row we could not
     have written. Never guess at, or write into, such a file."""
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-    if not tables:
+    objects = conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall()
+    if not objects:
         return False
+    # The file must hold exactly the table Stockin creates, constraints and
+    # all: a table with our column names but no NOT NULL let a NULL date past
+    # the scan and crash every read (verifier 3 on #21). A file with any other
+    # table, index, view or trigger is not ours either.
+    if [(t, n, " ".join(str(q).split())) for t, n, q in objects] != [_OUR_TABLE]:
+        raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
     # SQLite pages have no checksum. integrity_check (not quick_check) also
     # finds a key byte that puts rows out of key order, which leaves lookups
     # returning a stale row while every value still looks valid (verifier 7).
@@ -220,22 +239,29 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     # is NULL for text that is not a real day (2026-13-39) and normalises an
     # impossible one (2026-02-30), so `IS NOT date(x)` is a real date check.
     # But SQLite has a year 0000 and Python's date does not: such a row passed
-    # the scan and then crashed the read (verifier 2 on #21). Nothing Stockin
-    # reads can be dated before date.min, and no NAV is more than
-    # OLDEST_NAV_YEARS older than its file (the NAVAll parser's own bound, by
-    # calendar year like the parser), so a row outside either is not ours.
+    # the scan and then crashed the read (verifier 2 on #21). No file is
+    # dated before OLDEST_FILE_DAY and no NAV is more than OLDEST_NAV_YEARS
+    # older than its file (the parsers' own bounds; by calendar year, like
+    # the NAVAll parser), so every date a row may hold is one Python can.
     odd = conn.execute(
-        """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR length(isin) != 12
+        """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR isin NOT GLOB ?
              OR source NOT IN ('bhavcopy', 'amfi')
              OR file_day IS NOT date(file_day) OR on_date IS NOT date(on_date)
              OR (source = 'bhavcopy' AND on_date != file_day)
              OR file_day > ? OR on_date > ?
-             OR file_day < ? OR on_date < ?
+             OR file_day < ?
              OR CAST(substr(on_date, 1, 4) AS INTEGER)
                 < CAST(substr(file_day, 1, 4) AS INTEGER) - ?
              OR typeof(micro_rupees) != 'integer'
              OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
-        (today, today, _FIRST_DAY, _FIRST_DAY, OLDEST_NAV_YEARS, MAX_PRICE_MICROS),
+        (
+            _ISIN_GLOB,
+            today,
+            today,
+            OLDEST_FILE_DAY.isoformat(),
+            OLDEST_NAV_YEARS,
+            MAX_PRICE_MICROS,
+        ),
     ).fetchone()
     if odd is not None:
         raise PricesDamaged(f"{path} holds rows Stockin could not have written")

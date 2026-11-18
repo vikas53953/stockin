@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 
 from ..facts import Isin, parse_isin
 from ..money import Price
-from ..prices import MAX_PRICE_MICROS, OLDEST_NAV_YEARS, PriceFile, Quote
+from ..prices import MAX_PRICE_MICROS, OLDEST_FILE_DAY, OLDEST_NAV_YEARS, PriceFile, Quote
 
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 NSE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip"
@@ -130,6 +130,8 @@ def parse_amfi(text: str, today: date) -> PriceFile:
     if not out:
         raise EodRejected("the NAVAll file has no NAV rows")
     day = max(days, key=lambda d: (days[d], d))
+    if day < OLDEST_FILE_DAY:
+        raise EodRejected(f"the NAVAll file is dated {day}, before any real file (damaged file?)")
     oldest = min(days)
     if oldest.year < day.year - AMFI_OLDEST_YEARS:
         raise EodRejected(
@@ -236,6 +238,8 @@ def _bhavcopy_rows(text: str, today: date) -> PriceFile:
         raise EodRejected(f"the bhavcopy's TradDt {day_text!r} is not a date") from None
     if day > today:
         raise EodRejected(f"the bhavcopy is dated {day}, after today (damaged file?)")
+    if day < OLDEST_FILE_DAY:
+        raise EodRejected(f"the bhavcopy is dated {day}, before any real file (damaged file?)")
     quotes = tuple(
         Quote(isin=isin, on=day, price=best[isin][1], source="bhavcopy")
         for isin in sorted(best)
