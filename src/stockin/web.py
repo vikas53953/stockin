@@ -16,6 +16,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -24,8 +25,15 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
+from .facts import Isin
+from .insights import all_insights, weights
+from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
+from .story import story
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
 
@@ -43,6 +51,8 @@ class Row:
     name: str
     qty: str
     cost: str | None
+    value: str | None = None
+    price_on: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,17 +73,23 @@ class CheckRow:
     computed: str
 
 
-def _groups(book: Book, holdings: tuple[Holding, ...]) -> tuple[AccountGroup, ...]:
+def _groups(
+    book: Book, holdings: tuple[Holding, ...], prices: PriceBook | None = None
+) -> tuple[AccountGroup, ...]:
     by_account: dict[str, list[Row]] = {}
     for h in sorted(holdings, key=lambda h: (h.account, h.isin)):
         acct = book.account(h.account)
         inst = book.instrument(h.isin)
+        quote = prices.get(h.isin) if prices else None
+        value = prices.value(h.isin, h.qty) if prices else None
         by_account.setdefault(acct.masked if acct else h.account, []).append(
             Row(
                 isin=h.isin,
                 name=inst.name if inst else h.isin,
                 qty=str(h.qty),
                 cost=str(h.cost) if h.cost is not None else None,
+                value=str(value) if value is not None else None,
+                price_on=quote.on.isoformat() if quote else None,
             )
         )
     return tuple(AccountGroup(label=k, rows=tuple(v)) for k, v in by_account.items())
@@ -138,18 +154,39 @@ def create_app(db: Path, port: int) -> FastAPI:
         with Ledger.open(db) as ledger:
             return ledger.book()
 
+    def read_prices(isins: frozenset[Isin]) -> tuple[PriceBook | None, str | None]:
+        """The price book for `isins`, or None with no prices yet; a damaged
+        prices.db is said on the page, never a traceback."""
+        try:
+            with PriceStore.open(db.parent / "prices.db") as store:
+                return store.book(isins), None
+        except PricesMissing:
+            return None, None
+        except PricesDamaged as exc:
+            return None, str(exc)
+
     @app.get("/", response_class=HTMLResponse)
     def home() -> Response:
         book = read_book()
         if book is None:
-            return page("home.html", groups=(), summary=None, empty=True)
+            return page("home.html", groups=(), summary=None, empty=True, story=None)
         report = reconcile(book)
+        holdings = book.holdings()
+        prices, damaged = read_prices(frozenset(h.isin for h in holdings))
+        priced = prices or PriceBook(quotes={})
+        ws, total, _ = weights(book, priced)
+        today = datetime.now(_IST).date()
+        days = sorted(q.on for q in priced.quotes.values())
         return page(
             "home.html",
-            groups=_groups(book, book.holdings()),
+            groups=_groups(book, holdings, prices),
             summary=_summary(report),
             ok=report.ok,
             empty=False,
+            story=story(all_insights(book, priced, today), ws, total.paise, len(holdings)),
+            priced_on=days[-1].isoformat() if days else None,
+            damaged=damaged,
+            prices_hint=PRICES_HINT,
         )
 
     @app.get("/reconcile", response_class=HTMLResponse)

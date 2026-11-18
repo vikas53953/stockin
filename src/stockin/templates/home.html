@@ -1,14 +1,83 @@
 {% extends "base.html" %}{% set active = "home" %}
 {% block body %}
-<h1>Holdings</h1>
 {% if empty %}
+<h1>Your portfolio</h1>
 <section class="panel"><p>No statements yet. Import your CAMS/KFintech CAS for mutual funds and your NSDL or CDSL CAS for demat holdings.</p></section>
 {% else %}
-<div class="chips">
-  {% if ok %}<span class="chip ok">reconcile OK</span>{% else %}<a class="chip bad" href="/reconcile">{{ summary.mismatch }} mismatch</a>{% endif %}
-  <span class="chip">{{ summary.match }} match</span><span class="chip warn">{{ summary.inferred }} inferred</span>
-</div>
+<section class="hero" aria-label="Summary">
+  <div class="hero-top">
+    <h1 class="total">{% if story.total %}{{ story.total }}{% else %}Your portfolio{% endif %}</h1>
+    <div class="chips">
+      {% if ok %}<span class="chip ok">reconcile OK</span>{% else %}<a class="chip bad" href="/reconcile">{{ summary.mismatch }} mismatch</a>{% endif %}
+      <span class="chip">{{ story.holdings }} holdings</span>
+      {% if priced_on %}<span class="chip">prices {{ priced_on }}</span>{% endif %}
+    </div>
+  </div>
+  {% if story.total and story.priced < story.holdings %}<p class="muted">Value of the {{ story.priced }} holdings with a price; {{ story.holdings - story.priced }} have none yet.</p>{% endif %}
+  {% if story.changed %}
+  <p class="changed"><span class="changed-head">{{ story.changed.headline }}</span> <span class="muted">{{ story.changed.detail }}</span></p>
+  {% endif %}
+</section>
+
+{% if damaged %}
+<div class="notice bad" role="alert"><b>Prices could not be read.</b> {{ damaged }}<br>{{ prices_hint }}</div>
+{% elif not priced_on %}
+<div class="notice">No prices yet, so values and the money map are not shown. Run <code>stockin prices fetch</code>, then reload.</div>
+{% endif %}
+
+{% if story.cards %}
+<section class="cards" aria-label="What your numbers say">
+  {% for c in story.cards %}
+  <article class="card tone-{{ c.tone }}">
+    <span class="badge">{% if c.tone == "warn" %}▲ look at this{% elif c.tone == "unknown" %}? unknown{% elif c.tone == "good" %}✓ on track{% else %}• for your information{% endif %}</span>
+    <h2>{{ c.headline }}</h2>
+    {% if c.bars %}
+    <div class="bars" role="img" aria-label="{{ c.headline }}">
+      {% for b in c.bars %}
+      <div class="bar-row" title="{{ b.label }}: {{ b.value }}">
+        <span class="bar-label">{{ b.label }}</span>
+        <span class="bar-track">
+          <span class="bar s{{ b.group }}" style="width:{{ '%.2f'|format(b.width) }}%"></span>
+          {% if c.line is not none %}<span class="bar-line" style="left:{{ '%.2f'|format(c.line) }}%"></span>{% endif %}
+        </span>
+        <span class="bar-value">{{ b.value }}</span>
+      </div>
+      {% endfor %}
+      {% if c.line is not none %}<p class="line-key"><span class="line-swatch"></span>{{ c.line_label }}</p>{% endif %}
+    </div>
+    {% endif %}
+    {% if c.streaks %}
+    <div class="streaks">
+      {% for row in c.streaks %}
+      <div class="streak"><span class="streak-name">{{ row.name }}</span>
+        <span class="months">{% for m in row.months %}<span class="month {{ 'paid' if m.paid else 'missed' }}" title="{{ m.label }}: {{ 'paid' if m.paid else 'missed' }}">{{ m.label[:3] }}<b>{{ '✓' if m.paid else '✗' }}</b></span>{% endfor %}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <p>{{ c.detail }}</p>
+    {% if c.learn %}<p class="learn"><b>Learn:</b> {{ c.learn }}</p>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if story.tiles %}
+<section class="panel" aria-label="Where your money is">
+  <h2>Where your money is</h2>
+  <div class="legend">{% for g, slot in story.legend %}<span><i class="sw s{{ slot }}"></i>{{ g }}</span>{% endfor %}</div>
+  <div class="map" role="img" aria-label="Map of your holdings: each tile's size is its value. The table below lists the same numbers.">
+    {% for t in story.tiles %}
+    <div class="tile s{{ t.slot }}{% if t.w < 12 or t.h < 14 %} small{% endif %}" style="left:{{ '%.3f'|format(t.x) }}%;top:{{ '%.3f'|format(t.y) }}%;width:{{ '%.3f'|format(t.w) }}%;height:{{ '%.3f'|format(t.h) }}%" title="{{ t.name }} · {{ t.group }} · {{ t.value }} · {{ t.share }}">
+      <span class="tile-name">{{ t.name }}</span><span class="tile-share">{{ t.share }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section class="panel">
+  <h2>Holdings</h2>
   {% if groups %}{% include "_holdings.html" %}{% else %}<p>Nothing held right now.</p>{% endif %}
   <p class="muted">Demat statements list balances, not trades, so demat cost shows as unknown until a tradebook import exists. Stockin never invents a cost.</p>
 </section>

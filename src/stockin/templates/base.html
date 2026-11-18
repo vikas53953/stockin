@@ -45,6 +45,46 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 .notice{padding:12px 14px;border-radius:10px;border:1px solid var(--line)}
 .notice.bad{border-color:var(--bad);color:var(--bad)}
 .notice.ok{border-color:var(--ok)}
+/* home story (direction A with B's map) */
+:root{--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s0:#8a948f;--on-fill:#111}
+@media (prefers-color-scheme:dark){:root{--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s0:#6d7772;--on-fill:#fff}}
+.s1{background:var(--s1)}.s2{background:var(--s2)}.s3{background:var(--s3)}.s4{background:var(--s4)}.s5{background:var(--s5)}.s0{background:var(--s0)}
+.hero{display:grid;gap:8px}
+.hero-top{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:baseline;justify-content:space-between}
+.total{font-size:30px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.changed{margin:0;font-size:16px}.changed-head{font-weight:600}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:10px;align-content:start;min-width:0}
+.card h2{font-size:17px;margin:0;line-height:1.35}
+.card p{margin:0}
+.badge{font:12px var(--mono);justify-self:start;padding:2px 8px;border-radius:999px;background:var(--chip)}
+.tone-warn .badge{color:var(--warn)}.tone-good .badge{color:var(--ok)}.tone-unknown .badge{color:var(--muted)}
+.learn{font-size:13.5px;color:var(--muted)}
+.bars{display:grid;gap:6px}
+.bar-row{display:grid;grid-template-columns:minmax(0,9em) 1fr auto;gap:8px;align-items:center;font-size:13px}
+.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-track{position:relative;height:12px}
+.bar{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;min-width:2px}
+.bar-line{position:absolute;top:-3px;bottom:-3px;border-left:2px dashed var(--fg)}
+.bar-value{font:12.5px var(--mono);font-variant-numeric:tabular-nums}
+.line-key{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.line-swatch{display:inline-block;width:0;height:12px;border-left:2px dashed var(--fg)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
+.legend span{display:inline-flex;gap:6px;align-items:center}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px}
+.map{position:relative;width:100%;aspect-ratio:100/56;min-height:220px}
+.tile{position:absolute;box-shadow:inset 0 0 0 1px var(--panel);border:1px solid var(--panel);border-radius:4px;padding:6px 8px;overflow:hidden;color:var(--on-fill);display:flex;flex-direction:column;gap:2px;min-width:0}
+.tile-name{font-weight:600;font-size:13px;line-height:1.25;overflow:hidden;text-overflow:ellipsis}
+.tile-share{font:12px var(--mono)}
+.tile.small{padding:2px 4px}.tile.small .tile-name{display:none}.tile.small .tile-share{font-size:10.5px}
+.tile:hover{outline:2px solid var(--fg);z-index:1}
+.streaks{display:grid;gap:8px}
+.streak{display:grid;gap:4px;font-size:13px}
+.streak-name{font-weight:500}
+.months{display:flex;flex-wrap:wrap;gap:4px}
+.month{font:11.5px var(--mono);padding:2px 6px;border-radius:6px;background:var(--chip);display:inline-flex;gap:4px}
+.month.paid b{color:var(--ok)}.month.missed{outline:1px solid var(--bad)}.month.missed b{color:var(--bad)}
+@media (max-width:560px){.map{aspect-ratio:1/1}}
 </style>
 </head>
 <body>
