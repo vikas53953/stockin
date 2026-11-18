@@ -9,8 +9,8 @@ every byte except that one chunk: the signature, every other chunk whole
 count), and anything after IEND. A `caBX` anywhere else is hashed like any
 other chunk, because a chunk between IDATs or before IHDR does change what a
 decoder draws. Every other file is hashed whole. Output is
-`sha256sum`-style: "<hex> <name>", with "[png-no-caBX]" after the name for
-PNGs.
+`sha256sum`-style: "<hex>  <name>" (two spaces, as sha256sum prints), with
+"[png-no-caBX]" after the name for PNGs.
 
   python3 evidence_hash.py DIR            # print the list
   python3 evidence_hash.py DIR --check F  # exit 1 if any file changed, is
