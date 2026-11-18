@@ -177,10 +177,15 @@ def india_day(now: datetime) -> date:
     return now.astimezone(_IST).date()
 
 
+def _now() -> datetime:
+    """The clock, in one place so tests can move it."""
+    return datetime.now(_IST)
+
+
 def india_today() -> date:
     """Today in India, where both price files are dated. Nothing in
     prices.db may be dated after it."""
-    return india_day(datetime.now(_IST))
+    return india_day(_now())
 
 
 def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
@@ -191,6 +196,12 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
     if not tables:
         return False
+    # SQLite pages have no checksum. integrity_check (not quick_check) also
+    # finds a key byte that puts rows out of key order, which leaves lookups
+    # returning a stale row while every value still looks valid (verifier 7).
+    problems = [r[0] for r in conn.execute("PRAGMA integrity_check")]
+    if problems != ["ok"]:
+        raise PricesDamaged(f"{path} is damaged ({problems[0]})")
     # a row dated after today would win "newest file" for ever: no later
     # import could replace it (verifier 6)
     today = india_today().isoformat()
@@ -221,7 +232,9 @@ def _guard(path: Path) -> Generator[None]:
     changed under us) is PricesDamaged, never a traceback."""
     try:
         yield
-    except sqlite3.DatabaseError as exc:
+    except (sqlite3.DatabaseError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError: a damaged byte in text SQLite hands back, such
+        # as the table's own schema (verifier 7)
         raise PricesDamaged(f"{path} is not a Stockin price file ({exc})") from None
 
 
@@ -250,7 +263,7 @@ class PriceStore:
                 if write:
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute(_SCHEMA)
-            except (sqlite3.DatabaseError, PricesDamaged):
+            except (sqlite3.DatabaseError, UnicodeDecodeError, PricesDamaged):
                 conn.close()
                 raise
         if not ours and not write:  # an empty file: nothing fetched yet

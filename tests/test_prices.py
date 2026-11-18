@@ -12,7 +12,14 @@ from typer.testing import CliRunner
 from stockin.cli import app
 from stockin.facts import parse_isin
 from stockin.money import Money, Price, Qty
-from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, india_today
+from stockin.prices import (
+    PriceBook,
+    PriceFile,
+    PricesDamaged,
+    PriceStore,
+    Quote,
+    india_today,
+)
 from stockin.sources import eod
 
 FIX = Path(__file__).parent / "fixtures"
@@ -849,6 +856,23 @@ def _damage(kind: str, db: Path) -> None:
         db.mkdir()
     elif kind == "fifo":
         os.mkfifo(db)
+    elif kind == "schema-not-utf8":  # verifier 7 (F1): a traceback, not the hint
+        _store_with_rows(db, n=3)
+        data = db.read_bytes()
+        assert data.count(b"CHECK (micro_rupees") == 1
+        db.write_bytes(data.replace(b"CHECK (micro_rupees", b"\xc3HECK (micro_rupees"))
+    elif kind == "key-out-of-order":  # verifier 7 (F2): lookups froze a stale price
+        with PriceStore.open(db, write=True) as store:
+            store.replace(
+                _file(
+                    _q("INE009A01021", date(2026, 11, 14), "1500", "bhavcopy"),
+                    _q("INE467B01029", date(2026, 11, 14), "3300", "bhavcopy"),
+                    _q("INF179K01UT0", date(2026, 11, 14), "2000", "bhavcopy"),
+                )
+            )
+        data = db.read_bytes()
+        assert data.count(b"INE467B01029") == 1
+        db.write_bytes(data.replace(b"INE467B01029", b"JNE467B01029"))  # every row still valid
     elif kind == "older-stockin":  # the table this branch wrote before files replaced days
         with sqlite3.connect(db) as c:
             c.execute(
@@ -895,6 +919,8 @@ def test_a_row_stockin_writes_passes_the_scan(tmp_path: Path) -> None:
         "directory",
         pytest.param("fifo", marks=pytest.mark.skipif(sys.platform == "win32", reason="no FIFO")),
         "older-stockin",
+        "schema-not-utf8",
+        "key-out-of-order",
         *_ROWS,
     ],
 )
@@ -1426,3 +1452,31 @@ def test_bhavcopy_header_names_may_be_padded() -> None:
     padded = b" TradDt , ISIN ,SctySrs , ClsPric\n2026-11-14,INE009A01021,EQ,1500.55\n"
     (q,) = eod.parse_bhavcopy(padded, TODAY).quotes
     assert q.price == Price.rupees("1500.55")
+
+
+def _clock_at(monkeypatch: pytest.MonkeyPatch, utc: str) -> None:
+    from datetime import datetime
+
+    import stockin.prices
+
+    monkeypatch.setattr(stockin.prices, "_now", lambda: datetime.fromisoformat(utc))
+
+
+def test_a_row_dated_today_in_india_is_kept_when_utc_is_still_yesterday(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier 7: nothing showed that a row dated today is accepted, or that
+    the store's and the CLI's "today" is India's, not UTC's or the machine's.
+    At 19:00 UTC on 1 Jan 2030 it is already 2 Jan in India."""
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    _clock_at(monkeypatch, "2030-01-01T19:00:00+00:00")
+    csv = tmp_path / "bhav.csv"
+    csv.write_bytes(_bhav_for("2030-01-02"))
+    result = runner.invoke(app, ["prices", "import", str(csv)])
+    assert result.exit_code == 0, result.output
+    assert "latest price date: 2030-01-02" in result.output
+    with PriceStore.open(tmp_path / "prices.db") as store:
+        assert store.latest_day() == date(2030, 1, 2)
+    _clock_at(monkeypatch, "2030-01-01T18:29:00+00:00")  # still 1 Jan in India
+    with pytest.raises(PricesDamaged):
+        PriceStore.open(tmp_path / "prices.db")
