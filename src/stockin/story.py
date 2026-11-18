@@ -209,20 +209,24 @@ def squarify(
         ):
             row.append(values[j])
             j += 1
-        area = sum(row) * scale
+        # Each row takes its share of the box that is left, and each tile its
+        # share of the row, so the rows partition the box exactly; deriving
+        # them from areas instead drifts until a tiny last tile overflows.
+        rest = sum(values[i:])
+        part = sum(row)
         if w >= h:  # lay the row down the left edge
-            col = area / h if h else 0.0
+            col = w if j == len(values) else w * part / rest
             yy = y
-            for v in row:
-                hh = v * scale / col if col else 0.0
+            for k, v in enumerate(row):
+                hh = (y + h - yy) if k == len(row) - 1 else h * v / part
                 out.append((x, yy, col, hh))
                 yy += hh
             x, w = x + col, w - col
         else:  # along the top edge
-            rh = area / w if w else 0.0
+            rh = h if j == len(values) else h * part / rest
             xx = x
-            for v in row:
-                ww = v * scale / rh if rh else 0.0
+            for k, v in enumerate(row):
+                ww = (x + w - xx) if k == len(row) - 1 else w * v / part
                 out.append((xx, y, ww, rh))
                 xx += ww
             y, h = y + rh, h - rh

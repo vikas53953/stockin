@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
@@ -32,6 +32,8 @@ values = st.lists(st.integers(1, 10**12), min_size=1, max_size=40).map(
 
 
 @given(values)
+@example([87678557913, 1])  # a tiny last tile once overflowed by 0.0004
+@example([592162143, 1, 1])
 def test_the_map_fills_its_box_with_areas_in_proportion_and_no_overlap(vs: list[int]) -> None:
     rects = squarify(vs, MAP_W, MAP_H)
     assert len(rects) == len(vs)
