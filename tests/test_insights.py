@@ -616,3 +616,104 @@ def test_insights_cli_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     human = runner.invoke(app, ["insights"])
     assert "no prices yet" in human.output
     _ = Isin  # keep the import for type readers
+
+
+# ------------------------------------------------- reinvestments, by label
+
+
+def _reinvest_with_stamp_duty(sip_months: list[int]) -> Book:
+    """SIPs of ₹1,000 on the 5th, then an IDCW of ₹800 reinvested on 25 Apr
+    with ₹0.04 stamp duty: the Buy costs ₹800.04 while its Income is ₹800."""
+    rows = [fx.txn(f"2026-{m:02d}-05", "PURCHASE", "10", "1000") for m in sip_months]
+    rows += [
+        fx.txn("2026-04-25", "DIVIDEND_REINVEST", "5", "800"),
+        fx.txn("2026-04-25", "STAMP_DUTY_TAX", None, "0.04"),
+    ]
+    close = str(10 * len(sip_months) + 5)
+    return _book([_rta(rows, close, "01-Jan-2026", "30-Apr-2026")])
+
+
+def test_a_reinvestment_with_stamp_duty_is_not_new_money_or_a_sip_month() -> None:
+    """Verifier 3's repro: Jan to Mar SIPs, nothing bought in April, and a
+    reinvestment with stamp duty in April."""
+    book = _reinvest_with_stamp_duty([1, 2, 3])
+    sip = sip_discipline(book)
+    assert sip is not None
+    assert (sip.numbers["expected"], sip.numbers["missed"]) == (4, 1)
+    assert "All" not in sip.headline
+    ch = what_changed(book)
+    assert ch is not None
+    n = ch.numbers
+    assert (n["added_paise"], n["income_paise"], n["reinvested_paise"]) == (300_000, 0, 80_000)
+    assert "3 purchases" in ch.detail and "paid out" not in ch.detail
+    inv = invested(book)
+    assert inv is not None and inv.numbers["net_paise"] == 300_000  # FY 2025-26: the 3 SIPs
+
+
+def test_two_purchases_and_a_reinvestment_are_not_a_sip() -> None:
+    assert sip_discipline(_reinvest_with_stamp_duty([1, 2])) is None
+
+
+def test_a_payout_of_the_sip_amount_on_the_sip_day_is_still_a_payout() -> None:
+    """Pairing by amount used to take this payout for a reinvestment."""
+    rows = [fx.txn(f"2026-{m:02d}-05", "PURCHASE", "10", "1000") for m in (1, 2, 3, 4)]
+    rows.append(fx.txn("2026-04-05", "DIVIDEND_PAYOUT", None, "1000"))
+    book = _book([_rta(rows, "40", "01-Jan-2026", "30-Apr-2026")])
+    sip = sip_discipline(book)
+    assert sip is not None and (sip.numbers["expected"], sip.numbers["missed"]) == (4, 0)
+    ch = what_changed(book)
+    assert ch is not None
+    assert (ch.numbers["income_paise"], ch.numbers["reinvested_paise"]) == (100_000, 0)
+
+
+def test_bonus_units_are_named_as_bonus_not_as_zero_rupees() -> None:
+    from stockin.facts import Bonus, Txn
+
+    st_ = cas.from_casparser(_statement({fx.HDFC_MF: [_trade(1, 5)]}, 1, 2), "sha")
+    (buy,) = [f for f in st_.facts if isinstance(f, Txn)]
+    bonus = buy.model_copy(update={"on": date(2026, 2, 10), "event": Bonus(units=Qty.parse("5"))})
+    book = Book.of((*st_.facts, bonus), tuple(st_.instruments), tuple(st_.accounts))
+    ins = tax_clock(book, date(2027, 1, 20))  # the 5 Jan lot is long-term, the bonus is not
+    assert ins is not None
+    assert ins.headline.startswith("Bonus units of HDFC Flexi Cap")
+    assert "₹0" not in ins.headline
+    assert ins.numbers["date"] == "2027-02-11"
+
+
+@given(histories(), windows, st.randoms(use_true_random=False))
+def test_what_changed_splits_new_money_from_reinvestments_by_the_statement(
+    history: dict[str, list[Trade]], ws: list[tuple[int, int]], rnd: random.Random
+) -> None:
+    """Independent model: the window is the months after the previous
+    statement's end (or the only statement's months); new money is every
+    PURCHASE with its stamp duty, and a reinvestment is its IDCW amount,
+    whatever stamp duty follows it and whatever order the facts are in."""
+    book = _book([_statement(history, a, b) for a, b in ws], shuffle=rnd)
+    ends = sorted({b for _, b in ws})
+    first = ends[-2] + 1 if len(ends) > 1 else min(a for a, _ in ws)
+    months = range(first, ends[-1] + 1)
+    in_window = [
+        t
+        for ts in history.values()
+        for t in ts
+        if t.month in months and any(a <= t.month <= b for a, b in ws)
+    ]
+    added = sum(_paise(t.amount + (t.tax or 0)) for t in in_window if t.buy and not t.reinvest)
+    again = sum(_paise(t.amount) for t in in_window if t.reinvest)
+    out = sum(_paise(t.amount - (t.tax or 0)) for t in in_window if not t.buy)
+    ch = what_changed(book)
+    listed = any(a <= t.month <= b for ts in history.values() for t in ts for a, b in ws)
+    assert (ch is not None) == listed
+    if ch is None:
+        return
+    n = ch.numbers
+    assert (n["added_paise"], n["reinvested_paise"], n["income_paise"]) == (added, again, 0)
+    assert n["out_paise"] == out
+    assert "paid out as dividends" not in ch.detail
+    assert ("of dividends reinvested" in ch.detail) == (again > 0)
+
+
+def _paise(rupees_: object) -> int:
+    from decimal import Decimal
+
+    return int(Decimal(str(rupees_)) * 100)

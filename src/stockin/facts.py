@@ -14,9 +14,16 @@ import hashlib
 import json
 import re
 from datetime import date
-from typing import Annotated, Literal, NewType
+from typing import Annotated, Any, Literal, NewType
 
-from pydantic import Field, StrictInt, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from .money import Bps, Money, Price, Qty, Value
 
@@ -97,10 +104,27 @@ class Account(Value):
 # ------------------------------------------------------------ ledger facts
 
 
-class Buy(Value):
+class _MaybeReinvested(Value):
+    """`reinvested` marks the two halves of a dividend reinvestment: an
+    Income that was not paid out and a Buy that is not new money. The
+    statement says so (DIVIDEND_REINVEST); nothing guesses it from amounts.
+    False is left out of the JSON, so every fact written before this field
+    existed keeps its content id."""
+
+    reinvested: StrictBool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_false(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        body: dict[str, Any] = handler(self)
+        if not self.reinvested:
+            body.pop("reinvested", None)
+        return body
+
+
+class Buy(_MaybeReinvested):
     kind: Literal["buy"] = "buy"
     units: Qty
-    amount: Money  # total paid, as the statement states it
+    amount: Money  # total paid, as the statement states it, stamp duty included
 
 
 class Sell(Value):
@@ -122,9 +146,10 @@ class Bonus(Value):
     units: Qty  # new zero-cost lot, acquired on the txn date
 
 
-class Income(Value):
-    """Dividend/interest paid out. No unit effect; feeds XIRR only.
-    A dividend reinvestment is imported as Income + Buy on the same day."""
+class Income(_MaybeReinvested):
+    """Dividend/interest. No unit effect; feeds XIRR only. A dividend
+    reinvestment is imported as Income + Buy on the same day, both with
+    `reinvested=True`."""
 
     kind: Literal["income"] = "income"
     amount: Money

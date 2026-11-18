@@ -82,6 +82,7 @@ class Trade:
     units: Decimal  # 3 decimals, positive
     amount: Decimal  # 2 decimals, positive
     tax: Decimal | None  # stamp duty on a buy, STT on a sell
+    reinvest: bool = False  # a buy that is an IDCW reinvested, not new money
 
 
 SCHEMES = {fx.HDFC_MF: "HDFC Flexi Cap Fund - Direct Growth", fx.ICICI_MF: "ICICI Bluechip"}
@@ -115,7 +116,8 @@ def histories(draw: st.DrawFn, one_trade_a_day: bool = False) -> dict[str, list[
                 held += units
             amount = Decimal(draw(st.integers(100, 10**9))) / 100  # rupees, >= 1.00
             tax = draw(st.none() | st.integers(1, 99).map(lambda c: Decimal(c) / 100))
-            trades.append(Trade(month, day, not sell, units, amount, tax))
+            again = not sell and draw(st.booleans())
+            trades.append(Trade(month, day, not sell, units, amount, tax, again))
         out[isin] = trades
     return out
 
@@ -129,7 +131,8 @@ def _units(trades: list[Trade], upto_month: int) -> Decimal:
 def _rows(t: Trade) -> list[dict[str, Any]]:
     on = f"2026-{t.month:02d}-{t.day:02d}"
     if t.buy:
-        rows = [fx.txn(on, "PURCHASE", str(t.units), str(t.amount))]
+        kind = "DIVIDEND_REINVEST" if t.reinvest else "PURCHASE"
+        rows = [fx.txn(on, kind, str(t.units), str(t.amount))]
         if t.tax is not None:
             rows.append(fx.txn(on, "STAMP_DUTY_TAX", None, str(t.tax)))
     else:

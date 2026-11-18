@@ -336,24 +336,10 @@ def _months(a: tuple[int, int], b: tuple[int, int]) -> list[tuple[int, int]]:
 _MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _reinvested(book: Book) -> set[Txn]:
-    """The Buy and Income facts of each dividend reinvestment. The import
-    writes one as an Income and a Buy of the same amount, on the same day,
-    for the same account and fund; that Buy is not new money and that Income
-    was not paid out. Pairing by amount keeps a SIP purchase or an IDCW
-    payout that happens to fall on the same day."""
-    incomes: dict[tuple[AccountId, Isin, date, int], list[Txn]] = defaultdict(list)
-    for t in _txns(book):
-        if isinstance(t.event, Income):
-            incomes[(t.account, t.isin, t.on, t.event.amount.paise)].append(t)
-    out: set[Txn] = set()
-    for t in sorted(_txns(book), key=lambda t: (t.on, t.nth)):
-        if isinstance(t.event, Buy):
-            pool = incomes.get((t.account, t.isin, t.on, t.event.amount.paise))
-            if pool:
-                out.add(pool.pop(0))
-                out.add(t)
-    return out
+def _fresh(t: Txn) -> bool:
+    """New money in or out: not either half of a dividend reinvestment. The
+    import labels those from the statement's own row type."""
+    return not (isinstance(t.event, Buy | Income) and t.event.reinvested)
 
 
 def _day(d: date) -> str:
@@ -372,18 +358,13 @@ def what_changed(book: Book) -> Insight | None:
     end = ends[-1]
     start = ends[-2] + timedelta(days=1) if len(ends) > 1 else min(c.start for c in covs)
     window = [t for t in txns if start <= t.on <= end]
-    re_ = _reinvested(book)
-
-    def fresh(t: Txn) -> bool:
-        return t not in re_
-
-    added = sum(t.event.amount.paise for t in window if isinstance(t.event, Buy) and fresh(t))
+    added = sum(t.event.amount.paise for t in window if isinstance(t.event, Buy) and _fresh(t))
     out = sum(t.event.amount.paise for t in window if isinstance(t.event, Sell))
-    income = sum(t.event.amount.paise for t in window if isinstance(t.event, Income) and fresh(t))
+    income = sum(t.event.amount.paise for t in window if isinstance(t.event, Income) and _fresh(t))
     again = sum(
-        t.event.amount.paise for t in window if isinstance(t.event, Income) and not fresh(t)
+        t.event.amount.paise for t in window if isinstance(t.event, Income) and not _fresh(t)
     )
-    buys = sum(1 for t in window if isinstance(t.event, Buy) and fresh(t))
+    buys = sum(1 for t in window if isinstance(t.event, Buy) and _fresh(t))
     sells = sum(1 for t in window if isinstance(t.event, Sell))
     headline = f"From {_day(start)} to {_day(end)}: you added {rupees(Money(paise=added))}" + (
         f" and took out {rupees(Money(paise=out))}." if out else "."
@@ -444,7 +425,6 @@ def sip_discipline(book: Book) -> Insight | None:
     makes no month due. A sold-out fund is due up to its last purchase. 3 or
     more missed months in a row at the end means the SIP stopped: those are
     not counted as missed, and the stop is said instead."""
-    re_ = _reinvested(book)
     spans: dict[tuple[AccountId, Isin], list[tuple[date, date]]] = defaultdict(list)
     for c in book.facts:
         if isinstance(c, Coverage):
@@ -452,7 +432,7 @@ def sip_discipline(book: Book) -> Insight | None:
     held = {(h.account, h.isin) for h in book.holdings()}
     buys: dict[tuple[AccountId, Isin], list[date]] = defaultdict(list)
     for t in _txns(book):
-        if isinstance(t.event, Buy) and t not in re_:
+        if isinstance(t.event, Buy) and _fresh(t):
             inst = book.instrument(t.isin)
             if inst is not None and inst.kind == "mutual_fund":
                 buys[(t.account, t.isin)].append(t.on)
@@ -601,9 +581,11 @@ def _fy(d: date) -> int:
 
 
 def invested(book: Book) -> Insight | None:
+    """New money in minus money out, by financial year. A reinvested
+    dividend is neither."""
     net: dict[int, int] = defaultdict(int)
     for t in _txns(book):
-        if isinstance(t.event, Buy):
+        if isinstance(t.event, Buy) and _fresh(t):
             net[_fy(t.on)] += t.event.amount.paise
         elif isinstance(t.event, Sell):
             net[_fy(t.on)] -= t.event.amount.paise

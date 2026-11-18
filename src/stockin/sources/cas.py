@@ -192,7 +192,6 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
     name = scheme.scheme
     rows = _uncancelled(scheme.transactions, name)
     events: list[tuple[date, Event]] = []
-    reinvested: set[int] = set()  # indexes of Income events that are already net of TDS
     units_seen = Decimal(0)
     for row in rows:
         kind = _tag(row.type)
@@ -202,10 +201,11 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
         if kind in _BUY or kind == "DIVIDEND_REINVEST":
             if units <= 0 or amount <= 0:
                 raise CasRejected(f"{name}: {kind} on {on} needs positive units and amount")
-            if kind == "DIVIDEND_REINVEST":
-                reinvested.add(len(events))
-                events.append((on, Income(amount=_money(amount, name))))
-            events.append((on, Buy(units=_qty(units, name), amount=_money(amount, name))))
+            again = kind == "DIVIDEND_REINVEST"
+            money = _money(amount, name)
+            if again:
+                events.append((on, Income(amount=money, reinvested=True)))
+            events.append((on, Buy(units=_qty(units, name), amount=money, reinvested=again)))
         elif kind in _SELL:
             if units >= 0 or row.amount is None:
                 raise CasRejected(f"{name}: {kind} on {on} needs negative units and an amount")
@@ -217,7 +217,7 @@ def _scheme_txns(acct: AccountId, isin: Isin, scheme: Scheme) -> list[Txn]:
         elif kind in _TAX_ON_SELL:
             _charge(events, on, (Sell,), abs(amount), kind, name)
         elif kind in _TAX_ON_PAYOUT:
-            _charge(events, on, (Sell, Income), abs(amount), kind, name, already_net=reinvested)
+            _charge(events, on, (Sell, Income), abs(amount), kind, name)
         elif units:
             raise CasRejected(f"{name}: unsupported {kind} row on {on} moves units")
         units_seen += units
@@ -268,13 +268,12 @@ def _charge(
     tax: Decimal,
     kind: str,
     name: str,
-    already_net: set[int] | None = None,
 ) -> None:
     """Apply a tax row to the latest same-day event of a type in `onto`
     before it in the statement. Stamp duty adds to a buy's cost. STT comes
     off a sell's proceeds; TDS comes off a sell's proceeds or an IDCW
-    payout. An Income in `already_net` (a reinvestment, whose amount is what
-    was left after TDS) is the row the tax belongs to but is not reduced."""
+    payout. A reinvested Income (whose amount is what was left after TDS) is
+    the row the tax belongs to but is not reduced."""
     charge = _money(tax, name)
     for i in range(len(events) - 1, -1, -1):
         when, event = events[i]
@@ -283,17 +282,14 @@ def _charge(
         if not isinstance(event, onto):
             continue
         if isinstance(event, Buy):
-            events[i] = (when, Buy(units=event.units, amount=event.amount + charge))
+            events[i] = (when, event.model_copy(update={"amount": event.amount + charge}))
             return
-        if already_net and i in already_net:
+        if isinstance(event, Income) and event.reinvested:
             return
         net = event.amount - charge
         if net.paise < 0:
             raise CasRejected(f"{name}: {kind} on {on} is larger than the amount it is on")
-        events[i] = (
-            when,
-            Sell(units=event.units, amount=net) if isinstance(event, Sell) else Income(amount=net),
-        )
+        events[i] = (when, event.model_copy(update={"amount": net}))
         return
     what = " or ".join(
         {Buy: "purchase", Sell: "redemption", Income: "IDCW payout"}[t] for t in onto

@@ -470,3 +470,75 @@ def test_cli_without_ledger_says_how_to_start(
         r = runner.invoke(app, [cmd])
         assert r.exit_code == 2
         assert "stockin import cas" in r.output
+
+
+def test_a_reinvestment_is_labelled_at_import_and_keeps_its_stamp_duty() -> None:
+    """The statement's own row type marks both halves of a reinvestment. The
+    stamp duty after it is added to the Buy's cost and the label survives, so
+    nothing downstream has to pair the Buy with its Income by amount."""
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "5", "500"),
+        fx.txn("2026-01-05", "STAMP_DUTY_TAX", None, "0.03"),
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "5", "800"),
+        fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    events = [f.event for f in st.facts if isinstance(f, Txn)]
+    assert events == [
+        Buy(units=Qty.parse("5"), amount=Money.rupees("500.03")),
+        Income(amount=Money.rupees("800"), reinvested=True),
+        Buy(units=Qty.parse("5"), amount=Money.rupees("800.04"), reinvested=True),
+    ]
+
+
+def test_a_payout_is_not_labelled_reinvested() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-25", "DIVIDEND_PAYOUT", None, "80"),
+        fx.txn("2026-01-25", "TDS_TAX", None, "8"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    events = [f.event for f in st.facts if isinstance(f, Txn)]
+    assert [getattr(e, "reinvested", None) for e in events] == [False, False]
+    assert _income(st) == [Money.rupees("72")]
+
+
+def test_the_label_does_not_change_the_id_of_any_earlier_fact() -> None:
+    """`reinvested=False` is left out of the canonical JSON, so a ledger
+    written before the label existed converges with a fresh import instead of
+    holding every purchase twice. The ids are the ones the code gave before."""
+    from datetime import date
+
+    from stockin.facts import AccountId, fact_id, parse_isin
+
+    acct, isin, on = AccountId("0123456789abcdef"), parse_isin("INF179K01UT0"), date(2026, 1, 5)
+    buy = Txn(
+        account=acct,
+        isin=isin,
+        on=on,
+        event=Buy(units=Qty.parse("10"), amount=Money.rupees("1000")),
+    )
+    pay = Txn(account=acct, isin=isin, on=on, event=Income(amount=Money.rupees("50")))
+    assert fact_id(buy) == "2025eae7761ab93d930fdd368e27b5febde234c19eae1e535c0c90ff45cd3826"
+    assert fact_id(pay) == "fe66a6599372dc4b3bdd79b65ec720a0acca7f0ff1ccf8a3be04fc34b65b7792"
+    again = buy.model_copy(update={"event": buy.event.model_copy(update={"reinvested": True})})
+    assert fact_id(again) != fact_id(buy)  # the label is part of the fact when it is set
+
+
+def test_a_reinvestment_survives_the_ledger_round_trip(tmp_path: Path) -> None:
+    txns = [
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "10", "800"),
+        fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    db = tmp_path / "ledger.db"
+    with LedgerWriter.open(db) as w:
+        w.ingest(st)
+    with Ledger.open(db) as led:
+        facts = led.book().facts
+    flags = sorted(
+        (type(f.event).__name__, f.event.reinvested)  # type: ignore[union-attr]
+        for f in facts
+        if isinstance(f, Txn)
+    )
+    assert flags == [("Buy", True), ("Income", True)]
