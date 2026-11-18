@@ -2,7 +2,7 @@ import io
 import json
 import sys
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, timedelta
 from pathlib import Path
 
@@ -839,6 +839,16 @@ _ROWS = {
     "file-day-after-today": ("INE009A01021", "amfi", _TOMORROW, "2026-11-14", 1),
     "on-date-after-today": ("INE009A01021", "amfi", "2026-11-14", _TOMORROW, 1),
     "one-digit-to-2029": ("INE009A01021", "bhavcopy", "2029-11-17", "2029-11-17", 1),
+    # verifier 2 on #21 (F1): SQLite's date() accepts year 0000 and Python's date
+    # does not, so these passed the scan and crashed holdings, import and fetch
+    "on-date-year-0000": ("INE009A01021", "amfi", "2026-11-14", "0000-11-14", 1),
+    "file-day-year-0000": ("INE009A01021", "amfi", "0000-11-14", "2026-11-14", 1),
+    "bhavcopy-year-0000": ("INE009A01021", "bhavcopy", "0000-11-14", "0000-11-14", 1),
+    # within 30 years of its file, so only the floor on on_date refuses it
+    "on-date-year-0000-file-year-0001": ("INE009A01021", "amfi", "0001-11-14", "0000-11-14", 1),
+    # a NAV no real NAVAll carries: more than 30 years older than its file
+    "nav-31-years-old": ("INE009A01021", "amfi", "2026-11-14", "1995-12-31", 1),
+    "nav-from-year-0006": ("INE009A01021", "amfi", "2026-11-14", "0006-11-14", 1),
 }
 
 
@@ -912,6 +922,57 @@ def test_a_row_stockin_writes_passes_the_scan(tmp_path: Path) -> None:
     )
 
 
+def test_the_oldest_rows_stockin_writes_pass_the_scan(tmp_path: Path) -> None:
+    """The control for the low-end cases: the parsers keep a NAV from 30
+    calendar years before its file, and a bhavcopy of any day a date can
+    hold, so the store must read both back."""
+    fund, share = parse_isin("INF179K01BE2"), parse_isin("INE009A01021")
+    nav = _file(_q(fund, date(1996, 1, 1), "10", "amfi"), day=date(2026, 11, 14))
+    first = _file(_q(share, date.min, "10", "bhavcopy"), day=date.min)
+    db = tmp_path / "prices.db"
+    with PriceStore.open(db, write=True) as store:
+        store.replace(nav)
+        store.replace(first)
+    with PriceStore.open(db) as store:
+        assert store.book([fund, share]).quotes == {fund: nav.quotes[0], share: first.quotes[0]}
+        assert store.stored("bhavcopy", date.min) == {share: first.quotes[0]}
+
+
+@pytest.mark.parametrize(
+    ("column", "read"),
+    [
+        ("on_date", lambda s: s.book([parse_isin("INE009A01021")])),
+        ("on_date", lambda s: s.stored("amfi", date(2026, 11, 14))),
+        ("on_date", lambda s: s.take(_file(_q("INE009A01021", date(2026, 11, 14), "2", "amfi")))),
+        (
+            "on_date",
+            lambda s: s.replace(_file(_q("INE009A01021", date(2026, 11, 14), "2", "amfi"))),
+        ),
+        ("file_day", lambda s: s.latest_day()),
+    ],
+    ids=["book", "stored", "take", "replace", "latest_day"],
+)
+def test_a_value_python_cannot_hold_is_damage_wherever_it_is_read(
+    tmp_path: Path, column: str, read: Callable[[PriceStore], object]
+) -> None:
+    """The scan on open is one check; the read is another. A row that turns
+    into a year Python has no date for after the store was opened (so the
+    scan never saw it) is still PricesDamaged, not ValueError's traceback,
+    and a write that reads it first changes nothing."""
+    import sqlite3
+
+    db = tmp_path / "prices.db"
+    with PriceStore.open(db, write=True) as store:
+        store.replace(_file(_q("INE009A01021", date(2026, 11, 14), "1", "amfi")))
+        with sqlite3.connect(db) as other:
+            other.execute(f"UPDATE quotes SET {column} = '0000-11-14'")
+        before = store.digest()
+        with pytest.raises(PricesDamaged, match="is not a Stockin price file") as caught:
+            read(store)
+        assert "year 0 is out of range" in str(caught.value)
+        assert store.digest() == before
+
+
 @pytest.mark.parametrize(
     "kind",
     [
@@ -939,6 +1000,8 @@ def test_a_damaged_or_foreign_prices_db_is_reported_and_left_alone(
     checks = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
     (quotes,) = [c for c in checks if c["name"] == "quotes"]
     assert quotes["status"] == "fail", quotes
+    if kind in _ROWS and kind != "no-primary-key":  # the scan's own words, not re-wrapped
+        assert quotes["detail"] == f"{db} holds rows Stockin could not have written"
     for args in (["prices", "import", str(EOD / "bhavcopy-sample.csv")], ["holdings"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 2, (args, result.output)

@@ -43,6 +43,11 @@ below it; a price above it can only come from a damaged file, and it would
 not fit SQLite's integer as micro-rupees much further up."""
 MAX_PRICE_MICROS = MAX_PRICE_RUPEES * 10**6
 
+OLDEST_NAV_YEARS = 30
+"""No real NAV is more than 30 calendar years older than its file's day (see
+eod.AMFI_OLDEST_YEARS). One number, checked where a file is read (the
+parser) and where its rows are kept (the scan on open)."""
+
 
 class Quote(Value):
     """The close of one instrument on one trading day, from one source."""
@@ -170,6 +175,9 @@ _COLUMNS = (  # (name, primary-key position)
 )
 
 
+_FIRST_DAY = date.min.isoformat()
+"""The earliest day a `date` can hold. SQLite's date() also accepts year 0000."""
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -211,15 +219,23 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     # A full scan: a damaged page anywhere in the table raises here. date()
     # is NULL for text that is not a real day (2026-13-39) and normalises an
     # impossible one (2026-02-30), so `IS NOT date(x)` is a real date check.
+    # But SQLite has a year 0000 and Python's date does not: such a row passed
+    # the scan and then crashed the read (verifier 2 on #21). Nothing Stockin
+    # reads can be dated before date.min, and no NAV is more than
+    # OLDEST_NAV_YEARS older than its file (the NAVAll parser's own bound, by
+    # calendar year like the parser), so a row outside either is not ours.
     odd = conn.execute(
         """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR length(isin) != 12
              OR source NOT IN ('bhavcopy', 'amfi')
              OR file_day IS NOT date(file_day) OR on_date IS NOT date(on_date)
              OR (source = 'bhavcopy' AND on_date != file_day)
              OR file_day > ? OR on_date > ?
+             OR file_day < ? OR on_date < ?
+             OR CAST(substr(on_date, 1, 4) AS INTEGER)
+                < CAST(substr(file_day, 1, 4) AS INTEGER) - ?
              OR typeof(micro_rupees) != 'integer'
              OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
-        (today, today, MAX_PRICE_MICROS),
+        (today, today, _FIRST_DAY, _FIRST_DAY, OLDEST_NAV_YEARS, MAX_PRICE_MICROS),
     ).fetchone()
     if odd is not None:
         raise PricesDamaged(f"{path} holds rows Stockin could not have written")
@@ -232,9 +248,13 @@ def _guard(path: Path) -> Generator[None]:
     changed under us) is PricesDamaged, never a traceback."""
     try:
         yield
-    except (sqlite3.DatabaseError, UnicodeDecodeError) as exc:
-        # UnicodeDecodeError: a damaged byte in text SQLite hands back, such
-        # as the table's own schema (verifier 7)
+    except PricesDamaged:
+        raise  # already says what is wrong (it is a ValueError too)
+    except (sqlite3.DatabaseError, ValueError) as exc:
+        # ValueError: a stored value Python cannot hold, whatever the scan on
+        # open let through or was changed after it. That includes
+        # UnicodeDecodeError, a damaged byte in text SQLite hands back, such
+        # as the table's own schema (verifier 7).
         raise PricesDamaged(f"{path} is not a Stockin price file ({exc})") from None
 
 
@@ -335,7 +355,7 @@ class PriceStore:
         """The day of the newest file stored."""
         with _guard(self._path):
             (day,) = self._conn.execute("SELECT max(file_day) FROM quotes").fetchone()
-        return None if day is None else date.fromisoformat(day)
+            return None if day is None else date.fromisoformat(day)
 
     def count(self) -> int:
         with _guard(self._path):

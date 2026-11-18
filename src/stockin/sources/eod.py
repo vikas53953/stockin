@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 
 from ..facts import Isin, parse_isin
 from ..money import Price
-from ..prices import MAX_PRICE_MICROS, PriceFile, Quote
+from ..prices import MAX_PRICE_MICROS, OLDEST_NAV_YEARS, PriceFile, Quote
 
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 NSE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip"
@@ -69,7 +69,7 @@ def _price(text: str, where: str) -> Price | None:
     return price
 
 
-AMFI_OLDEST_YEARS = 30
+AMFI_OLDEST_YEARS = OLDEST_NAV_YEARS
 """NAVAll still lists wound-up schemes with their last NAV: in November 2026
 the oldest row is from October 2008, 18 years back. A row more than 30 years
 older than the file's day is not a real NAV row; it is a damaged year."""
