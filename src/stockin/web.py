@@ -1,12 +1,14 @@
 """The local web app: `stockin web` serves it on 127.0.0.1 only.
 
-Three pages, all drawn from the same objects the CLI prints:
-  /            holdings by account, the reconcile summary, an upload form
+Pages, all drawn from the same objects the CLI prints:
+  /            your verdicts, the story, holdings by account, an upload form
+  /thesis/ISIN write why you hold a holding, its target weight, or mark it broken
   /import      POST a CAS (PDF + password, or casparser JSON); shows the report
   /reconcile   every check, mismatches first
 
-Nothing here can place an order. The only write is importing a statement,
-through the same `cas.read` -> `LedgerWriter.ingest` path as the CLI. The
+Nothing here can place an order. The writes are importing a statement,
+through the same `cas.read` -> `LedgerWriter.ingest` path as the CLI, and
+saving your own thesis to theses.db, through the same `ThesisStore.put`. The
 upload is written to a private temp file, read once and deleted; the
 password is passed to casparser and never stored, logged or echoed.
 """
@@ -21,16 +23,17 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .facts import Isin
-from .insights import all_insights, weights
+from .insights import all_insights, short_name, weights
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
 from .story import story
+from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, for_book, parse_percent
 
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
 
@@ -170,6 +173,15 @@ def create_app(db: Path, port: int) -> FastAPI:
             # other kind (RuntimeError, TypeError, ...) still surfaces.
             return None, f"{path} could not be read ({type(exc).__name__}: {str(exc)[:200]})"
 
+    theses_db = db.parent / "theses.db"
+
+    def read_theses() -> tuple[dict[Isin, Thesis], str | None]:
+        try:
+            with ThesisStore.open(theses_db) as store:
+                return store.all(), None
+        except ThesesDamaged as exc:
+            return {}, str(exc)
+
     @app.get("/", response_class=HTMLResponse)
     def home() -> Response:
         book = read_book()
@@ -182,6 +194,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         ws, total, _ = weights(book, priced)
         today = india_today()
         days = sorted(q.on for q in priced.quotes.values())
+        theses, theses_damaged = read_theses()
         return page(
             "home.html",
             groups=_groups(book, holdings, prices),
@@ -192,7 +205,67 @@ def create_app(db: Path, port: int) -> FastAPI:
             priced_on=days[-1].isoformat() if days else None,
             damaged=damaged,
             prices_hint=PRICES_HINT,
+            verdicts=for_book(book, priced, theses) if theses_damaged is None else (),
+            theses=theses,
+            theses_damaged=theses_damaged,
         )
+
+    def thesis_form(isin: str, error: str | None = None, **typed: str) -> Response:
+        book = read_book()
+        held = {h.isin for h in book.holdings()} if book else set[Isin]()
+        if isin not in held or book is None:
+            return PlainTextResponse(f"{isin} is not in your holdings", 404)
+        inst = book.instrument(Isin(isin))
+        theses, damaged = read_theses()
+        if damaged:
+            return page("thesis.html", isin=isin, holding=isin, error=damaged, t=None, typed={})
+        t = theses.get(Isin(isin))
+        return page(
+            "thesis.html",
+            isin=isin,
+            holding=short_name(inst.name) if inst else isin,
+            error=error,
+            t=t,
+            typed=typed,
+            max_text=MAX_TEXT,
+        )
+
+    @app.get("/thesis/{isin}", response_class=HTMLResponse)
+    def thesis_page(isin: str) -> Response:
+        return thesis_form(isin)
+
+    @app.post("/thesis/{isin}", response_class=HTMLResponse)
+    def thesis_save(
+        isin: str,
+        why: Annotated[str, Form()] = "",
+        target: Annotated[str, Form()] = "",
+        exit_if: Annotated[str, Form()] = "",
+        broken: Annotated[str, Form()] = "",
+    ) -> Response:
+        typed = {"why": why, "target": target, "exit_if": exit_if, "broken": broken}
+        book = read_book()
+        if book is None or isin not in {h.isin for h in book.holdings()}:
+            return PlainTextResponse(f"{isin} is not in your holdings", 404)
+        if not why.strip():
+            return thesis_form(isin, "Write why you hold it first.", **typed)
+        try:
+            aim = parse_percent(target) if target.strip() else None
+        except ValueError as exc:
+            return thesis_form(isin, f"Target {exc}.", **typed)
+        t = Thesis(
+            isin=Isin(isin),
+            why=why.strip()[:MAX_TEXT],
+            exit_if=exit_if.strip()[:MAX_TEXT],
+            target=aim,
+            broken=broken == "on",
+            written=india_today(),
+        )
+        try:
+            with ThesisStore.open(theses_db) as store:
+                store.put(t)
+        except ThesesDamaged as exc:
+            return thesis_form(isin, str(exc), **typed)
+        return RedirectResponse("/#verdicts", status_code=303)
 
     @app.get("/reconcile", response_class=HTMLResponse)
     def reconcile_page() -> Response:

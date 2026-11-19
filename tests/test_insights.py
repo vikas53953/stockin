@@ -589,11 +589,11 @@ def test_percentages_round_once_from_the_money() -> None:
 
 
 def test_names_read_naturally() -> None:
-    from stockin.insights import _names, _short_name  # pyright: ignore[reportPrivateUsage]
+    from stockin.insights import _names, short_name  # pyright: ignore[reportPrivateUsage]
 
     assert _names(["A", "B", "C"]) == "A, B and C"
     assert _names(["A", "B"]) == "A and B"
-    assert _short_name("STATE BANK OF INDIA - EQ NEW RE. 1/-") == "STATE BANK OF INDIA"
+    assert short_name("STATE BANK OF INDIA - EQ NEW RE. 1/-") == "STATE BANK OF INDIA"
 
 
 def test_insights_cli_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

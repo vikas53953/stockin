@@ -85,6 +85,17 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 .month{font:11.5px var(--mono);padding:2px 6px;border-radius:6px;background:var(--chip);display:inline-flex;gap:4px}
 .month.paid b{color:var(--ok)}.month.missed{outline:1px solid var(--bad)}.month.missed b{color:var(--bad)}
 @media (max-width:560px){.map{aspect-ratio:1/1}}
+/* verdicts */
+.verdicts{list-style:none;margin:0;padding:0;display:grid}
+.verdict{display:grid;grid-template-columns:7.5em 1fr auto;gap:6px 12px;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--line)}
+.verdict:last-child{border-bottom:0}
+.call{font:600 12.5px var(--mono);padding:2px 8px;border-radius:999px;background:var(--chip);justify-self:start;white-space:nowrap}
+.call-exit .call{color:var(--bad)}.call-trim .call{color:var(--warn)}.call-add .call{color:var(--accent)}.call-review .call,.call-hold .call{color:var(--muted)}
+.edit{font-size:13px;color:var(--accent);white-space:nowrap}
+@media (max-width:560px){.verdict{grid-template-columns:1fr}.edit{justify-self:start}}
+textarea,input[type=text]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%;max-width:100%}
+textarea{min-height:5.5em;resize:vertical}
+.check{display:flex;gap:8px;align-items:center;font-weight:500}
 </style>
 </head>
 <body>
