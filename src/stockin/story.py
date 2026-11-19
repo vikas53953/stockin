@@ -48,6 +48,7 @@ class Bar:
     value: str  # as printed beside the bar
     width: float  # percent of the card's bar track
     group: int  # colour slot, 0 for none
+    key: str = ""  # ISIN when the bar is one holding, for its link
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def _bars(i: Insight) -> tuple[tuple[Bar, ...], float | None, str]:
             value=shown(p.value),
             width=max(p.value, 0) / top * 100,
             group=GROUP_SLOT.get(p.group, 0),
+            key=p.key if i.kind == "concentration" else "",
         )
         for p in points
     )

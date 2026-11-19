@@ -4,7 +4,7 @@
   {% for g in groups %}
     <tr><td class="acct" colspan="4">{{ g.label }}</td></tr>
     {% for r in g.rows %}
-    <tr><td class="name">{{ r.name }}<br><span class="isin">{{ r.isin }}</span></td><td class="num">{{ r.qty }}</td>
+    <tr><td class="name"><a href="/holding/{{ r.isin }}">{{ r.name }}</a><br><span class="isin">{{ r.isin }}</span></td><td class="num">{{ r.qty }}</td>
       <td class="num">{% if r.cost is not none %}{{ r.cost }}{% else %}<span class="unknown">unknown</span>{% endif %}</td>
       <td class="num">{% if r.value is not none %}{{ r.value }}<br><span class="isin">{{ r.price_on }}</span>{% else %}<span class="unknown">no price</span>{% endif %}</td></tr>
     {% endfor %}

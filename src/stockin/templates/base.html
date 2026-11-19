@@ -95,6 +95,28 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 @media (max-width:560px){.verdict{grid-template-columns:1fr}.edit{justify-self:start}}
 textarea,input[type=text]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%;max-width:100%}
 textarea{min-height:5.5em;resize:vertical}
+/* holding page */
+.crumb{margin:0}.crumb a{color:var(--muted);text-decoration:none}
+.h-name{font-size:26px;letter-spacing:-.01em}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:12px}
+.lt{font-size:13.5px;color:var(--muted)}
+.wbar .line-key{flex-wrap:wrap}
+@media (max-width:560px){.stats{grid-template-columns:1fr 1fr}.stat-num{font-size:17px}}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:grid;gap:2px;min-width:0}
+.stat-label{font:12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.stat-num{font-size:20px;font-variant-numeric:tabular-nums}
+.v-head{display:grid;gap:8px}.v-head h2{font-size:17px;line-height:1.4;margin:0}
+.wbar{display:grid;gap:6px}
+.wtrack{position:relative;height:16px;background:var(--chip);border-radius:4px}
+.wfill{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;min-width:2px}
+.wband{position:absolute;top:-4px;bottom:-4px;border:2px solid var(--fg);border-radius:4px;opacity:.55}
+.wtarget{position:absolute;top:-6px;bottom:-6px;border-left:2px solid var(--fg)}
+.band-swatch{display:inline-block;width:14px;height:10px;border:2px solid var(--fg);border-radius:3px;opacity:.55}
+.thesis p{margin:0}.thesis{display:grid;gap:4px}
+.button-link{justify-self:start;font-weight:600;padding:8px 14px;border-radius:8px;background:var(--accent);color:var(--bg);text-decoration:none}
+a.tile{text-decoration:none}a.bar-row,a.verdict-name{color:inherit;text-decoration:none}
+a.bar-row:hover .bar-label,a.verdict-name:hover,td.name a:hover{text-decoration:underline}
+td.name a{color:inherit}
 .check{display:flex;gap:8px;align-items:center;font-weight:500}
 </style>
 </head>

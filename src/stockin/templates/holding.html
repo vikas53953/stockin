@@ -1,0 +1,78 @@
+{% extends "base.html" %}{% set active = "home" %}
+{% block title %}{{ h.name }} · Stockin{% endblock %}
+{% block body %}
+<p class="crumb"><a href="/">← Your portfolio</a></p>
+<section class="hero" aria-label="{{ h.name }}">
+  <div class="hero-top">
+    <div>
+      <h1 class="h-name">{{ h.name }}</h1>
+      <p class="muted isin">{{ h.full_name }} · {{ h.isin }}</p>
+    </div>
+    {% if h.group %}<span class="chip"><i class="sw s{{ h.slot }}"></i> {{ h.group }}</span>{% endif %}
+  </div>
+</section>
+
+{% if damaged %}<div class="notice bad" role="alert"><b>Prices could not be read.</b> {{ damaged }}<br>{{ prices_hint }}</div>{% endif %}
+{% if theses_damaged %}<div class="notice bad" role="alert"><b>Your theses could not be read.</b> {{ theses_damaged }}<br>Copy theses.db somewhere safe first: it is the only copy of what you wrote.</div>{% endif %}
+
+<section class="stats" aria-label="Your position">
+  <div class="stat"><span class="stat-label">Value</span><span class="stat-num">{% if h.value %}{{ h.value }}{% else %}<span class="unknown">no price yet</span>{% endif %}</span>{% if h.price %}<span class="muted">price {{ h.price }}</span>{% endif %}</div>
+  <div class="stat"><span class="stat-label">Units</span><span class="stat-num">{{ h.units }}</span></div>
+  <div class="stat"><span class="stat-label">Cost</span><span class="stat-num">{% if h.cost %}{{ h.cost }}{% else %}<span class="unknown">unknown</span>{% endif %}</span></div>
+  <div class="stat"><span class="stat-label">Gain</span><span class="stat-num">{% if h.gain %}{{ h.gain }}{% else %}<span class="unknown">unknown</span>{% endif %}</span>{% if not h.cost %}<span class="muted">needs the price you paid</span>{% endif %}</div>
+</section>
+
+<section class="panel verdict-panel call-{{ h.verdict.call }}" aria-label="Your verdict">
+  <div class="v-head">
+    <span class="call">{{ {"exit": "✕ exit", "trim": "▼ trim", "add": "▲ add", "review": "? review", "hold": "• hold"}[h.verdict.call] }}</span>
+    <h2>{{ h.verdict.because }}</h2>
+  </div>
+  {% if h.bar %}
+  <div class="wbar" role="img" aria-label="Weight {{ h.bar.weight_text }}{% if h.bar.band_text %}; {{ h.bar.band_text }}{% endif %}; {{ h.bar.line_text }}">
+    <div class="wtrack">
+      {% if h.bar.band %}<span class="wband" style="left:{{ '%.2f'|format(h.bar.band[0]) }}%;width:{{ '%.2f'|format(h.bar.band[1] - h.bar.band[0]) }}%"></span>{% endif %}
+      <span class="wfill s{{ h.slot }}" style="width:{{ '%.2f'|format(h.bar.weight) }}%"></span>
+      {% if h.bar.target is not none %}<span class="wtarget" style="left:{{ '%.2f'|format(h.bar.target) }}%"></span>{% endif %}
+      <span class="bar-line" style="left:{{ '%.2f'|format(h.bar.line) }}%"></span>
+    </div>
+    <p class="line-key"><b>{{ h.bar.weight_text }}</b> of your money{% if h.bar.band_text %} · <span class="band-swatch"></span>{{ h.bar.band_text }}{% endif %} · <span class="line-swatch"></span>{{ h.bar.line_text }}</p>
+  </div>
+  {% endif %}
+  {% if h.thesis %}
+  <div class="thesis">
+    <p><b>Why you hold it:</b> {{ h.thesis.why }}</p>
+    {% if h.thesis.exit_if %}<p><b>You would sell if:</b> {{ h.thesis.exit_if }}</p>{% endif %}
+    <p class="muted">Written {{ h.thesis.written.isoformat() }}{% if h.thesis.broken %} · marked broken{% endif %}</p>
+  </div>
+  {% endif %}
+  <a class="button-link" href="/thesis/{{ h.isin }}">{% if h.thesis %}Edit your thesis{% else %}Write why you hold it{% endif %}</a>
+</section>
+
+<section class="panel" aria-label="By account">
+  <h2>By account</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Account</th><th class="num">Units</th><th class="num">Value</th><th class="num">Cost</th></tr></thead>
+    <tbody>{% for a in h.accounts %}<tr><td class="name">{{ a.account }}</td><td class="num">{{ a.units }}</td>
+      <td class="num">{% if a.value %}{{ a.value }}{% else %}<span class="unknown">no price</span>{% endif %}</td>
+      <td class="num">{% if a.cost %}{{ a.cost }}{% else %}<span class="unknown">unknown</span>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+
+{% if h.sip %}
+<section class="panel" aria-label="SIP months">
+  <h2>SIP months</h2>
+  <span class="months">{% for m in h.sip %}<span class="month {{ 'paid' if m.paid else 'missed' }}" title="{{ m.label }}: {{ 'paid' if m.paid else 'missed' }}">{{ m.label }}<b>{{ '✓' if m.paid else '✗' }}</b></span>{% endfor %}</span>
+</section>
+{% endif %}
+
+<section class="panel" aria-label="Purchases and tax dates">
+  <h2>Purchases and tax dates</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Bought · tax</th><th class="num">Units</th><th class="num">Cost</th></tr></thead>
+    <tbody>{% for l in h.lots %}<tr><td class="name">{% if l.bought %}{{ l.bought }}{% else %}<span class="unknown">before your statements</span>{% endif %}<br><span class="lt">{{ l.long_term }}</span><br><span class="isin">{{ l.account }}</span></td>
+      <td class="num">{{ l.units }}</td><td class="num">{% if l.cost %}{{ l.cost }}{% else %}<span class="unknown">unknown</span>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if h.lots_note %}<p class="muted">{{ h.lots_note }}</p>{% endif %}
+</section>
+<p class="muted">Read-only: Stockin never places an order.</p>
+{% endblock %}

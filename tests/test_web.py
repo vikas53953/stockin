@@ -92,7 +92,7 @@ def test_other_hosts_and_cross_site_posts_are_refused(client: TestClient, tmp_pa
 
 def test_no_order_routes_exist(client: TestClient) -> None:
     routes = {getattr(r, "path", "") for r in client.app.routes}  # type: ignore[attr-defined]
-    assert routes <= {"/", "/reconcile", "/import", "/thesis/{isin}"}  # thesis: your own words
+    assert routes <= {"/", "/reconcile", "/import", "/thesis/{isin}", "/holding/{isin}"}
 
 
 def test_an_outdated_ledger_says_how_to_rebuild(tmp_path: Path, client: TestClient) -> None:

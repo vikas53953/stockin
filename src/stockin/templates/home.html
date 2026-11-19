@@ -34,7 +34,7 @@
     {% for v in verdicts %}
     <li class="verdict call-{{ v.call }}">
       <span class="call">{{ {"exit": "✕ exit", "trim": "▼ trim", "add": "▲ add", "review": "? review", "hold": "• hold"}[v.call] }}</span>
-      <span class="because">{{ v.because }}{% if theses.get(v.isin) %}<br><span class="muted">Why you hold it: {{ theses[v.isin].why }}</span>{% endif %}</span>
+      <span class="because"><a class="verdict-name" href="/holding/{{ v.isin }}">{{ v.because }}</a>{% if theses.get(v.isin) %}<br><span class="muted">Why you hold it: {{ theses[v.isin].why }}</span>{% endif %}</span>
       <a class="edit" href="/thesis/{{ v.isin }}">{% if theses.get(v.isin) %}Edit thesis{% else %}Write thesis{% endif %}</a>
     </li>
     {% endfor %}
@@ -52,14 +52,14 @@
     {% if c.bars %}
     <div class="bars" role="img" aria-label="{{ c.headline }}">
       {% for b in c.bars %}
-      <div class="bar-row" title="{{ b.label }}: {{ b.value }}">
+      <{{ 'a' if b.key else 'div' }} class="bar-row"{% if b.key %} href="/holding/{{ b.key }}"{% endif %} title="{{ b.label }}: {{ b.value }}">
         <span class="bar-label">{{ b.label }}</span>
         <span class="bar-track">
           <span class="bar s{{ b.group }}" style="width:{{ '%.2f'|format(b.width) }}%"></span>
           {% if c.line is not none %}<span class="bar-line" style="left:{{ '%.2f'|format(c.line) }}%"></span>{% endif %}
         </span>
         <span class="bar-value">{{ b.value }}</span>
-      </div>
+      </{{ 'a' if b.key else 'div' }}>
       {% endfor %}
       {% if c.line is not none %}<p class="line-key"><span class="line-swatch"></span>{{ c.line_label }}</p>{% endif %}
     </div>
@@ -84,11 +84,11 @@
 <section class="panel" aria-label="Where your money is">
   <h2>Where your money is</h2>
   <div class="legend">{% for g, slot in story.legend %}<span><i class="sw s{{ slot }}"></i>{{ g }}</span>{% endfor %}</div>
-  <div class="map" role="img" aria-label="Map of your holdings: each tile's size is its value. The table below lists the same numbers.">
+  <div class="map" role="group" aria-label="Map of your holdings: each tile's size is its value; select a tile to open that holding. The table below lists the same numbers.">
     {% for t in story.tiles %}
-    <div class="tile s{{ t.slot }}{% if t.w < 12 or t.h < 14 %} small{% endif %}" style="left:{{ '%.3f'|format(t.x) }}%;top:{{ '%.3f'|format(t.y) }}%;width:{{ '%.3f'|format(t.w) }}%;height:{{ '%.3f'|format(t.h) }}%" title="{{ t.name }} · {{ t.group }} · {{ t.value }} · {{ t.share }}">
+    <a href="/holding/{{ t.isin }}" class="tile s{{ t.slot }}{% if t.w < 12 or t.h < 14 %} small{% endif %}" style="left:{{ '%.3f'|format(t.x) }}%;top:{{ '%.3f'|format(t.y) }}%;width:{{ '%.3f'|format(t.w) }}%;height:{{ '%.3f'|format(t.h) }}%" title="{{ t.name }} · {{ t.group }} · {{ t.value }} · {{ t.share }}">
       <span class="tile-name">{{ t.name }}</span><span class="tile-share">{{ t.share }}</span>
-    </div>
+    </a>
     {% endfor %}
   </div>
 </section>
