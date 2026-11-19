@@ -113,19 +113,43 @@ def test_an_unpriced_holding_says_so_and_draws_no_bar(data: Path) -> None:
 
 def test_the_sip_months_are_this_funds_months_from_the_insight() -> None:
     import cas_fixtures as fx
-    from test_insights import _book, _sip_history, _statement
+    from test_insights import _book, _statement, _trade
 
     from stockin.insights import sip_discipline
     from stockin.prices import PriceBook
 
-    book = _book([_statement(_sip_history([1, 2, 4, 5]), 1, 5)])
+    # two SIPs in one book: the page shows only its own fund's months
+    history = {
+        fx.HDFC_MF: [_trade(m, 5) for m in (1, 2, 4, 5)],
+        fx.ICICI_MF: [_trade(m, 10) for m in (1, 2, 3, 4, 5)],
+    }
+    book = _book([_statement(history, 1, 5)])
     ins = sip_discipline(book)
-    assert ins is not None
+    assert ins is not None and ins.numbers["sips"] == 2
     isin = parse_isin(fx.HDFC_MF)
     h = holding_page(book, PriceBook(quotes={}), {}, isin, TODAY)
     assert h is not None
-    assert [(m.label, m.paid) for m in h.sip] == [(p.label, p.value > 0) for p in ins.series]
-    assert sum(not m.paid for m in h.sip) == ins.numbers["missed"] == 1
+    own = [(p.label, p.value > 0) for p in ins.series if p.key.endswith(f":{isin}")]
+    assert [(m.label, m.paid) for m in h.sip] == own
+    assert len(own) == 5 and sum(not m.paid for m in h.sip) == 1
+
+
+def test_units_from_before_your_statements_get_no_tax_date() -> None:
+    import cas_fixtures as fx
+    from test_insights import _book, _sip_history, _statement
+
+    from stockin.prices import PriceBook
+
+    # a statement from March only: Jan and Feb units arrive as an opening balance
+    book = _book([_statement(_sip_history([1, 2, 3]), 3, 3)])
+    h = holding_page(book, PriceBook(quotes={}), {}, parse_isin(fx.HDFC_MF), TODAY)
+    assert h is not None
+    unknown = [r for r in h.lots if r.bought is None]
+    known = [r for r in h.lots if r.bought is not None]
+    assert len(unknown) == 1 and unknown[0].cost is None
+    assert unknown[0].long_term == "date unknown" and "no known date" in h.lots_note
+    assert [r.bought for r in known] == ["5 Mar 2026"]
+    assert known[0].long_term == "turns long-term on 6 Mar 2027, in 107 days"
 
 
 def test_lots_say_their_long_term_date_or_why_there_is_none(data: Path) -> None:
