@@ -7,6 +7,7 @@ output is rendered from, so the verify skill and the owner see one truth.
 from __future__ import annotations
 
 import http.client
+import io
 import os
 import shlex
 import sys
@@ -674,5 +675,18 @@ def web(
     uvicorn.run(create_app(ledger_path(), port), host="127.0.0.1", port=port, log_level="warning")
 
 
+def _utf8_output() -> None:
+    """Write UTF-8 whatever the console's code page. On Windows, output that
+    is piped, captured or redirected gets the ANSI code page (cp1252), which
+    has no ₹, so every line with a rupee sign raised UnicodeEncodeError (the
+    Windows CI run of drop 2 found it). An interactive console is already
+    UTF-8 and is left alone."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main() -> None:
+    _utf8_output()
     app()
