@@ -13,6 +13,7 @@ import hashlib
 import random
 import tempfile
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -24,9 +25,10 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from stockin.book import Book, reconcile
-from stockin.facts import Buy, Sell, Txn
-from stockin.money import Money, Qty, div_half_even
-from stockin.sources import cas
+from stockin.facts import Buy, Isin, Sell, Txn
+from stockin.money import Money, Price, Qty, div_half_even
+from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, is_jump, left_out
+from stockin.sources import cas, eod
 from stockin.store import Ledger, LedgerWriter
 
 # ------------------------------------------------------------------- money
@@ -423,3 +425,205 @@ def test_demat_holdings_follow_the_latest_statement_in_any_order(
     assert {h.isin: str(h.qty) for h in book.holdings()} == {
         isin: str(n) for isin, n in latest.items() if n
     }
+
+
+# ------------------------------------------------------------------ prices
+
+
+def _with_check_digit(body: str) -> str:
+    from stockin.facts import parse_isin
+
+    for d in "0123456789":
+        try:
+            return parse_isin(body + d)
+        except ValueError:
+            continue
+    raise AssertionError("no check digit")  # pragma: no cover
+
+
+ISINS = [_with_check_digit(f"INF{n:08d}") for n in range(6)]
+price_text = st.builds(
+    lambda whole, frac: f"{whole}.{frac:04d}", st.integers(1, 99_999), st.integers(0, 9_999)
+)
+quote_days = st.dates(min_value=date(2026, 1, 1), max_value=date(2026, 1, 31))
+
+
+@st.composite
+def quotes(draw: st.DrawFn) -> list[Quote]:
+    rows = draw(
+        st.lists(
+            st.tuples(
+                st.sampled_from(ISINS),
+                quote_days,
+                price_text,
+                st.sampled_from(["amfi", "bhavcopy"]),
+            ),
+            max_size=25,
+        )
+    )
+    return [
+        Quote(isin=Isin(i), on=on, price=Price.rupees(p), source=src)  # type: ignore[arg-type]
+        for i, on, p, src in rows
+    ]
+
+
+@given(
+    st.lists(
+        st.tuples(st.sampled_from(ISINS), quote_days, price_text),
+        min_size=1,  # a file with no NAV rows is rejected: see test_prices
+        max_size=20,
+        unique_by=lambda t: t[0],
+    )
+)
+def test_amfi_file_round_trips(rows: list[tuple[str, date, str]]) -> None:
+    lines = [
+        "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;"
+        "Scheme Name;Plan;Option;Net Asset Value;Date",
+        " ",
+        "Some AMC",
+        " ",
+    ]
+    for n, (isin, on, p) in enumerate(rows):
+        lines.append(f"{n};{isin};-;Fund {n};Direct Plan;Growth;{p};{on.strftime('%d-%b-%Y')}")
+    days = [on for _, on, _ in rows]
+    file = eod.parse_amfi("\n".join(lines), max(days))  # the newest row is dated today
+    assert {q.isin: q for q in file.quotes} == {
+        Isin(i): Quote(isin=Isin(i), on=on, price=Price.rupees(p), source="amfi")
+        for i, on, p in rows
+    }
+    assert file.day == max(days, key=lambda d: (days.count(d), d))  # the date most rows carry
+    with pytest.raises(eod.EodRejected):
+        eod.parse_amfi("\n".join(lines), max(days) - timedelta(days=1))
+
+
+@given(quotes(), st.randoms(use_true_random=False))
+def test_best_price_does_not_depend_on_order(qs: list[Quote], rnd: random.Random) -> None:
+    shuffled = qs[:]
+    rnd.shuffle(shuffled)
+    assert PriceBook.best(qs) == PriceBook.best(shuffled + qs[:3])
+
+
+@st.composite
+def price_files(draw: st.DrawFn, source: str | None = None, day: date | None = None) -> PriceFile:
+    """A file as a parser would hand it over: one quote per ISIN. Prices span
+    1 to 99,999 rupees, so jumps between files are common."""
+    src = source or draw(st.sampled_from(["amfi", "bhavcopy"]))
+    on = day or draw(quote_days)
+    rows = draw(
+        st.lists(st.tuples(st.sampled_from(ISINS), price_text, st.integers(0, 3)), max_size=6)
+    )
+    found: dict[str, Quote] = {}
+    for isin, price, age in rows:
+        dated = on if src == "bhavcopy" else on - timedelta(days=age)  # a NAV can be days old
+        found[isin] = Quote(isin=Isin(isin), on=dated, price=Price.rupees(price), source=src)  # type: ignore[arg-type]
+    return PriceFile(source=src, day=on, quotes=tuple(found.values()))  # type: ignore[arg-type]
+
+
+def _model_book(files: list[PriceFile], cutoff: date) -> PriceBook:
+    """The rule in plain Python: the last file per (source, day) is that
+    day's word; per ISIN each source's newest day speaks; then best()."""
+    last = {(f.source, f.day): f for f in files}
+    newest: dict[tuple[str, str], tuple[date, Quote]] = {}
+    for (source, day), f in last.items():
+        for q in f.quotes:
+            key = (q.isin, source)
+            if day <= cutoff and (key not in newest or day > newest[key][0]):
+                newest[key] = (day, q)
+    return PriceBook.best(q for _, q in newest.values())
+
+
+@given(st.lists(price_files(), max_size=12), st.randoms(use_true_random=False), quote_days)
+def test_price_store_reads_like_the_last_file_of_each_day_and_is_repeat_free(
+    files: list[PriceFile], rnd: random.Random, cutoff: date
+) -> None:
+    with tempfile.TemporaryDirectory() as d, PriceStore.open(Path(d) / "a.db", write=True) as a:
+        for f in files:
+            a.replace(f)
+        assert a.book(ISINS, on_or_before=cutoff) == _model_book(files, cutoff)  # type: ignore[arg-type]
+        assert a.book(ISINS) == _model_book(files, date.max)  # type: ignore[arg-type]
+        # the last file of each day, alone, in any order and any number of times
+        final = list({(f.source, f.day): f for f in files}.values())
+        again = final + final[: len(final) // 2]
+        rnd.shuffle(again)
+        with PriceStore.open(Path(d) / "b.db", write=True) as b:
+            for f in again:
+                b.replace(f)
+            assert a.digest() == b.digest()
+            assert all(b.replace(f) == 0 for f in final)
+
+
+@given(st.data(), st.lists(price_files(), max_size=6), st.sampled_from(["amfi", "bhavcopy"]))
+def test_price_store_is_restored_by_the_right_file_after_any_damaged_copies(
+    data: st.DataObject, others: list[PriceFile], source: str
+) -> None:
+    """The bar for a file without a checksum (lesson 18): whatever damaged
+    copies of a day's file were imported, importing the right one leaves
+    prices.db exactly as if they never were, jump check included. Nothing is
+    ever stored that jumped from an earlier day without being accepted."""
+    day = date(2026, 1, 15)
+    right = data.draw(price_files(source=source, day=day))
+    damaged = data.draw(st.lists(price_files(source=source, day=day), min_size=1, max_size=3))
+    others = [f for f in others if (f.source, f.day) != (source, day)]
+    with (
+        tempfile.TemporaryDirectory() as d,
+        PriceStore.open(Path(d) / "a.db", write=True) as a,
+        PriceStore.open(Path(d) / "b.db", write=True) as b,
+    ):
+        for f in others:
+            a.replace(f)
+            b.replace(f)
+        for f in damaged:
+            b.take(f)
+        assert a.take(right) == (len(a.stored(source, day)), b.take(right)[1])  # type: ignore[arg-type]
+        assert a.digest() == b.digest()
+        assert a.take(right) == (0, a.take(right)[1])  # and again changes nothing
+        before = _model_book(others, day - timedelta(days=1))
+        stored = a.stored(source, day)  # type: ignore[arg-type]
+        for q in right.quotes:
+            last = before.get(q.isin)
+            held = last is not None and is_jump(last.price, q.price)
+            assert (q.isin in stored) == (not held), q
+        # accepting them stores the whole file, as it is
+        a.take(right, accept_jumps=True)
+        assert a.stored(source, day) == {q.isin: q for q in right.quotes}  # type: ignore[arg-type]
+        assert a.take(right) == (0, ())  # accepted once, not held again
+
+
+@given(
+    st.data(),
+    st.lists(price_files(), max_size=4),
+    st.sampled_from(["amfi", "bhavcopy"]),
+    st.frozensets(st.sampled_from(ISINS)),
+    st.booleans(),
+)
+def test_no_held_price_leaves_a_day_unreported_and_the_earlier_file_puts_it_back(
+    data: st.DataObject, others: list[PriceFile], source: str, held: frozenset[str], accept: bool
+) -> None:
+    """Lesson 21: importing a file is always `replace`, so a second copy of
+    a day can take a held price away (a file cut short, or the right file
+    after a damaged one). Every such price is named, by `left_out` or as a
+    held jump, with or without --accept-jumps; nothing not held is named;
+    and importing the first copy again leaves prices.db as it was."""
+    day = date(2026, 1, 15)
+    first = data.draw(price_files(source=source, day=day))
+    second = data.draw(price_files(source=source, day=day))
+    others = [f for f in others if (f.source, f.day) != (source, day)]
+    with tempfile.TemporaryDirectory() as d, PriceStore.open(Path(d) / "a.db", write=True) as a:
+        for f in others:
+            a.replace(f)
+        a.take(first, accept_jumps=True)
+        want = a.digest()
+        before = a.stored(source, day)  # type: ignore[arg-type]
+        gone = left_out(second, before, held)  # type: ignore[arg-type]
+        _, jumps = a.take(second, accept_jumps=accept)
+        after = a.stored(source, day)  # type: ignore[arg-type]
+        named = {q.isin for q in gone} | {j.quote.isin for j in jumps}
+        assert {i for i in before if i in held and i not in after} <= named
+        assert {q.isin: q for q in gone} == {
+            i: q
+            for i, q in before.items()
+            if i in held and i not in {q.isin for q in second.quotes}
+        }
+        assert all(q.isin not in after for q in gone)
+        a.take(first, accept_jumps=True)
+        assert a.digest() == want

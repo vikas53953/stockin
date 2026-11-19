@@ -6,9 +6,11 @@ output is rendered from, so the verify skill and the owner see one truth.
 
 from __future__ import annotations
 
+import http.client
 import os
 import shlex
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -16,8 +18,20 @@ import typer
 
 from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
-from .money import Value
-from .sources import cas
+from .facts import Isin
+from .money import Money, Value
+from .prices import (
+    Jump,
+    PriceBook,
+    PriceFile,
+    PricesDamaged,
+    PricesMissing,
+    PriceStore,
+    Quote,
+    india_today,
+    left_out,
+)
+from .sources import cas, eod
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
 
 app = typer.Typer(
@@ -96,20 +110,30 @@ def diagnose(root: Path) -> Doctor:
             hint="created by your first `stockin import cas`",
         )
     )
-    checks.append(
-        DoctorCheck(
-            name="quotes",
-            status="warn",
-            detail="no live quote source configured",
-            hint="arrives with the prices PR",
-        )
-    )
+    checks.append(_quotes_check(root / "prices.db"))
     return Doctor(
         version=__version__,
         data_dir=str(root),
         ok=all(c.status != "fail" for c in checks),
         checks=tuple(checks),
     )
+
+
+_DAMAGED_HINT = "move prices.db aside (prices download again) and run `stockin prices fetch`"
+
+
+def _quotes_check(path: Path) -> DoctorCheck:
+    hint = "run `stockin prices fetch` (AMFI NAVs and the NSE bhavcopy)"
+    try:
+        with PriceStore.open(path) as store:
+            latest, n = store.latest_day(), store.count()
+    except PricesMissing:
+        latest, n = None, 0
+    except PricesDamaged as exc:
+        return DoctorCheck(name="quotes", status="fail", detail=str(exc), hint=_DAMAGED_HINT)
+    if latest is None:
+        return DoctorCheck(name="quotes", status="warn", detail="no prices yet", hint=hint)
+    return DoctorCheck(name="quotes", status="ok", detail=f"{n} end-of-day prices, latest {latest}")
 
 
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
@@ -160,7 +184,9 @@ def _open_ledger() -> Ledger:
         ) from None
 
 
-def _holding_lines(book: Book, holdings: tuple[Holding, ...]) -> list[str]:
+def _holding_lines(
+    book: Book, holdings: tuple[Holding, ...], prices: PriceBook | None = None
+) -> list[str]:
     lines: list[str] = []
     current = None
     for h in sorted(holdings, key=lambda h: (h.account, h.isin)):
@@ -171,8 +197,54 @@ def _holding_lines(book: Book, holdings: tuple[Holding, ...]) -> list[str]:
         inst = book.instrument(h.isin)
         name = inst.name if inst else h.isin
         cost = f"cost {h.cost}" if h.cost is not None else "cost unknown"
-        lines.append(f"  {h.isin}  {name[:40]:<40} {h.qty!s:>16}  {cost}")
+        line = f"  {h.isin}  {name[:40]:<40} {h.qty!s:>16}  {cost}"
+        if prices is not None:
+            v = _valued(h, prices)
+            if v.quote is None:
+                line += "  value unknown (no price)"
+            else:
+                line += f"  value {v.value} (price {_price_text(v.quote)} on {v.quote.on})"
+                if v.gain is not None:
+                    line += f"  gain {v.gain}"
+        lines.append(line)
     return lines
+
+
+def _price_text(q: Quote) -> str:
+    """Exact, at least two decimals: 1,367.00, 2,378.851, 94.4817."""
+    rupees, micros = divmod(q.price.micro_rupees, 1_000_000)
+    frac = f"{micros:06d}".rstrip("0").ljust(2, "0")
+    return f"{Money(paise=rupees * 100)!s}"[:-3] + "." + frac
+
+
+class Valued(Value):
+    """One holding at its latest end-of-day price. None means unknown."""
+
+    holding: Holding
+    quote: Quote | None
+    value: Money | None
+    gain: Money | None  # value - cost, when both are known
+
+
+def _valued(h: Holding, prices: PriceBook) -> Valued:
+    quote = prices.get(h.isin)
+    value = prices.value(h.isin, h.qty)
+    gain = value - h.cost if value is not None and h.cost is not None else None
+    return Valued(holding=h, quote=quote, value=value, gain=gain)
+
+
+def prices_path() -> Path:
+    return data_dir() / "prices.db"
+
+
+def _price_book(isins: frozenset[Isin]) -> PriceBook | None:
+    try:
+        with PriceStore.open(prices_path()) as store:
+            return store.book(isins)
+    except PricesMissing:
+        return None
+    except PricesDamaged as exc:
+        raise _fail(str(exc), _DAMAGED_HINT) from None
 
 
 import_app = typer.Typer(no_args_is_help=True, help="Import a statement into your ledger.")
@@ -219,21 +291,189 @@ def import_cas(
 
 class HoldingsView(Value):
     holdings: tuple[Holding, ...]
+    valued: tuple[Valued, ...] | None  # None until prices have been fetched
 
 
 @app.command()
 def holdings(as_json: JsonFlag = False) -> None:
-    """Units held per account and ISIN, folded from every imported statement."""
+    """Units held per account and ISIN, with value and gain once prices are fetched."""
     with _open_ledger() as ledger:
         book = ledger.book()
-        rows = book.holdings()
-        if as_json:
-            typer.echo(HoldingsView(holdings=rows).model_dump_json(indent=2))
-            return
-        if not rows:
-            typer.echo("no holdings")
-        for line in _holding_lines(book, rows):
-            typer.echo(line)
+    rows = book.holdings()
+    prices = _price_book(frozenset(h.isin for h in rows))
+    if as_json:
+        valued = None if prices is None else tuple(_valued(h, prices) for h in rows)
+        typer.echo(HoldingsView(holdings=rows, valued=valued).model_dump_json(indent=2))
+        return
+    if not rows:
+        typer.echo("no holdings")
+    for line in _holding_lines(book, rows, prices):
+        typer.echo(line)
+    if prices is None:
+        typer.echo("(no prices yet: run `stockin prices fetch` to see value and gain)")
+
+
+prices_app = typer.Typer(no_args_is_help=True, help="End-of-day prices for what you hold.")
+app.add_typer(prices_app, name="prices")
+
+
+class PricesReport(Value):
+    source: str
+    read: int  # quotes in the file(s)
+    kept: int  # for ISINs in your ledger
+    changed: int  # rows added, changed or removed in prices.db
+    latest: str | None
+    unpriced: tuple[Isin, ...]  # held ISINs with no price at all
+    failed: tuple[str, ...] = ()  # sources that could not be downloaded this time
+    held: tuple[Jump, ...] = ()  # prices not stored: too far from the last one
+    removed: tuple[Quote, ...] = ()  # prices a file took away: saved for its day, not in it
+
+
+def _today() -> date:
+    """Today in India, where both price files are dated."""
+    return india_today()
+
+
+def _held_isins() -> frozenset[Isin]:
+    with _open_ledger() as ledger:
+        return frozenset(h.isin for h in ledger.book().holdings())
+
+
+def _store_files(
+    source: str, files: tuple[PriceFile, ...], held: frozenset[Isin], accept_jumps: bool
+) -> PricesReport:
+    """Each file replaces what prices.db holds for its source and day, always:
+    that is what lets the right file undo a damaged copy. A price more than
+    JUMP_FACTOR away from the last earlier one is held back unless
+    `accept_jumps`. A held fund's price that was stored for that day and is
+    not in the file is removed like the rest and reported (`left_out`)."""
+    kept = changed = 0
+    jumps: list[Jump] = []
+    removed: list[Quote] = []
+    try:
+        with PriceStore.open(prices_path(), write=True) as store:
+            for whole in files:
+                file = eod.only(whole, held)
+                kept += len(file.quotes)
+                removed.extend(left_out(file, store.stored(file.source, file.day), held))
+                n, found = store.take(file, accept_jumps)
+                changed += n
+                jumps.extend(found)
+            book = store.book(held)
+            latest = store.latest_day()
+    except PricesDamaged as exc:
+        raise _fail(str(exc), _DAMAGED_HINT) from None
+    unpriced = tuple(sorted(i for i in held if book.get(i) is None))
+    return PricesReport(
+        source=source,
+        read=sum(len(f.quotes) for f in files),
+        kept=kept,
+        changed=changed,
+        latest=None if latest is None else latest.isoformat(),
+        unpriced=unpriced,
+        held=tuple(jumps),
+        removed=tuple(removed),
+    )
+
+
+def _print_prices(report: PricesReport, as_json: bool) -> None:
+    """Exit 1 when a price was held back or removed: the rest is stored, but
+    the run needs the owner's eyes."""
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+    else:
+        typer.echo(
+            f"{report.source}: {report.read} prices read, {report.kept} for your holdings, "
+            f"{report.changed} new or changed"
+        )
+        if report.latest:
+            typer.echo(f"  latest price date: {report.latest}")
+        if report.unpriced:
+            typer.echo(f"  no price yet for: {', '.join(report.unpriced)}")
+        for f in report.failed:
+            typer.echo(f"  not downloaded this time: {f} (prices already saved are kept)")
+        for j in report.held:
+            typer.echo(
+                f"  NOT stored: {j.quote.isin} was {_price_text(j.last)} on {j.last.on}, "
+                f"this file says {_price_text(j.quote)} on {j.quote.on}"
+            )
+        if report.held:
+            typer.echo(
+                "  a price more than double or less than half the last one is held back. "
+                "If it is real (a split, a bonus), run again with --accept-jumps; "
+                "if not, the file is damaged: download it again."
+            )
+        for q in report.removed:
+            typer.echo(
+                f"  REMOVED: {q.isin} {_price_text(q)} on {q.on}, saved from an earlier copy "
+                "of this day's file; this file has no price for it"
+            )
+        if report.removed:
+            typer.echo(
+                "  this file is now what is saved for its day. If the earlier copy was "
+                "damaged, that is the fix and there is nothing more to do. If this file "
+                "may be cut short (a download or copy that stopped partway), download it "
+                "again and import it, or run `stockin prices fetch` again if this was a "
+                "fetch: that puts the price back."
+            )
+    if report.held or report.removed:
+        raise typer.Exit(1)
+
+
+AcceptJumps = Annotated[
+    bool,
+    typer.Option(
+        "--accept-jumps",
+        help="Store prices even when more than double or less than half the last one.",
+    ),
+]
+
+
+@prices_app.command("fetch")
+def prices_fetch(as_json: JsonFlag = False, accept_jumps: AcceptJumps = False) -> None:
+    """Download today's AMFI NAVs and the latest NSE bhavcopy (public files, no login).
+
+    Only prices for ISINs in your ledger are kept. Safe to run any number of times."""
+    held = _held_isins()
+    today = _today()
+    got: list[PriceFile] = []
+    failed: list[str] = []
+    for name, fetch in (("AMFI", eod.fetch_amfi), ("NSE", eod.fetch_bhavcopy)):
+        try:
+            got.append(fetch(today))
+        except (OSError, http.client.HTTPException, eod.EodRejected) as exc:
+            failed.append(f"{name}: {exc}")
+        except Exception as exc:  # one source's surprise must not cost the other's prices
+            failed.append(f"{name}: unexpected {type(exc).__name__}: {exc}")
+    if len(failed) == 2:
+        raise _fail(
+            "could not download prices: " + "; ".join(failed), "check your internet and try again"
+        )
+    report = _store_files("amfi + nse", tuple(got), held, accept_jumps)
+    _print_prices(report.model_copy(update={"failed": tuple(failed)}), as_json)
+
+
+@prices_app.command("import")
+def prices_import(
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    as_json: JsonFlag = False,
+    accept_jumps: AcceptJumps = False,
+) -> None:
+    """Import a downloaded AMFI NAVAll.txt or NSE bhavcopy (.csv or .csv.zip).
+
+    The file replaces what is stored for its day, so importing the right file
+    corrects a damaged one."""
+    held = _held_isins()
+    data = file.read_bytes()
+    try:
+        if data.removeprefix(b"\xef\xbb\xbf").startswith(b"Scheme Code;"):
+            text = data.decode("utf-8-sig", errors="replace")
+            parsed, source = eod.parse_amfi(text, _today()), "amfi"
+        else:
+            parsed, source = eod.parse_bhavcopy(data, _today()), "nse"
+    except (eod.EodRejected, UnicodeDecodeError, OSError) as exc:
+        raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
+    _print_prices(_store_files(f"{file.name} ({source})", (parsed,), held, accept_jumps), as_json)
 
 
 @app.command("reconcile")
