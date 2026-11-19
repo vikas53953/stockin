@@ -305,7 +305,7 @@ def test_web_form_saves_your_thesis_and_home_shows_the_verdict(web: TestClient) 
         data={"why": "cash machine", "target": "12.5", "exit_if": "margins fall"},
         follow_redirects=False,
     )
-    assert r.status_code == 303 and r.headers["location"] == "/#verdicts"
+    assert r.status_code == 303 and r.headers["location"] == f"/holding/{INFY}"
     home = web.get("/").text
     v = _verdicts_json()[INFY]
     assert v["call"] == "trim" and v["target"] == 1250

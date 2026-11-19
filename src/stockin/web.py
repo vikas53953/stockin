@@ -28,6 +28,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .facts import Isin
+from .holding import holding_page
 from .insights import all_insights, short_name, weights
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
@@ -210,6 +211,24 @@ def create_app(db: Path, port: int) -> FastAPI:
             theses_damaged=theses_damaged,
         )
 
+    @app.get("/holding/{isin}", response_class=HTMLResponse)
+    def holding(isin: str) -> Response:
+        book = read_book()
+        if book is None:
+            return PlainTextResponse(f"{isin} is not in your holdings", 404)
+        prices, damaged = read_prices(frozenset(h.isin for h in book.holdings()))
+        theses, theses_damaged = read_theses()
+        view = holding_page(book, prices or PriceBook(quotes={}), theses, Isin(isin), india_today())
+        if view is None:
+            return PlainTextResponse(f"{isin} is not in your holdings", 404)
+        return page(
+            "holding.html",
+            h=view,
+            damaged=damaged,
+            prices_hint=PRICES_HINT,
+            theses_damaged=theses_damaged,
+        )
+
     def thesis_form(isin: str, error: str | None = None, **typed: str) -> Response:
         book = read_book()
         held = {h.isin for h in book.holdings()} if book else set[Isin]()
@@ -265,7 +284,7 @@ def create_app(db: Path, port: int) -> FastAPI:
                 store.put(t)
         except ThesesDamaged as exc:
             return thesis_form(isin, str(exc), **typed)
-        return RedirectResponse("/#verdicts", status_code=303)
+        return RedirectResponse(f"/holding/{isin}", status_code=303)
 
     @app.get("/reconcile", response_class=HTMLResponse)
     def reconcile_page() -> Response:

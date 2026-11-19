@@ -1,0 +1,80 @@
+{
+ "accounts": [
+  {
+   "name": "Test Broker",
+   "type": "NSDL Demat Account",
+   "dp_id": "IN300000",
+   "client_id": "10000001",
+   "folios": 0,
+   "balance": "0",
+   "owners": [
+    {
+     "name": "Test Investor",
+     "PAN": "AAAAA0000A"
+    }
+   ],
+   "equities": [
+    {
+     "name": "INFOSYS LIMITED",
+     "isin": "INE009A01021",
+     "num_shares": "12",
+     "price": "1",
+     "value": "12",
+     "symbol": null,
+     "exchange": null
+    }
+   ],
+   "mutual_funds": [],
+   "bonds": []
+  },
+  {
+   "name": "Second Test Broker",
+   "type": "NSDL Demat Account",
+   "dp_id": "IN300001",
+   "client_id": "10000002",
+   "folios": 0,
+   "balance": "0",
+   "owners": [
+    {
+     "name": "Test Investor",
+     "PAN": "AAAAA0000A"
+    }
+   ],
+   "equities": [
+    {
+     "name": "INFOSYS LIMITED",
+     "isin": "INE009A01021",
+     "num_shares": "30",
+     "price": "1",
+     "value": "12",
+     "symbol": null,
+     "exchange": null
+    },
+    {
+     "name": "STATE BANK OF INDIA",
+     "isin": "INE062A01020",
+     "num_shares": "5",
+     "price": "1",
+     "value": "5",
+     "symbol": null,
+     "exchange": null
+    }
+   ],
+   "mutual_funds": [],
+   "bonds": []
+  }
+ ],
+ "statement_period": {
+  "from": "01-Feb-2026",
+  "to": "28-Feb-2026"
+ },
+ "investor_info": {
+  "name": "Test Investor",
+  "email": "test@example.invalid",
+  "address": "-",
+  "mobile": "-"
+ },
+ "file_type": "NSDL",
+ "nps": null,
+ "parse_warnings": []
+}
