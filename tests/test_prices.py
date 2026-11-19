@@ -22,7 +22,7 @@ from stockin.prices import (
     PriceStore,
     Quote,
     india_today,
-    keep_unlisted,
+    left_out,
 )
 from stockin.sources import eod
 
@@ -650,9 +650,6 @@ def test_every_single_byte_change_is_rejected_or_undone_by_the_right_file(
             stored_wrong += store.digest() != want
             assert store.take(clean)[1] == (), i
             assert store.digest() == want, (i, data[max(0, i - 40) : i + 40])
-    # the test is about damage that does get in. Since a file no longer
-    # deletes rows it does not list (a cut-off NAVAll), a damaged copy that
-    # only drops a row changes nothing, so fewer copies store a wrong value
     assert stored_wrong > 50  # the test is about damage that does get in
 
 
@@ -1408,7 +1405,19 @@ _STICKY = {
     "nav-date-2028": (_NAV_HELD.encode(), b"77.7;13-Nov-2026", b"77.7;13-Nov-2028", 2),
     "nav-other-line-isin": (_NAV_HELD.encode(), b"118955;INF179K01UT0", b"118955;INF179K01BE2", 0),
     "nav-row-lost": (_NAV_HELD.encode(), b"77.7;13-Nov", b"N.A.;13-Nov", 0),
+    # verifier 3 on #22: another row's ISIN becomes that of a held instrument
+    # which this source never prices, so the right file does not list it
+    "bhav-injects-a-held-fund": (BHAV, b"INE467B01029,TCS", b"INF179K01BE2,TCS", 0),
+    "nav-injects-a-held-share": (
+        _NAV_HELD.encode(),
+        b"118955;INF179K01UT0",
+        b"118955;INE009A01021",
+        0,
+    ),
 }
+_INJECTS = {"bhav-injects-a-held-fund", "nav-injects-a-held-share"}
+"""After these, the right file takes a held instrument's price away again:
+it says REMOVED and exits 1, once."""
 
 
 @pytest.mark.parametrize("name", sorted(_STICKY))
@@ -1435,13 +1444,22 @@ def test_importing_the_right_file_undoes_a_damaged_one(
     def state(*imports: str) -> tuple[str, str]:
         for path in tmp_path.glob("prices.db*"):
             path.unlink()
-        for stem in ["earlier"] * history + list(imports):
+        steps = ["earlier"] * history + list(imports)
+        for at, stem in enumerate(steps):
             result = runner.invoke(app, ["prices", "import", str(tmp_path / stem)])
-            # a damaged copy that loses a held fund's row, after a file that
-            # had it, keeps the stored price and says so (exit 1, verifier 2 R2)
-            lost_after = name == "nav-row-lost" and stem != imports[0]
-            want = (code, 1) if stem == "damaged" and (history or lost_after) else (code,)
-            assert result.exit_code in (want if stem == "damaged" else (0,)), result.output
+            # a file that leaves out a held price stored for its day by the
+            # copy before it removes it and says so (exit 1): the damaged copy
+            # that lost a row, or the right file after a copy that added one
+            if stem == "right":
+                took_away = name in _INJECTS and steps[at - 1 : at] == ["damaged"]
+                assert result.exit_code == (1 if took_away else 0), result.output
+                assert ("REMOVED" in result.output) == took_away, result.output
+            elif stem == "damaged":
+                lost = name == "nav-row-lost" and steps[at - 1 : at] == ["right"]
+                want = (code, 1) if history or lost else (code,)
+                assert result.exit_code in want, result.output
+            else:
+                assert result.exit_code == 0, result.output
         doctor = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
         return runner.invoke(app, ["holdings", "--json"]).output, json.dumps(doctor)
 
@@ -1629,17 +1647,16 @@ def test_a_bug_in_reading_is_not_reported_as_damage(
         store.book([parse_isin(_with_digit("INE00000000"))])
 
 
-def test_a_navall_cut_short_never_deletes_a_held_funds_price(tmp_path: Path) -> None:
+def test_a_navall_cut_short_never_removes_a_held_price_unreported(tmp_path: Path) -> None:
     """Verifier 2 on #22: a NAVAll download or copy that stops at a line
     end still parses, with fewer funds. Importing it after the whole file
-    must not remove a held fund's price it no longer lists; accepting the
-    file as it is does store it exactly."""
+    removes the held funds it no longer lists; `left_out` names exactly
+    those, and the whole file puts every one back."""
     whole = (EOD / "NAVAll-sample.txt").read_bytes()
     clean = _parse("NAVAll-sample.txt", whole)
     held = frozenset(q.isin for q in clean.quotes)
     cuts = [i + 1 for i, b in enumerate(whole) if b == ord("\n")][:-1]
-    taken = 0
-    part = clean
+    taken = lost = 0
     with PriceStore.open(tmp_path / "prices.db", write=True) as store:
         store.take(_a_day_earlier(clean))
         store.take(clean)
@@ -1652,43 +1669,118 @@ def test_a_navall_cut_short_never_deletes_a_held_funds_price(tmp_path: Path) -> 
             if part.day != clean.day:
                 continue
             taken += 1
-            file, kept = keep_unlisted(part, store.stored(part.source, part.day), held)
-            assert {q.isin for q in kept} == held - {q.isin for q in part.quotes}
-            store.take(file)
+            before = store.stored(part.source, part.day)
+            gone = left_out(part, before, held)
+            # a fund you do not hold is not reported
+            assert left_out(part, before, frozenset()) == ()
+            assert left_out(part, before, frozenset(sorted(held)[:1])) == tuple(
+                q for q in gone if q.isin == min(held)
+            )
+            store.take(part)
+            after = store.stored(part.source, part.day)
+            assert {q.isin: q for q in gone} == {i: q for i, q in before.items() if i not in after}
+            lost += bool(gone)
+            assert store.take(clean)[1] == ()  # the hint: get the file again
             assert store.digest() == want, cut
-        assert taken >= 2  # the sample does give cut files that parse
-        # a fund you do not hold is not kept, and accepting stores the file as it is
-        assert keep_unlisted(part, store.stored(part.source, part.day), frozenset())[1] == ()
-        store.take(part, accept_jumps=True)
-        assert store.stored(part.source, part.day) == {q.isin: q for q in part.quotes}
+        assert taken >= 2 and lost >= 2  # the sample does give cut files that parse and lose
 
 
-def test_prices_import_of_a_cut_navall_keeps_every_held_price(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _priced(holdings_json: str) -> dict[str, str]:
+    valued = json.loads(holdings_json)["valued"] or []
+    return {v["holding"]["isin"]: json.dumps(v["quote"]) for v in valued if v.get("quote")}
+
+
+@pytest.mark.parametrize("flag", [[], ["--accept-jumps"]])
+def test_prices_import_of_a_cut_navall_says_what_it_removed_and_the_hint_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str]
 ) -> None:
+    """R2. The cut file is stored as it is (so the right file can always
+    undo it), but never quietly: REMOVED, exit 1, and getting the file again
+    puts the price back. --accept-jumps is about jumps only and changes none
+    of this."""
     _ledger_with_mf_and_demat(tmp_path, monkeypatch)
     whole = tmp_path / "NAVAll.txt"
     whole.write_text(_NAV_HELD)
     full = runner.invoke(app, ["prices", "import", str(whole)])
-    assert full.exit_code == 0, full.output
+    assert full.exit_code == 0 and "REMOVED" not in full.output, full.output
     before = runner.invoke(app, ["holdings", "--json"]).output
-    valued = json.loads(before)["valued"]
-    priced = {v["holding"]["isin"] for v in valued if v.get("quote")} if valued else set()
-    assert "INF179K01BE2" in priced  # the whole file prices the held fund
+    assert "INF179K01BE2" in _priced(before)  # the whole file prices the held fund
     cut = tmp_path / "NAVAll-cut.txt"
     cut.write_text("\n".join(_NAV_HELD.splitlines()[:7]) + "\n")  # stops before the held fund
-    r = runner.invoke(app, ["prices", "import", str(cut)])
+    r = runner.invoke(app, ["prices", "import", str(cut), *flag])
     assert r.exit_code == 1, r.output  # needs your eyes, like a held jump
-    assert "KEPT: INF179K01BE2" in r.output and "cut short" in r.output
-    assert runner.invoke(app, ["holdings", "--json"]).output == before
-    # the whole file again: nothing kept, nothing to say
+    assert "REMOVED: INF179K01BE2 77.70 on 2026-11-13" in r.output and "cut short" in r.output
+    assert "INF179K01BE2" not in _priced(runner.invoke(app, ["holdings", "--json"]).output)
+    as_json = runner.invoke(app, ["prices", "import", str(whole), "--json"])
+    assert as_json.exit_code == 0 and json.loads(as_json.output)["removed"] == []
+    r = runner.invoke(app, ["prices", "import", str(cut), "--json", *flag])
+    assert r.exit_code == 1, r.output
+    assert [q["isin"] for q in json.loads(r.output)["removed"]] == ["INF179K01BE2"]
+    # the same cut file again has nothing left to remove
+    r = runner.invoke(app, ["prices", "import", str(cut), *flag])
+    assert r.exit_code == 0 and "REMOVED" not in r.output, r.output
+    # the hint: get the file again
     again = runner.invoke(app, ["prices", "import", str(whole)])
-    assert again.exit_code == 0 and "KEPT" not in again.output, again.output
+    assert again.exit_code == 0 and "REMOVED" not in again.output, again.output
     assert runner.invoke(app, ["holdings", "--json"]).output == before
-    # accepted as it is: the fund it leaves out loses that day's price
-    r = runner.invoke(app, ["prices", "import", str(cut), "--accept-jumps"])
-    assert r.exit_code == 0, r.output
-    assert "no price yet for: " in r.output and "INF179K01BE2" in r.output
+
+
+@pytest.mark.parametrize(
+    ("clean", "old", "new", "isin", "nav_first"),
+    [
+        (BHAV, b"INE467B01029,TCS", b"INF179K01BE2,TCS", "INF179K01BE2", True),
+        (_NAV_HELD.encode(), b"118955;INF179K01UT0", b"118955;INE009A01021", "INE009A01021", False),
+    ],
+    ids=["bhavcopy-injects-a-held-fund", "navall-injects-a-held-share"],
+)
+@pytest.mark.parametrize("way_back", ["right-file", "right-file-twice", "right-file-accepting"])
+def test_the_right_file_removes_a_price_a_damaged_copy_gave_a_fund_it_never_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean: bytes,
+    old: bytes,
+    new: bytes,
+    isin: str,
+    nav_first: bool,
+    way_back: str,
+) -> None:
+    """Verifier 3 on #22 (R3): one changed byte in a real bhavcopy turned an
+    ETF's ISIN into that of a held mutual fund the bhavcopy never lists (the
+    check digit still passed), and the ETF's close became the fund's price.
+    The right file must take it away again, exactly and at once; importing
+    it again, as the message allows, changes nothing more."""
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    monkeypatch.setattr("stockin.cli._today", lambda: TODAY)
+    assert clean.count(old) == 1 and len(old) == len(new)
+    right, damaged = tmp_path / "right", tmp_path / "damaged"
+    right.write_bytes(clean)
+    damaged.write_bytes(clean.replace(old, new))
+    if nav_first:  # the fund's true NAV, from an earlier day, as in the verifier's run
+        nav = tmp_path / "nav"
+        earlier = _NAV_HELD.replace("77.7;13-Nov", "2400.5;11-Nov")  # within 2x of the close
+        nav.write_text(earlier.replace("14-Nov-2026", "12-Nov-2026"))
+        assert runner.invoke(app, ["prices", "import", str(nav)]).exit_code == 0
+    assert runner.invoke(app, ["prices", "import", str(right)]).exit_code == 0
+    before = runner.invoke(app, ["holdings", "--json"]).output
+    digest = PriceStore.open(tmp_path / "prices.db").digest()
+
+    r = runner.invoke(app, ["prices", "import", str(damaged)])
+    assert r.exit_code == 0, r.output  # nothing can tell this file is wrong
+    wrong = runner.invoke(app, ["holdings", "--json"]).output
+    assert _priced(wrong).get(isin) != _priced(before).get(isin)  # the damage did get in
+
+    flag = ["--accept-jumps"] if way_back == "right-file-accepting" else []
+    r = runner.invoke(app, ["prices", "import", str(right), *flag])
+    assert r.exit_code == 1, r.output
+    assert f"REMOVED: {isin} " in r.output and "KEPT" not in r.output
+    assert "nothing more to do" in r.output
+    assert runner.invoke(app, ["holdings", "--json"]).output == before
+    assert PriceStore.open(tmp_path / "prices.db").digest() == digest
+    if way_back == "right-file-twice":
+        r = runner.invoke(app, ["prices", "import", str(right)])
+        assert r.exit_code == 0 and "REMOVED" not in r.output, r.output
+        assert runner.invoke(app, ["holdings", "--json"]).output == before
+        assert PriceStore.open(tmp_path / "prices.db").digest() == digest
 
 
 @pytest.mark.parametrize("write", [False, True])

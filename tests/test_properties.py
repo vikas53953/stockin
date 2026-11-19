@@ -27,7 +27,7 @@ from hypothesis import strategies as st
 from stockin.book import Book, reconcile
 from stockin.facts import Buy, Isin, Sell, Txn
 from stockin.money import Money, Price, Qty, div_half_even
-from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, is_jump
+from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, is_jump, left_out
 from stockin.sources import cas, eod
 from stockin.store import Ledger, LedgerWriter
 
@@ -587,3 +587,43 @@ def test_price_store_is_restored_by_the_right_file_after_any_damaged_copies(
         a.take(right, accept_jumps=True)
         assert a.stored(source, day) == {q.isin: q for q in right.quotes}  # type: ignore[arg-type]
         assert a.take(right) == (0, ())  # accepted once, not held again
+
+
+@given(
+    st.data(),
+    st.lists(price_files(), max_size=4),
+    st.sampled_from(["amfi", "bhavcopy"]),
+    st.frozensets(st.sampled_from(ISINS)),
+    st.booleans(),
+)
+def test_no_held_price_leaves_a_day_unreported_and_the_earlier_file_puts_it_back(
+    data: st.DataObject, others: list[PriceFile], source: str, held: frozenset[str], accept: bool
+) -> None:
+    """Lesson 21: importing a file is always `replace`, so a second copy of
+    a day can take a held price away (a file cut short, or the right file
+    after a damaged one). Every such price is named, by `left_out` or as a
+    held jump, with or without --accept-jumps; nothing not held is named;
+    and importing the first copy again leaves prices.db as it was."""
+    day = date(2026, 1, 15)
+    first = data.draw(price_files(source=source, day=day))
+    second = data.draw(price_files(source=source, day=day))
+    others = [f for f in others if (f.source, f.day) != (source, day)]
+    with tempfile.TemporaryDirectory() as d, PriceStore.open(Path(d) / "a.db", write=True) as a:
+        for f in others:
+            a.replace(f)
+        a.take(first, accept_jumps=True)
+        want = a.digest()
+        before = a.stored(source, day)  # type: ignore[arg-type]
+        gone = left_out(second, before, held)  # type: ignore[arg-type]
+        _, jumps = a.take(second, accept_jumps=accept)
+        after = a.stored(source, day)  # type: ignore[arg-type]
+        named = {q.isin for q in gone} | {j.quote.isin for j in jumps}
+        assert {i for i in before if i in held and i not in after} <= named
+        assert {q.isin: q for q in gone} == {
+            i: q
+            for i, q in before.items()
+            if i in held and i not in {q.isin for q in second.quotes}
+        }
+        assert all(q.isin not in after for q in gone)
+        a.take(first, accept_jumps=True)
+        assert a.digest() == want

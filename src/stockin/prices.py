@@ -155,18 +155,21 @@ def hold_jumps(
     return file.model_copy(update={"quotes": tuple(keep)}), tuple(held)
 
 
-def keep_unlisted(
+def left_out(
     file: PriceFile, stored: Mapping[Isin, Quote], held: frozenset[Isin]
-) -> tuple[PriceFile, tuple[Quote, ...]]:
-    """A file cut short (a NAVAll download or copy that stops at a line end
-    still parses) lists fewer funds than the whole one. Importing it after
-    the whole file would replace the day and delete good prices (verifier 2
-    on #22). So a price already stored for this file's source and day, for a
-    fund you hold that the file does not list, is carried into the file and
-    returned to be reported. Accepting the file as it is skips this."""
+) -> tuple[Quote, ...]:
+    """The prices importing `file` removes: stored for its source and day,
+    for a fund you hold, and not listed in it. Two things look exactly like
+    this and nothing in the file tells them apart. A file cut short (a
+    NAVAll download or copy that stops at a line end still parses) lists
+    fewer funds than the whole one imported before it (verifier 2 on #22).
+    And the right file, after a damaged copy stored a price for a fund this
+    source never prices (verifier 3 on #22). So the file is always stored as
+    it is, which keeps "the right file undoes any damaged copy" true without
+    exception, and what it removed is returned to be reported, never kept:
+    a kept price is one the right file cannot take back."""
     listed = {q.isin for q in file.quotes}
-    kept = tuple(q for isin, q in sorted(stored.items()) if isin in held and isin not in listed)
-    return file.model_copy(update={"quotes": file.quotes + kept}), kept
+    return tuple(q for isin, q in sorted(stored.items()) if isin in held and isin not in listed)
 
 
 _SCHEMA = """
