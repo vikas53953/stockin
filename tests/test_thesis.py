@@ -393,11 +393,11 @@ def test_a_thesis_is_dated_in_india_from_the_cli_and_the_web(
 ) -> None:
     """At 00:30 in India it is still the evening before in UTC. Both ways of
     writing a thesis date it by India's day, the one clock prices use."""
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     import stockin.prices
 
-    late = datetime(2026, 11, 19, 19, 0, tzinfo=timezone.utc)  # 00:30 on 20 Nov in India
+    late = datetime(2026, 11, 19, 19, 0, tzinfo=UTC)  # 00:30 on 20 Nov in India
     monkeypatch.setattr(stockin.prices, "_now", lambda: late)
     r = runner.invoke(cli, ["thesis", "set", INFY, "--why", "cash machine"])
     assert r.exit_code == 0, r.output
