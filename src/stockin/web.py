@@ -19,7 +19,6 @@ import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -31,13 +30,12 @@ from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .holding import holding_page
 from .insights import all_insights, short_name, weights
-from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore
+from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
 from .story import story
 from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, for_book, parse_percent
 
-_IST = timezone(timedelta(hours=5, minutes=30))
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
@@ -195,7 +193,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         prices, damaged = read_prices(frozenset(h.isin for h in holdings))
         priced = prices or PriceBook(quotes={})
         ws, total, _ = weights(book, priced)
-        today = datetime.now(_IST).date()
+        today = india_today()
         days = sorted(q.on for q in priced.quotes.values())
         theses, theses_damaged = read_theses()
         return page(
@@ -281,7 +279,7 @@ def create_app(db: Path, port: int) -> FastAPI:
             exit_if=exit_if.strip()[:MAX_TEXT],
             target=aim,
             broken=broken == "on",
-            written=datetime.now(_IST).date(),
+            written=india_today(),
         )
         try:
             with ThesisStore.open(theses_db) as store:
