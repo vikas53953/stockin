@@ -218,9 +218,7 @@ def create_app(db: Path, port: int) -> FastAPI:
             return PlainTextResponse(f"{isin} is not in your holdings", 404)
         prices, damaged = read_prices(frozenset(h.isin for h in book.holdings()))
         theses, theses_damaged = read_theses()
-        view = holding_page(
-            book, prices or PriceBook(quotes={}), theses, Isin(isin), datetime.now(_IST).date()
-        )
+        view = holding_page(book, prices or PriceBook(quotes={}), theses, Isin(isin), india_today())
         if view is None:
             return PlainTextResponse(f"{isin} is not in your holdings", 404)
         return page(
