@@ -17,7 +17,6 @@ import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -28,12 +27,11 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import all_insights, weights
-from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore
+from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
 from .story import story
 
-_IST = timezone(timedelta(hours=5, minutes=30))
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
@@ -182,7 +180,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         prices, damaged = read_prices(frozenset(h.isin for h in holdings))
         priced = prices or PriceBook(quotes={})
         ws, total, _ = weights(book, priced)
-        today = datetime.now(_IST).date()
+        today = india_today()
         days = sorted(q.on for q in priced.quotes.values())
         return page(
             "home.html",
