@@ -43,6 +43,7 @@
         <span class="bar-value">{{ b.value }}</span>
       </div>
       {% endfor %}
+      {% if c.more %}<p class="line-key">and {{ c.more }} more{% if c.kind == "concentration" %}, all on the map below{% endif %}</p>{% endif %}
       {% if c.line is not none %}<p class="line-key"><span class="line-swatch"></span>{{ c.line_label }}</p>{% endif %}
     </div>
     {% endif %}
