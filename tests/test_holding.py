@@ -60,6 +60,12 @@ def test_the_weight_bar_puts_weight_target_band_and_line_on_one_scale(
         # inside the drawn band exactly when the verdict says hold
         assert (abs(w - target) <= BAND) == (lo <= b.weight <= hi)
         assert pct(tenths_of(target, 10_000)) in b.band_text
+        # the drawn band is a full ±5 points, never clipped at the track's end
+        # (verifier's Q3): both halves have the width BAND has on this scale
+        scale = (b.weight / w) if w else None
+        if scale and target >= BAND:
+            assert abs((hi - b.target) - (b.target - lo)) < 1e-9
+            assert abs((hi - lo) - 2 * BAND * scale) < 1e-6
 
 
 def test_a_price_reads_exactly() -> None:
@@ -101,6 +107,39 @@ def test_the_page_agrees_with_the_dashboard_and_the_verdict(data: Path) -> None:
     assert len(h.accounts) == len(held)
     assert sum(Qty.parse(a.units).micros for a in h.accounts) == Qty.parse(h.units).micros
     assert holding_page(book, prices, theses, parse_isin("INE467B01029"), TODAY) is None
+
+
+def test_one_holding_in_two_accounts_is_valued_across_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Synthetic demat with INFOSYS in two accounts (12 + 30), contributed by
+    the #25 verifier: the page's value is the tile's, across both (P9)."""
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
+    r = runner.invoke(cli, ["import", "cas", str(FIX / "cas" / "demat-two-accounts.json")])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(cli, ["prices", "import", str(FIX / "eod" / "bhavcopy-sample.csv")])
+    assert r.exit_code in (0, 1), r.output
+    book, prices = _book_and_prices(tmp_path)
+    ws, _, _ = weights(book, prices)
+    w = next(x for x in ws if x.isin == INFY)
+    h = holding_page(book, prices, {}, INFY, TODAY)
+    assert h is not None
+    assert len(h.accounts) == 2 and h.units == "42"
+    assert h.value == rupees(w.value)
+    one = [a for a in h.accounts if a.units == "12"]
+    assert one and one[0].value != h.value
+
+
+def test_damage_inside_a_price_row_is_said_on_the_holding_page(web: TestClient, data: Path) -> None:
+    import sqlite3
+
+    c = sqlite3.connect(data / "prices.db")
+    c.execute("UPDATE quotes SET on_date='2026-11-C7'")
+    c.commit()
+    c.close()
+    r = web.get(f"/holding/{INFY}")
+    assert r.status_code == 200 and "Prices could not be read" in r.text
+    assert "INFOSYS" in r.text
 
 
 def test_an_unpriced_holding_says_so_and_draws_no_bar(data: Path) -> None:
