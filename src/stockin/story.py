@@ -74,6 +74,7 @@ class Card:
     line: float | None  # a threshold, in percent of the track (concentration)
     line_label: str
     streaks: tuple[Streak, ...] = ()  # SIPs: one row of months per SIP
+    more: int = 0  # series points not drawn (beyond MAX_BARS)
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,7 @@ def card(i: Insight) -> Card:
         bars=bars,
         line=line,
         line_label=label,
+        more=max(len(i.series) - len(bars), 0) if bars else 0,
     )
 
 

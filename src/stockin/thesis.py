@@ -76,6 +76,20 @@ class Verdict(Value):
     target: Bps | None
 
 
+def _hundredths(bps: int) -> str:
+    return f"{bps // 100}.{bps % 100:02d}%"
+
+
+def _shown(w: int, other: int, tenths_ok: bool) -> tuple[str, str]:
+    """Weight and target as the sentence prints them: tenths of a percent,
+    unless rounding to tenths would make the sentence contradict its own
+    call (17.46% shown as 17.5% "more than 5 points above" 12.5%); then
+    hundredths, which are exact for basis points."""
+    if tenths_ok:
+        return pct(tenths_of(w, 10_000)), pct(tenths_of(other, 10_000))
+    return _hundredths(w), _hundredths(other)
+
+
 def verdict(
     isin: Isin,
     name: str,
@@ -105,22 +119,27 @@ def verdict(
     if w is None:
         return out("review", f"{name} has no price yet, so its weight is unknown.")
     if target is not None:
-        now, aim, band = p(w), p(target), p(BAND)[:-1] + " points"
+        band = p(BAND)[:-1] + " points"
+        gap = tenths_of(w, 10_000) - tenths_of(target, 10_000)  # as the sentence shows it
         if w > target + BAND:
+            now, aim = _shown(w, target, gap > BAND // 10)
             return out(
                 "trim",
                 f"{name} is {now} of {money}, more than {band} above your target of {aim}.",
             )
         if w < target - BAND:
+            now, aim = _shown(w, target, -gap > BAND // 10)
             return out(
                 "add",
                 f"{name} is {now} of {money}, more than {band} below your target of {aim}.",
             )
+        now, aim = _shown(w, target, abs(gap) <= BAND // 10)
         return out("hold", f"{name} is {now} of {money}, within {band} of your target of {aim}.")
     if w > CONCENTRATED_ONE:
         line = p(CONCENTRATED_ONE)
+        (now, _) = _shown(w, CONCENTRATED_ONE, tenths_of(w, 10_000) > CONCENTRATED_ONE // 10)
         return out(
-            "trim", f"{name} is {p(w)} of {money}, above the {line} line, and you set no target."
+            "trim", f"{name} is {now} of {money}, above the {line} line, and you set no target."
         )
     return out("hold", f"Your thesis stands and {name} is {p(w)} of {money}.")
 
@@ -212,4 +231,4 @@ def _guard(path: Path) -> Generator[None]:
     try:
         yield
     except (sqlite3.DatabaseError, ValueError) as exc:
-        raise ThesesDamaged(f"{path} could not be read ({exc})") from None
+        raise ThesesDamaged(f"{path} could not be read or written ({exc})") from None

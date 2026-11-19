@@ -15,6 +15,7 @@ password is passed to casparser and never stored, logged or echoed.
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -161,13 +162,19 @@ def create_app(db: Path, port: int) -> FastAPI:
     def read_prices(isins: frozenset[Isin]) -> tuple[PriceBook | None, str | None]:
         """The price book for `isins`, or None with no prices yet; a damaged
         prices.db is said on the page, never a traceback."""
+        path = db.parent / "prices.db"
         try:
-            with PriceStore.open(db.parent / "prices.db") as store:
+            with PriceStore.open(path) as store:
                 return store.book(isins), None
         except PricesMissing:
             return None, None
         except PricesDamaged as exc:
             return None, str(exc)
+        except (sqlite3.DatabaseError, ValueError) as exc:
+            # damage inside rows surfaces only while reading them: a bad date,
+            # source or bytes. Same contract as PricesDamaged; a bug of any
+            # other kind (RuntimeError, TypeError, ...) still surfaces.
+            return None, f"{path} could not be read ({type(exc).__name__}: {str(exc)[:200]})"
 
     theses_db = db.parent / "theses.db"
 

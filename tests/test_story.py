@@ -122,6 +122,7 @@ def test_a_concentration_card_shows_the_headlines_number_and_the_25_percent_line
     top = max(paise[0], limit)
     assert abs(c.line - limit / top * 100) < 1e-9
     assert abs(c.bars[0].width - paise[0] / top * 100) < 1e-9
+    assert len(c.bars) + c.more == len(paise)  # nothing is dropped silently
 
 
 def test_no_more_than_four_cards_and_what_changed_opens_the_story() -> None:
@@ -182,6 +183,110 @@ def test_a_damaged_prices_file_is_said_on_the_page_not_a_traceback(
     assert r.status_code == 200
     assert "Prices could not be read" in r.text and "stockin prices fetch" in r.text
     assert "INFOSYS LIMITED" in r.text
+
+
+ROW_DAMAGE = {
+    "bad-date": "UPDATE quotes SET on_date='2026-11-C7' WHERE isin=(SELECT min(isin) FROM quotes)",
+    "bad-source": "UPDATE quotes SET source='bhavhopy' WHERE isin=(SELECT min(isin) FROM quotes)",
+    "text-price": "UPDATE quotes SET micro_rupees='abc'",
+}
+
+
+def _priced(home: TestClient, tmp_path: Path) -> bytes:
+    r = runner.invoke(cli, ["prices", "import", str(EOD / "bhavcopy-sample.csv")])
+    assert r.exit_code in (0, 1), r.output
+    good = (tmp_path / "prices.db").read_bytes()
+    assert 'class="map"' in home.get("/").text
+    return good
+
+
+@pytest.mark.parametrize("damage", sorted(ROW_DAMAGE))
+def test_damage_inside_a_price_row_is_said_on_the_page(
+    home: TestClient, tmp_path: Path, damage: str
+) -> None:
+    """Damage that only shows while rows are read, not when the file opens
+    (the verifier's #23 FAIL): the page says so and still lists holdings."""
+    import sqlite3
+
+    _priced(home, tmp_path)
+    c = sqlite3.connect(tmp_path / "prices.db")
+    c.execute("PRAGMA ignore_check_constraints=ON")
+    c.execute(ROW_DAMAGE[damage])
+    c.commit()
+    c.close()
+    r = home.get("/")  # TestClient re-raises a server error, so a 500 fails here
+    assert r.status_code == 200
+    assert "INFOSYS LIMITED" in r.text
+    if "Prices could not be read" not in r.text:
+        # a store that already refuses such rows on open, or skips them: no wrong number
+        assert damage != "text-price" or 'class="map"' not in r.text
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_random_byte_damage_never_breaks_the_page(
+    home: TestClient, tmp_path: Path, seed: int
+) -> None:
+    import random
+
+    good = _priced(home, tmp_path)
+    rng = random.Random(seed)
+    b = bytearray(good)
+    for _ in range(20):
+        b[rng.randrange(len(b))] = rng.randrange(256)
+    (tmp_path / "prices.db").write_bytes(bytes(b))
+    r = home.get("/")
+    assert r.status_code == 200 and "INFOSYS LIMITED" in r.text
+
+
+def test_a_bug_while_reading_prices_is_not_called_damage(
+    home: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stockin.prices import PriceStore
+
+    _priced(home, tmp_path)
+
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("a bug, not damage")
+
+    monkeypatch.setattr(PriceStore, "book", broken)
+    with pytest.raises(RuntimeError):
+        home.get("/")
+
+
+def test_the_map_tiles_fill_the_map_in_percent() -> None:
+    """tiles() turns the box into percent of the map: all tiles together are
+    exactly the map, and each tile's area is its share (verifier's M5)."""
+    total = 1_000
+    ws = tuple(
+        _weight(i, n, "Stocks", v, total)
+        for i, n, v in (
+            ("INE009A01021", "A", 500),
+            ("INF179K01BE2", "B", 300),
+            ("INE062A01020", "C", 200),
+        )
+    )
+    ts = tiles(ws)
+    assert abs(sum(t.w * t.h for t in ts) - 100 * 100) < 1e-6
+    for t, (_, _, v) in zip(ts, ((0, 0, 500), (0, 0, 300), (0, 0, 200)), strict=True):
+        assert abs(t.w * t.h / 10_000 - v / total) < 1e-9
+        assert t.x >= 0 and t.x + t.w <= 100 + 1e-9 and t.y >= 0 and t.y + t.h <= 100 + 1e-9
+
+
+def test_the_page_draws_each_tile_with_its_own_width_and_height() -> None:
+    from stockin.web import _env
+
+    total = 1_000
+    ws = (
+        _weight("INE009A01021", "A", "Stocks", 700, total),
+        _weight("INF179K01BE2", "B", "Stocks", 300, total),
+    )
+    s = story((), ws, total, 2)
+    html = _env.get_template("home.html").render(
+        empty=False, story=s, summary={"mismatch": 0}, ok=True, groups=(), priced_on="2026-11-17"
+    )
+    for t in s.tiles:
+        assert f"width:{t.w:.3f}%;height:{t.h:.3f}%" in html  # verifier's M6
+    assert "prices 2026-11-17" in html
 
 
 @pytest.mark.parametrize("months", [[1, 2, 4, 5], [1, 2, 3, 4, 5]])
