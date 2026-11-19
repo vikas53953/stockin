@@ -10,6 +10,7 @@ import http.client
 import os
 import shlex
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -19,10 +20,11 @@ from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights
-from .money import Money, Value
+from .money import Bps, Money, Value
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, Quote
 from .sources import cas, eod
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
+from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, Verdict, for_book, parse_percent
 
 app = typer.Typer(
     add_completion=False,
@@ -325,8 +327,6 @@ class InsightsView(Value):
 @app.command("insights")
 def insights_cmd(as_json: JsonFlag = False) -> None:
     """What your numbers say: what changed, concentration, unknown cost, SIPs, tax dates."""
-    from datetime import date
-
     with _open_ledger() as ledger:
         book = ledger.book()
     held = frozenset(h.isin for h in book.holdings())
@@ -454,6 +454,103 @@ def prices_import(
     except (eod.EodRejected, UnicodeDecodeError, OSError) as exc:
         raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
     _print_prices(_store_quotes(f"{file.name} ({source})", quotes, held), as_json)
+
+
+thesis_app = typer.Typer(no_args_is_help=True, help="Why you hold each holding, in your words.")
+app.add_typer(thesis_app, name="thesis")
+
+
+def theses_path() -> Path:
+    return data_dir() / "theses.db"
+
+
+def _open_theses() -> ThesisStore:
+    try:
+        return ThesisStore.open(theses_path())
+    except ThesesDamaged as exc:
+        hint = "copy theses.db somewhere safe first: it is the only copy of what you wrote"
+        raise _fail(str(exc), hint) from None
+
+
+def _percent(text: str) -> Bps:
+    try:
+        return parse_percent(text)
+    except ValueError as exc:
+        raise _fail(f"target {exc}") from None
+
+
+def _held(isin: str) -> Isin:
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    held = {h.isin for h in book.holdings()}
+    if isin.upper() not in held:
+        raise _fail(f"{isin} is not in your holdings", "see them with: stockin holdings")
+    return Isin(isin.upper())
+
+
+@thesis_app.command("set")
+def thesis_set(
+    isin: Annotated[str, typer.Argument(help="The ISIN you hold.")],
+    why: Annotated[str, typer.Option("--why", help="Why you hold it, in one or two sentences.")],
+    target: Annotated[
+        str | None, typer.Option(help="The weight you want it to have, e.g. 10 for 10%.")
+    ] = None,
+    exit_if: Annotated[str, typer.Option("--exit-if", help="What would make you sell.")] = "",
+) -> None:
+    """Write (or rewrite) your thesis for a holding. Rewriting clears 'broken'."""
+    held = _held(isin)
+    if not why.strip():
+        raise _fail("--why is empty: say why you hold it")
+    t = Thesis(
+        isin=held,
+        why=why.strip()[:MAX_TEXT],
+        exit_if=exit_if.strip()[:MAX_TEXT],
+        target=_percent(target) if target is not None else None,
+        written=date.today(),
+    )
+    with _open_theses() as store:
+        store.put(t)
+    typer.echo(f"saved your thesis for {held}")
+
+
+@thesis_app.command("broken")
+def thesis_broken(
+    isin: Annotated[str, typer.Argument(help="The ISIN you hold.")],
+    undo: Annotated[bool, typer.Option("--undo", help="Mark it as holding again.")] = False,
+) -> None:
+    """Mark your reason for holding as no longer true (the verdict becomes exit)."""
+    held = _held(isin)
+    with _open_theses() as store:
+        t = store.all().get(held)
+        if t is None:
+            hint = f"write one: stockin thesis set {held} --why ..."
+            raise _fail(f"no thesis for {held} yet", hint)
+        store.put(t.model_copy(update={"broken": not undo}))
+    typer.echo(f"{held}: marked {'as holding again' if undo else 'broken'}")
+
+
+class VerdictsView(Value):
+    priced_on: str | None
+    verdicts: tuple[Verdict, ...]
+
+
+@app.command("verdicts")
+def verdicts_cmd(as_json: JsonFlag = False) -> None:
+    """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    held = frozenset(h.isin for h in book.holdings())
+    prices = _price_book(held) or PriceBook(quotes={})
+    with _open_theses() as store:
+        found = for_book(book, prices, store.all())
+    days = [q.on for q in prices.quotes.values()]
+    view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
+    if as_json:
+        typer.echo(view.model_dump_json(indent=2))
+        return
+    for v in found:
+        typer.echo(f"{v.call.upper():<6} {v.because}")
+    typer.echo("(your own rules applied to your own numbers; not advice)")
 
 
 @app.command("reconcile")

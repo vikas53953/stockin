@@ -101,7 +101,7 @@ def _group(kind: str, asset_class: str) -> str:
     return "Equity funds"
 
 
-def _short_name(name: str) -> str:
+def short_name(name: str) -> str:
     for cut in (
         " - Direct",
         " Direct Plan",
@@ -128,7 +128,7 @@ def weights(book: Book, prices: PriceBook) -> tuple[tuple[Weight, ...], Money, t
             unpriced.append(pos.isin)
             continue
         inst = book.instrument(pos.isin)
-        name = _short_name(inst.name) if inst else pos.isin
+        name = short_name(inst.name) if inst else pos.isin
         kind = inst.kind if inst else "stock"
         if inst and inst.kind == "mutual_fund" and "ETF" in inst.name.upper():
             kind = "etf"
@@ -167,7 +167,7 @@ def _unpriced_note(book: Book, unpriced: tuple[Isin, ...]) -> str:
     names: list[str] = []
     for i in unpriced:
         inst = book.instrument(i)
-        names.append(_short_name(inst.name) if inst else i)
+        names.append(short_name(inst.name) if inst else i)
     return (
         f" {_plural(len(unpriced), 'holding')} ({_names(sorted(names))}) "
         f"{'has' if len(unpriced) == 1 else 'have'} no price yet and "
@@ -444,7 +444,7 @@ def sip_discipline(book: Book) -> Insight | None:
     series: list[Point] = []
     for (acct, isin), days in sorted(sips.items()):
         inst = book.instrument(isin)
-        name = _short_name(inst.name) if inst else isin
+        name = short_name(inst.name) if inst else isin
         months = {_month(d) for d in days}
         sip_day = days[-1].day
         covered = spans.get((acct, isin), [])
@@ -539,7 +539,7 @@ def tax_clock(book: Book, today: date) -> Insight | None:
                 continue
             lt = long_term_from(lot.acquired_on)
             if lt > today:
-                upcoming[lt].append((_short_name(inst.name), lot.cost))
+                upcoming[lt].append((short_name(inst.name), lot.cost))
     if not upcoming:
         return None
     when = min(upcoming)

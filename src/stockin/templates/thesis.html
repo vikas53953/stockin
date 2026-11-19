@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% set active = "home" %}
+{% block title %}Thesis · {{ holding }} · Stockin{% endblock %}
+{% block body %}
+<h1>Your thesis for {{ holding }}</h1>
+<p class="muted isin">{{ isin }}</p>
+{% if error %}<div class="notice bad" role="alert">{{ error }}</div>{% endif %}
+{% if max_text %}
+<section class="panel">
+  <form action="/thesis/{{ isin }}" method="post">
+    <label for="why">Why you hold it
+      <textarea id="why" name="why" maxlength="{{ max_text }}" required>{{ typed.why if typed else (t.why if t else "") }}</textarea></label>
+    <label for="target">Target weight, % of your money <span class="muted">(optional; e.g. 10 or 12.5)</span>
+      <input id="target" name="target" type="text" inputmode="decimal" value="{{ typed.target if typed else ('%d.%02d'|format(t.target // 100, t.target % 100) if t and t.target is not none else '') }}"></label>
+    <label for="exit_if">What would make you sell <span class="muted">(optional)</span>
+      <input id="exit_if" name="exit_if" type="text" maxlength="{{ max_text }}" value="{{ typed.exit_if if typed else (t.exit_if if t else '') }}"></label>
+    <label class="check" for="broken"><input id="broken" name="broken" type="checkbox" {% if (typed and typed.broken == 'on') or (not typed and t and t.broken) %}checked{% endif %}> My reason for holding is no longer true</label>
+    <button type="submit">Save thesis</button>
+  </form>
+  <p class="muted">Stockin turns this into add, trim, exit or hold: more than 5% above your target says trim, more than 5% below says add, and a broken reason says exit. With no target, above 25% of your money says trim. Saved only on this computer.</p>
+</section>
+{% endif %}
+<p><a href="/#verdicts">Back to your verdicts</a></p>
+{% endblock %}
