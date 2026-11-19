@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS instruments(
 CREATE TABLE IF NOT EXISTS accounts(
   id TEXT NOT NULL, sha TEXT NOT NULL, body TEXT NOT NULL,
   PRIMARY KEY(id, sha)) WITHOUT ROWID;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 """
 
 _TABLES = (
@@ -61,6 +61,43 @@ _TABLES = (
 
 class LedgerMissing(FileNotFoundError):
     """Raised by a read handle when nothing has been imported yet."""
+
+
+LEDGER_FORMAT = 2  # 2: a dividend reinvestment's Income and Buy carry reinvested=True
+REBUILD_HINT = (
+    "move ledger.db aside (keep it until you have checked) and import your statements again"
+)
+
+
+class LedgerOutdated(ValueError):
+    """The ledger was written by an older Stockin that the current code would
+    read wrongly, and importing into it would count some facts twice."""
+
+
+def _check_format(conn: sqlite3.Connection, db: Path) -> None:
+    """Format 1 wrote a dividend reinvestment as an unlabelled Income + Buy.
+    Today's import writes the same rows with a label, so the facts get new
+    ids: importing the statement again would hold the units twice, and
+    insights would call the reinvestment a payout. Format 1 always wrote a
+    reinvestment as an Income and a Buy with the same account, fund and
+    day, so a format 1 ledger holding such a pair is refused (it may be a
+    SIP on the day of a payout; rebuilding is safe either way). Without one
+    the ledger is the same in both formats and is upgraded when next
+    written."""
+    (version,) = conn.execute("PRAGMA user_version").fetchone()
+    if version == 0 or version >= LEDGER_FORMAT:
+        return
+    pair = conn.execute(
+        """SELECT 1 FROM facts i JOIN facts b
+             ON b.account = i.account AND b.isin = i.isin AND b.on_date = i.on_date
+           WHERE i.fact = 'txn' AND i.body LIKE '%"kind":"income"%'
+             AND b.fact = 'txn' AND b.body LIKE '%"kind":"buy"%'
+           LIMIT 1"""
+    ).fetchone()
+    if pair is not None:
+        raise LedgerOutdated(
+            f"{db} was written by an older Stockin that did not label dividend reinvestments"
+        )
 
 
 class ImportReport(Value):
@@ -87,6 +124,11 @@ class Ledger:
             raise LedgerMissing(f"no ledger at {db}; import a statement first")
         conn = sqlite3.connect(db)
         conn.execute("PRAGMA query_only=ON")
+        try:
+            _check_format(conn, db)
+        except LedgerOutdated:
+            conn.close()
+            raise
         return cls(conn)
 
     def book(self, as_of: date | None = None) -> Book:
@@ -161,6 +203,11 @@ class LedgerWriter(Ledger):
         if fresh:
             db.chmod(0o600)  # holdings are private; the WAL and SHM files inherit this
         conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            _check_format(conn, db)
+        except LedgerOutdated:
+            conn.close()
+            raise
         conn.executescript(_SCHEMA)
         conn.isolation_level = "DEFERRED"
         return cls(conn)

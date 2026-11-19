@@ -470,3 +470,157 @@ def test_cli_without_ledger_says_how_to_start(
         r = runner.invoke(app, [cmd])
         assert r.exit_code == 2
         assert "stockin import cas" in r.output
+
+
+def test_a_reinvestment_is_labelled_at_import_and_keeps_its_stamp_duty() -> None:
+    """The statement's own row type marks both halves of a reinvestment. The
+    stamp duty after it is added to the Buy's cost and the label survives, so
+    nothing downstream has to pair the Buy with its Income by amount."""
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "5", "500"),
+        fx.txn("2026-01-05", "STAMP_DUTY_TAX", None, "0.03"),
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "5", "800"),
+        fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    events = [f.event for f in st.facts if isinstance(f, Txn)]
+    assert events == [
+        Buy(units=Qty.parse("5"), amount=Money.rupees("500.03")),
+        Income(amount=Money.rupees("800"), reinvested=True),
+        Buy(units=Qty.parse("5"), amount=Money.rupees("800.04"), reinvested=True),
+    ]
+
+
+def test_a_payout_is_not_labelled_reinvested() -> None:
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-25", "DIVIDEND_PAYOUT", None, "80"),
+        fx.txn("2026-01-25", "TDS_TAX", None, "8"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    events = [f.event for f in st.facts if isinstance(f, Txn)]
+    assert [getattr(e, "reinvested", None) for e in events] == [False, False]
+    assert _income(st) == [Money.rupees("72")]
+
+
+def test_the_label_does_not_change_the_id_of_any_earlier_fact() -> None:
+    """`reinvested=False` is left out of the canonical JSON, so a ledger
+    written before the label existed converges with a fresh import instead of
+    holding every purchase twice. The ids are the ones the code gave before."""
+    from datetime import date
+
+    from stockin.facts import AccountId, fact_id, parse_isin
+
+    acct, isin, on = AccountId("0123456789abcdef"), parse_isin("INF179K01UT0"), date(2026, 1, 5)
+    buy = Txn(
+        account=acct,
+        isin=isin,
+        on=on,
+        event=Buy(units=Qty.parse("10"), amount=Money.rupees("1000")),
+    )
+    pay = Txn(account=acct, isin=isin, on=on, event=Income(amount=Money.rupees("50")))
+    assert fact_id(buy) == "2025eae7761ab93d930fdd368e27b5febde234c19eae1e535c0c90ff45cd3826"
+    assert fact_id(pay) == "fe66a6599372dc4b3bdd79b65ec720a0acca7f0ff1ccf8a3be04fc34b65b7792"
+    again = buy.model_copy(update={"event": buy.event.model_copy(update={"reinvested": True})})
+    assert fact_id(again) != fact_id(buy)  # the label is part of the fact when it is set
+
+
+def test_a_reinvestment_survives_the_ledger_round_trip(tmp_path: Path) -> None:
+    txns = [
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "10", "800"),
+        fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+    ]
+    st = cas.from_casparser(_rta(txns), "sha")
+    db = tmp_path / "ledger.db"
+    with LedgerWriter.open(db) as w:
+        w.ingest(st)
+    with Ledger.open(db) as led:
+        facts = led.book().facts
+    flags = sorted(
+        (type(f.event).__name__, f.event.reinvested)  # type: ignore[union-attr]
+        for f in facts
+        if isinstance(f, Txn)
+    )
+    assert flags == [("Buy", True), ("Income", True)]
+
+
+# ------------------------------------------------------- ledger format 1
+
+
+def _format1_ledger(db: Path, txns: list[dict[str, Any]]) -> Path:
+    """A ledger as Stockin wrote it before reinvestments were labelled:
+    the same tables, user_version 1, and the unlabelled facts it held."""
+    with LedgerWriter.open(db) as w:
+        w.ingest(cas.from_casparser(_rta(txns), "old"))
+    conn = sqlite3.connect(db)
+    for fid, body in list(conn.execute("SELECT id, body FROM facts")):
+        conn.execute(
+            "UPDATE facts SET body = ? WHERE id = ?", (body.replace(',"reinvested":true', ""), fid)
+        )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    return db
+
+
+_REINVEST = [
+    fx.txn("2026-01-05", "PURCHASE", "5", "500"),
+    fx.txn("2026-01-25", "DIVIDEND_REINVEST", "5", "800"),
+    fx.txn("2026-01-25", "STAMP_DUTY_TAX", None, "0.04"),
+]
+
+
+def test_a_format1_ledger_with_dividends_is_refused_not_double_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stockin.store import LedgerOutdated
+
+    db = _format1_ledger(tmp_path / "data" / "ledger.db", _REINVEST)
+    before = db.read_bytes()
+    with pytest.raises(LedgerOutdated):
+        Ledger.open(db)
+    with pytest.raises(LedgerOutdated):
+        LedgerWriter.open(db)
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path / "data"))
+    stmt = tmp_path / "again.json"
+    fx.write(_rta(_REINVEST), stmt)
+    r = runner.invoke(app, ["import", "cas", str(stmt)])
+    assert r.exit_code == 2 and "Traceback" not in r.output
+    assert "did not label dividend reinvestments" in r.output
+    assert "nothing was imported" in r.output
+    assert db.read_bytes() == before  # the refused import changed nothing
+    for cmd in (["holdings"], ["insights"]):
+        r = runner.invoke(app, cmd)
+        assert r.exit_code == 2 and "import your statements again" in r.output
+    r = runner.invoke(app, ["doctor", "--json"])
+    (check,) = [c for c in json.loads(r.output)["checks"] if c["name"] == "ledger"]
+    assert check["status"] == "fail"
+
+
+def test_a_format1_ledger_without_a_reinvestment_is_upgraded_and_converges(
+    tmp_path: Path,
+) -> None:
+    """A payout on a day with no purchase cannot have been a reinvestment."""
+    txns = [
+        fx.txn("2026-01-05", "PURCHASE", "10", "1000"),
+        fx.txn("2026-01-25", "DIVIDEND_PAYOUT", None, "80"),
+    ]
+    db = _format1_ledger(tmp_path / "ledger.db", txns)
+    with Ledger.open(db) as led:
+        assert led.book().holdings()
+    with LedgerWriter.open(db) as w:
+        report = w.ingest(cas.from_casparser(_rta(txns), "new"))
+    assert (report.facts_added, report.facts_already_present) == (0, 5)  # 2 txns, 3 others
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+    conn.close()
+
+
+def test_a_rebuilt_ledger_holds_a_reinvestment_once(tmp_path: Path) -> None:
+    db = tmp_path / "ledger.db"
+    for sha in ("a", "b"):
+        with LedgerWriter.open(db) as w:
+            w.ingest(cas.from_casparser(_rta(_REINVEST), sha))
+    with Ledger.open(db) as led:
+        (h,) = led.book().holdings()
+    assert h.qty == Qty.parse("10")

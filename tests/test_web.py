@@ -93,3 +93,30 @@ def test_other_hosts_and_cross_site_posts_are_refused(client: TestClient, tmp_pa
 def test_no_order_routes_exist(client: TestClient) -> None:
     routes = {getattr(r, "path", "") for r in client.app.routes}  # type: ignore[attr-defined]
     assert routes <= {"/", "/reconcile", "/import"}
+
+
+def test_an_outdated_ledger_says_how_to_rebuild(tmp_path: Path, client: TestClient) -> None:
+    import sqlite3
+
+    from stockin.sources import cas
+    from stockin.store import LedgerWriter
+
+    db = tmp_path / "data" / "ledger.db"
+    rows = [
+        fx.txn("2026-01-25", "DIVIDEND_REINVEST", "1", "80"),
+    ]
+    data = fx.rta(
+        "01-Jan-2026",
+        "31-Jan-2026",
+        [fx.folio("1/1", "AMC", [fx.scheme(fx.HDFC_MF, "F", "0", "1", rows)])],
+    )
+    with LedgerWriter.open(db) as w:
+        w.ingest(cas.from_casparser(data, "old"))
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    r = client.get("/")
+    assert r.status_code == 409
+    assert "import your statements again" in r.text
+    assert "Traceback" not in r.text

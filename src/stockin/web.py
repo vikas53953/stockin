@@ -25,7 +25,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .sources import cas
-from .store import ImportReport, Ledger, LedgerWriter
+from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
 
@@ -126,6 +126,11 @@ def create_app(db: Path, port: int) -> FastAPI:
 
     def page(name: str, **ctx: object) -> HTMLResponse:
         return HTMLResponse(_env.get_template(name).render(**ctx))
+
+    @app.exception_handler(LedgerOutdated)
+    async def outdated(request: Request, exc: LedgerOutdated) -> Response:
+        html = _env.get_template("outdated.html").render(error=str(exc), hint=REBUILD_HINT)
+        return HTMLResponse(html, status_code=409)
 
     def read_book() -> Book | None:
         if not db.is_file():

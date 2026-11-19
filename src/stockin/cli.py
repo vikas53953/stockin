@@ -19,6 +19,7 @@ import typer
 from . import __version__
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
+from .insights import Insight, all_insights
 from .money import Money, Value
 from .prices import (
     Jump,
@@ -32,7 +33,7 @@ from .prices import (
     left_out,
 )
 from .sources import cas, eod
-from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
+from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
 
 app = typer.Typer(
     add_completion=False,
@@ -99,17 +100,7 @@ def diagnose(root: Path) -> Doctor:
         checks.append(DoctorCheck(name="data_dir", status="fail", detail=f"{root} is not writable"))
     else:
         checks.append(DoctorCheck(name="data_dir", status="ok", detail=str(root)))
-    ledger = root / "ledger.db"
-    checks.append(
-        DoctorCheck(name="ledger", status="ok", detail=str(ledger))
-        if ledger.is_file()
-        else DoctorCheck(
-            name="ledger",
-            status="warn",
-            detail="no ledger yet",
-            hint="created by your first `stockin import cas`",
-        )
-    )
+    checks.append(_ledger_check(root / "ledger.db"))
     checks.append(_quotes_check(root / "prices.db"))
     return Doctor(
         version=__version__,
@@ -182,6 +173,23 @@ def _open_ledger() -> Ledger:
         raise _fail(
             f"no ledger at {ledger_path()}", "import a statement first: stockin import cas FILE"
         ) from None
+    except LedgerOutdated as exc:
+        raise _fail(str(exc), REBUILD_HINT) from None
+
+
+def _ledger_check(ledger: Path) -> DoctorCheck:
+    if not ledger.is_file():
+        return DoctorCheck(
+            name="ledger",
+            status="warn",
+            detail="no ledger yet",
+            hint="created by your first `stockin import cas`",
+        )
+    try:
+        Ledger.open(ledger).close()
+    except LedgerOutdated as exc:
+        return DoctorCheck(name="ledger", status="fail", detail=str(exc), hint=REBUILD_HINT)
+    return DoctorCheck(name="ledger", status="ok", detail=str(ledger))
 
 
 def _holding_lines(
@@ -270,7 +278,11 @@ def import_cas(
         statement = cas.read(file, password)
     except cas.CasRejected as exc:
         raise _fail(f"rejected {file.name}: {exc}", "nothing was imported") from None
-    with LedgerWriter.open(ledger_path()) as writer:
+    try:
+        writer = LedgerWriter.open(ledger_path())
+    except LedgerOutdated as exc:
+        raise _fail(str(exc), f"nothing was imported; {REBUILD_HINT}") from None
+    with writer:
         report: ImportReport = writer.ingest(statement)
         lines = _holding_lines(writer.book(), report.holdings)
     if as_json:
@@ -311,6 +323,42 @@ def holdings(as_json: JsonFlag = False) -> None:
         typer.echo(line)
     if prices is None:
         typer.echo("(no prices yet: run `stockin prices fetch` to see value and gain)")
+
+
+class InsightsView(Value):
+    priced_on: str | None  # latest price date used, None before any fetch
+    unpriced: tuple[Isin, ...]  # held, but no price yet: left out of value insights
+    insights: tuple[Insight, ...]
+
+
+@app.command("insights")
+def insights_cmd(as_json: JsonFlag = False) -> None:
+    """What your numbers say: what changed, concentration, unknown cost, SIPs, tax dates."""
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    held = frozenset(h.isin for h in book.holdings())
+    prices = _price_book(held) or PriceBook(quotes={})
+    found = all_insights(book, prices, _today())
+    days = [q.on for q in prices.quotes.values()]
+    unpriced = tuple(sorted(i for i in held if prices.get(i) is None))
+    view = InsightsView(
+        priced_on=max(days).isoformat() if days else None, unpriced=unpriced, insights=found
+    )
+    if as_json:
+        typer.echo(view.model_dump_json(indent=2))
+        return
+    marks = {"warn": "!", "unknown": "?", "good": "+", "info": "-"}
+    for i in found:
+        typer.echo(f"{marks[i.tone]} {i.headline}")
+        typer.echo(f"    {i.detail}")
+    if view.priced_on is None:
+        typer.echo("(no prices yet: run `stockin prices fetch` for value-based insights)")
+    elif unpriced:
+        n = len(unpriced)
+        typer.echo(
+            f"({n} holding{'s have' if n != 1 else ' has'} no price yet and "
+            f"{'are' if n != 1 else 'is'} left out of value: run `stockin prices fetch`)"
+        )
 
 
 prices_app = typer.Typer(no_args_is_help=True, help="End-of-day prices for what you hold.")

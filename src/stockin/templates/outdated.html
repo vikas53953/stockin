@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% set active = "home" %}
+{% block body %}
+<h1>Your ledger needs rebuilding</h1>
+<div class="notice bad" role="alert">{{ error }}<br><span class="muted">Nothing was read or changed. To fix it, {{ hint }}.</span></div>
+{% endblock %}
