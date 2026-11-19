@@ -10,6 +10,8 @@ import http.client
 import os
 import shlex
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
@@ -464,9 +466,13 @@ def theses_path() -> Path:
     return data_dir() / "theses.db"
 
 
-def _open_theses() -> ThesisStore:
+@contextmanager
+def _open_theses() -> Generator[ThesisStore]:
+    """theses.db for the length of a command. Damage found on open, on read
+    or on write is said with a hint, never a traceback."""
     try:
-        return ThesisStore.open(theses_path())
+        with ThesisStore.open(theses_path()) as store:
+            yield store
     except ThesesDamaged as exc:
         hint = "copy theses.db somewhere safe first: it is the only copy of what you wrote"
         raise _fail(str(exc), hint) from None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from datetime import date
 from pathlib import Path
@@ -93,12 +94,56 @@ def test_the_verdict_follows_your_rule_and_its_sentence_carries_its_numbers(
     assert v.weight == w
     assert "Infosys" in v.because
     if v.call in ("trim", "add", "hold") and w is not None:
-        assert _p(w) in v.because  # the weight said is the weight used
+        assert _p(w) in v.because or _h(w) in v.because  # the weight said is the weight used
         if thesis is not None and thesis.target is not None:
-            assert _p(thesis.target) in v.because
+            assert _p(thesis.target) in v.because or _h(thesis.target) in v.because
             assert f"{_p(BAND)[:-1]} points" in v.because  # points, not a relative %
             word = {"trim": "above", "add": "below", "hold": "within"}[v.call]
             assert word in v.because
+            # read back as a person would: the printed numbers agree with the call
+            shown_w, shown_t = (
+                _read(x)
+                for x in re.findall(r"(\d+\.\d+)%", v.because)[:1]
+                + re.findall(r"target of (\d+\.\d+)%", v.because)
+            )
+            gap, band = shown_w - shown_t, 500
+            if v.call == "trim":
+                assert gap > band
+            elif v.call == "add":
+                assert -gap > band
+            else:
+                assert abs(gap) <= band
+        elif v.call == "trim":
+            assert _read(re.findall(r"(\d+\.\d+)%", v.because)[0]) > CONCENTRATED_ONE
+
+
+def _h(bps: int) -> str:
+    return f"{bps // 100}.{bps % 100:02d}%"
+
+
+def _read(text: str) -> int:
+    """'17.5' -> 1750, '17.46' -> 1746: a printed percent in basis points."""
+    whole, frac = text.split(".")
+    return int(whole) * 100 + int(frac.ljust(2, "0"))
+
+
+@pytest.mark.parametrize(
+    ("w", "target", "call", "said"),
+    [
+        (1751, 1250, "trim", "17.51%"),  # 17.5% would read as exactly 5 points
+        (1800, 1250, "trim", "18.0%"),
+        (749, 1250, "add", "7.49%"),  # 7.5% would read as exactly 5 points
+        (700, 1250, "add", "7.0%"),
+        (1750, 1250, "hold", "17.5%"),
+        (1746, 1245, "trim", "17.5%"),  # shown 17.5 vs 12.4: the gap reads as 5.1
+        (2501, None, "trim", "25.01%"),
+    ],
+)
+def test_a_sentence_never_rounds_into_contradicting_its_call(
+    w: int, target: int | None, call: str, said: str
+) -> None:
+    v = verdict(INFY, "I", _w(INFY, w), _t(INFY, target))
+    assert v.call == call and said in v.because
 
 
 @pytest.mark.parametrize(
@@ -307,3 +352,37 @@ def test_web_says_a_damaged_theses_file_and_still_shows_holdings(
     assert r.status_code == 200
     assert "Your theses could not be read" in r.text and "INFOSYS LIMITED" in r.text
     assert "could not be read" in web.get(f"/thesis/{INFY}").text
+
+
+@pytest.mark.parametrize("command", ["set", "broken"])
+def test_cli_says_a_theses_file_that_fails_on_write_without_a_traceback(
+    data: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """The verifier's #24 FAIL: a file that opens and reads but fails on
+    write. The store maps that to ThesesDamaged; the command must say it."""
+    r = runner.invoke(cli, ["thesis", "set", INFY, "--why", "a reason"])
+    assert r.exit_code == 0, r.output
+
+    def fails(*_: object) -> None:
+        raise ThesesDamaged("theses.db could not be read or written (disk image is malformed)")
+
+    monkeypatch.setattr(ThesisStore, "put", fails)
+    args = ["thesis", "set", INFY, "--why", "x"] if command == "set" else ["thesis", "broken", INFY]
+    r = runner.invoke(cli, args)
+    assert r.exit_code == 2, r.output
+    assert "could not be read or written" in r.output and "only copy" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_the_store_maps_a_failed_write_to_damage(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "theses.db"
+    ThesisStore.open(path).close()
+    c = sqlite3.connect(path)
+    c.execute("CREATE TRIGGER w BEFORE INSERT ON theses BEGIN SELECT RAISE(ABORT, 'bad'); END")
+    c.commit()
+    c.close()
+    with ThesisStore.open(path) as store, pytest.raises(ThesesDamaged, match="or written"):
+        store.put(_t(INFY))
+    assert sqlite3.connect(path).execute("SELECT count(*) FROM theses").fetchone() == (0,)
