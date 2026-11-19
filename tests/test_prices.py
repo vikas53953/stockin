@@ -18,9 +18,11 @@ from stockin.prices import (
     PriceBook,
     PriceFile,
     PricesDamaged,
+    PricesMissing,
     PriceStore,
     Quote,
     india_today,
+    keep_unlisted,
 )
 from stockin.sources import eod
 
@@ -648,6 +650,9 @@ def test_every_single_byte_change_is_rejected_or_undone_by_the_right_file(
             stored_wrong += store.digest() != want
             assert store.take(clean)[1] == (), i
             assert store.digest() == want, (i, data[max(0, i - 40) : i + 40])
+    # the test is about damage that does get in. Since a file no longer
+    # deletes rows it does not list (a cut-off NAVAll), a damaged copy that
+    # only drops a row changes nothing, so fewer copies store a wrong value
     assert stored_wrong > 50  # the test is about damage that does get in
 
 
@@ -1432,7 +1437,10 @@ def test_importing_the_right_file_undoes_a_damaged_one(
             path.unlink()
         for stem in ["earlier"] * history + list(imports):
             result = runner.invoke(app, ["prices", "import", str(tmp_path / stem)])
-            want = (code, 1) if stem == "damaged" and history else (code,)
+            # a damaged copy that loses a held fund's row, after a file that
+            # had it, keeps the stored price and says so (exit 1, verifier 2 R2)
+            lost_after = name == "nav-row-lost" and stem != imports[0]
+            want = (code, 1) if stem == "damaged" and (history or lost_after) else (code,)
             assert result.exit_code in (want if stem == "damaged" else (0,)), result.output
         doctor = json.loads(runner.invoke(app, ["doctor", "--json"]).output)["checks"]
         return runner.invoke(app, ["holdings", "--json"]).output, json.dumps(doctor)
@@ -1619,3 +1627,107 @@ def test_a_bug_in_reading_is_not_reported_as_damage(
     monkeypatch.setattr(stockin.prices, "_quote", broken)
     with PriceStore.open(tmp_path / "prices.db") as store, pytest.raises(RuntimeError):
         store.book([parse_isin(_with_digit("INE00000000"))])
+
+
+def test_a_navall_cut_short_never_deletes_a_held_funds_price(tmp_path: Path) -> None:
+    """Verifier 2 on #22: a NAVAll download or copy that stops at a line
+    end still parses, with fewer funds. Importing it after the whole file
+    must not remove a held fund's price it no longer lists; accepting the
+    file as it is does store it exactly."""
+    whole = (EOD / "NAVAll-sample.txt").read_bytes()
+    clean = _parse("NAVAll-sample.txt", whole)
+    held = frozenset(q.isin for q in clean.quotes)
+    cuts = [i + 1 for i, b in enumerate(whole) if b == ord("\n")][:-1]
+    taken = 0
+    part = clean
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.take(_a_day_earlier(clean))
+        store.take(clean)
+        want = store.digest()
+        for cut in cuts:
+            try:
+                part = _parse("NAVAll-sample.txt", whole[:cut])
+            except eod.EodRejected:
+                continue
+            if part.day != clean.day:
+                continue
+            taken += 1
+            file, kept = keep_unlisted(part, store.stored(part.source, part.day), held)
+            assert {q.isin for q in kept} == held - {q.isin for q in part.quotes}
+            store.take(file)
+            assert store.digest() == want, cut
+        assert taken >= 2  # the sample does give cut files that parse
+        # a fund you do not hold is not kept, and accepting stores the file as it is
+        assert keep_unlisted(part, store.stored(part.source, part.day), frozenset())[1] == ()
+        store.take(part, accept_jumps=True)
+        assert store.stored(part.source, part.day) == {q.isin: q for q in part.quotes}
+
+
+def test_prices_import_of_a_cut_navall_keeps_every_held_price(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    whole = tmp_path / "NAVAll.txt"
+    whole.write_text(_NAV_HELD)
+    full = runner.invoke(app, ["prices", "import", str(whole)])
+    assert full.exit_code == 0, full.output
+    before = runner.invoke(app, ["holdings", "--json"]).output
+    valued = json.loads(before)["valued"]
+    priced = {v["holding"]["isin"] for v in valued if v.get("quote")} if valued else set()
+    assert "INF179K01BE2" in priced  # the whole file prices the held fund
+    cut = tmp_path / "NAVAll-cut.txt"
+    cut.write_text("\n".join(_NAV_HELD.splitlines()[:7]) + "\n")  # stops before the held fund
+    r = runner.invoke(app, ["prices", "import", str(cut)])
+    assert r.exit_code == 1, r.output  # needs your eyes, like a held jump
+    assert "KEPT: INF179K01BE2" in r.output and "cut short" in r.output
+    assert runner.invoke(app, ["holdings", "--json"]).output == before
+    # the whole file again: nothing kept, nothing to say
+    again = runner.invoke(app, ["prices", "import", str(whole)])
+    assert again.exit_code == 0 and "KEPT" not in again.output, again.output
+    assert runner.invoke(app, ["holdings", "--json"]).output == before
+    # accepted as it is: the fund it leaves out loses that day's price
+    r = runner.invoke(app, ["prices", "import", str(cut), "--accept-jumps"])
+    assert r.exit_code == 0, r.output
+    assert "no price yet for: " in r.output and "INF179K01BE2" in r.output
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_a_file_with_bytes_but_no_tables_is_damage_not_a_new_file(
+    tmp_path: Path, write: bool
+) -> None:
+    """Verifier 2 on #22: zeroing byte 104 of a real prices.db makes SQLite
+    read an empty schema. That is damage, never a file to write into."""
+    path = tmp_path / "prices.db"
+    _store_with_rows(path)
+    data = bytearray(path.read_bytes())
+    data[104] = 0
+    path.write_bytes(bytes(data))
+    with pytest.raises(PricesDamaged, match="no tables"):
+        PriceStore.open(path, write=write)
+    assert path.read_bytes() == bytes(data)  # left untouched
+
+
+def test_an_empty_prices_file_is_still_a_new_one(tmp_path: Path) -> None:
+    path = tmp_path / "prices.db"
+    path.touch()
+    with pytest.raises(PricesMissing):
+        PriceStore.open(path)
+    with PriceStore.open(path, write=True) as store:
+        assert store.digest() == PriceStore.open(path).digest()
+
+
+def test_doctor_fails_and_import_refuses_a_file_with_no_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ledger_with_mf_and_demat(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["prices", "import", str(EOD / "bhavcopy-sample.csv")]).exit_code == 0
+    path = tmp_path / "prices.db"
+    data = bytearray(path.read_bytes())
+    data[104] = 0
+    path.write_bytes(bytes(data))
+    doctor = runner.invoke(app, ["doctor", "--json"])
+    quotes = {c["name"]: c for c in json.loads(doctor.output)["checks"]}["quotes"]
+    assert quotes["status"] == "fail"
+    r = runner.invoke(app, ["prices", "import", str(EOD / "NAVAll-sample.txt")])
+    assert r.exit_code == 2 and "Traceback" not in r.output
+    assert path.read_bytes() == bytes(data)

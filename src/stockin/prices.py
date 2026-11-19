@@ -155,6 +155,20 @@ def hold_jumps(
     return file.model_copy(update={"quotes": tuple(keep)}), tuple(held)
 
 
+def keep_unlisted(
+    file: PriceFile, stored: Mapping[Isin, Quote], held: frozenset[Isin]
+) -> tuple[PriceFile, tuple[Quote, ...]]:
+    """A file cut short (a NAVAll download or copy that stops at a line end
+    still parses) lists fewer funds than the whole one. Importing it after
+    the whole file would replace the day and delete good prices (verifier 2
+    on #22). So a price already stored for this file's source and day, for a
+    fund you hold that the file does not list, is carried into the file and
+    returned to be reported. Accepting the file as it is skips this."""
+    listed = {q.isin for q in file.quotes}
+    kept = tuple(q for isin, q in sorted(stored.items()) if isin in held and isin not in listed)
+    return file.model_copy(update={"quotes": file.quotes + kept}), kept
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS quotes(
   isin TEXT NOT NULL, source TEXT NOT NULL, file_day TEXT NOT NULL,
@@ -216,6 +230,13 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     have written. Never guess at, or write into, such a file."""
     objects = conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall()
     if not objects:
+        # Only a file Stockin has not written to yet is empty: SQLite writes
+        # nothing until the first table exists, and every write here creates
+        # ours first. A file with bytes but no tables is a damaged header
+        # (one zeroed byte at offset 104 reads as an empty schema), not a
+        # new file to write into (verifier 2 on #22).
+        if path.stat().st_size > 0:
+            raise PricesDamaged(f"{path} is damaged (it has data but no tables)")
         return False
     # The file must hold exactly the table Stockin creates, constraints and
     # all: a table with our column names but no NOT NULL let a NULL date past

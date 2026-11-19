@@ -29,6 +29,7 @@ from .prices import (
     PriceStore,
     Quote,
     india_today,
+    keep_unlisted,
 )
 from .sources import cas, eod
 from .store import ImportReport, Ledger, LedgerMissing, LedgerWriter
@@ -325,6 +326,7 @@ class PricesReport(Value):
     unpriced: tuple[Isin, ...]  # held ISINs with no price at all
     failed: tuple[str, ...] = ()  # sources that could not be downloaded this time
     held: tuple[Jump, ...] = ()  # prices not stored: too far from the last one
+    unlisted: tuple[Quote, ...] = ()  # stored prices kept: the file leaves these funds out
 
 
 def _today() -> date:
@@ -340,16 +342,21 @@ def _held_isins() -> frozenset[Isin]:
 def _store_files(
     source: str, files: tuple[PriceFile, ...], held: frozenset[Isin], accept_jumps: bool
 ) -> PricesReport:
-    """Each file replaces what prices.db holds for its source and day. A
-    price more than JUMP_FACTOR away from the last earlier one is held back
-    unless `accept_jumps`."""
+    """Each file replaces what prices.db holds for its source and day. Unless
+    `accept_jumps`, a price more than JUMP_FACTOR away from the last earlier
+    one is held back, and a held fund's price already stored for that day
+    but left out of the file (a file cut short) is kept."""
     kept = changed = 0
     jumps: list[Jump] = []
+    unlisted: list[Quote] = []
     try:
         with PriceStore.open(prices_path(), write=True) as store:
             for whole in files:
                 file = eod.only(whole, held)
                 kept += len(file.quotes)
+                if not accept_jumps:
+                    file, carried = keep_unlisted(file, store.stored(file.source, file.day), held)
+                    unlisted.extend(carried)
                 n, found = store.take(file, accept_jumps)
                 changed += n
                 jumps.extend(found)
@@ -366,12 +373,13 @@ def _store_files(
         latest=None if latest is None else latest.isoformat(),
         unpriced=unpriced,
         held=tuple(jumps),
+        unlisted=tuple(unlisted),
     )
 
 
 def _print_prices(report: PricesReport, as_json: bool) -> None:
-    """Exit 1 when a price was held back: the rest is stored, but the run
-    needs the owner's eyes."""
+    """Exit 1 when a price was held back or kept: the rest is stored, but the
+    run needs the owner's eyes."""
     if as_json:
         typer.echo(report.model_dump_json(indent=2))
     else:
@@ -396,7 +404,18 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
                 "If it is real (a split, a bonus), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again."
             )
-    if report.held:
+        for q in report.unlisted:
+            typer.echo(
+                f"  KEPT: {q.isin} {_price_text(q)} on {q.on}, already saved for this day; "
+                "this file has no price for it"
+            )
+        if report.unlisted:
+            typer.echo(
+                "  the file may be cut short (a download or copy that stopped partway): "
+                "download it again. If it really leaves these funds out, "
+                "run again with --accept-jumps to store it exactly as it is."
+            )
+    if report.held or report.unlisted:
         raise typer.Exit(1)
 
 
@@ -404,7 +423,10 @@ AcceptJumps = Annotated[
     bool,
     typer.Option(
         "--accept-jumps",
-        help="Store prices even when more than double or less than half the last one.",
+        help=(
+            "Store each file exactly as it is: prices more than double or less than half "
+            "the last one, and no price for a fund the file leaves out."
+        ),
     ),
 ]
 
