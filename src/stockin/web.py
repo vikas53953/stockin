@@ -33,7 +33,7 @@ from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
 from .story import story
-from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, for_book, parse_percent
+from .thesis import MAX_TEXT, Rules, ThesesDamaged, Thesis, ThesisStore, for_book, parse_percent
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
@@ -178,7 +178,8 @@ def create_app(db: Path, port: int) -> FastAPI:
             return {}, str(exc)
 
     @app.get("/", response_class=HTMLResponse)
-    def home() -> Response:
+    def home(rules: str = "thesis") -> Response:
+        chosen: Rules = "limits" if rules == "limits" else "thesis"
         book = read_book()
         if book is None:
             return page("home.html", groups=(), summary=None, empty=True, story=None)
@@ -200,7 +201,8 @@ def create_app(db: Path, port: int) -> FastAPI:
             priced_on=days[-1].isoformat() if days else None,
             damaged=damaged,
             prices_hint=PRICES_HINT,
-            verdicts=for_book(book, priced, theses) if theses_damaged is None else (),
+            verdicts=for_book(book, priced, theses, chosen) if theses_damaged is None else (),
+            rules=chosen,
             theses=theses,
             theses_damaged=theses_damaged,
         )

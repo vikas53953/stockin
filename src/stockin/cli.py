@@ -24,7 +24,16 @@ from .money import Bps, Money, Value
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, Quote
 from .sources import cas, eod
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
-from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, Verdict, for_book, parse_percent
+from .thesis import (
+    MAX_TEXT,
+    Rules,
+    ThesesDamaged,
+    Thesis,
+    ThesisStore,
+    Verdict,
+    for_book,
+    parse_percent,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -530,21 +539,30 @@ def thesis_broken(
 
 
 class VerdictsView(Value):
+    rules: Rules
     priced_on: str | None
     verdicts: tuple[Verdict, ...]
 
 
 @app.command("verdicts")
-def verdicts_cmd(as_json: JsonFlag = False) -> None:
+def verdicts_cmd(
+    as_json: JsonFlag = False,
+    rules: Annotated[
+        Rules,
+        typer.Option(help="thesis: your reason and target. limits: the 25% line only."),
+    ] = "thesis",
+) -> None:
     """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
     with _open_ledger() as ledger:
         book = ledger.book()
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as store:
-        found = for_book(book, prices, store.all())
+        found = for_book(book, prices, store.all(), rules)
     days = [q.on for q in prices.quotes.values()]
-    view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
+    view = VerdictsView(
+        rules=rules, priced_on=max(days).isoformat() if days else None, verdicts=found
+    )
     if as_json:
         typer.echo(view.model_dump_json(indent=2))
         return

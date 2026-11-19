@@ -30,12 +30,17 @@
 {% elif verdicts %}
 <section class="panel" id="verdicts" aria-label="Your verdicts">
   <h2>Add, trim or exit? <span class="muted">Your own rules, applied to your own numbers.</span></h2>
+  <div class="rules" role="group" aria-label="Which rules decide">
+    <span class="muted">Preview, pick one:</span>
+    <a href="/?rules=thesis#verdicts" {% if rules == "thesis" %}aria-current="true"{% endif %}>Your thesis + limits</a>
+    <a href="/?rules=limits#verdicts" {% if rules == "limits" %}aria-current="true"{% endif %}>Limits only</a>
+  </div>
   <ul class="verdicts">
     {% for v in verdicts %}
     <li class="verdict call-{{ v.call }}">
       <span class="call">{{ {"exit": "✕ exit", "trim": "▼ trim", "add": "▲ add", "review": "? review", "hold": "• hold"}[v.call] }}</span>
-      <span class="because">{{ v.because }}{% if theses.get(v.isin) %}<br><span class="muted">Why you hold it: {{ theses[v.isin].why }}</span>{% endif %}</span>
-      <a class="edit" href="/thesis/{{ v.isin }}">{% if theses.get(v.isin) %}Edit thesis{% else %}Write thesis{% endif %}</a>
+      <span class="because">{{ v.because }}{% if rules == "thesis" and theses.get(v.isin) %}<br><span class="muted">Why you hold it: {{ theses[v.isin].why }}</span>{% endif %}</span>
+      {% if rules == "thesis" %}<a class="edit" href="/thesis/{{ v.isin }}">{% if theses.get(v.isin) %}Edit thesis{% else %}Write thesis{% endif %}</a>{% endif %}
     </li>
     {% endfor %}
   </ul>

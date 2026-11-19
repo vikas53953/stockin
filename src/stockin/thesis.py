@@ -38,6 +38,10 @@ from .money import Bps, Value
 from .prices import PriceBook
 
 Call = Literal["add", "trim", "exit", "hold", "review"]
+Rules = Literal["thesis", "limits"]
+"""Two ways to reach a verdict, shown side by side until the owner picks one:
+`thesis` uses what you wrote (reason, target, broken); `limits` uses only the
+fixed 25% line and needs no writing, so it can say trim but never add or exit."""
 
 BAND = Bps(500)
 """How far from your target weight a holding may drift before the verdict
@@ -125,21 +129,45 @@ def verdict(
     return out("hold", f"Your thesis stands and {name} is {p(w)} of {money}.")
 
 
+def limit_verdict(
+    isin: Isin, name: str, weight: Weight | None, money: str = "your money"
+) -> Verdict:
+    """Fixed limits only: no price says review; above the 25% line says
+    trim; otherwise hold. Nothing you wrote is used."""
+    w = weight.bps if weight else None
+
+    def out(call: Call, because: str) -> Verdict:
+        return Verdict(isin=isin, name=name, call=call, because=because, weight=w, target=None)
+
+    if w is None:
+        return out("review", f"{name} has no price yet, so its weight is unknown.")
+    now, line = pct(tenths_of(w, 10_000)), pct(tenths_of(CONCENTRATED_ONE, 10_000))
+    if w > CONCENTRATED_ONE:
+        return out("trim", f"{name} is {now} of {money}, above the {line} limit for one holding.")
+    return out("hold", f"{name} is {now} of {money}, within the {line} limit for one holding.")
+
+
 def verdicts(
     names: dict[Isin, str],
     weights: tuple[Weight, ...],
     theses: dict[Isin, Thesis],
     money: str = "your money",
+    rules: Rules = "thesis",
 ) -> tuple[Verdict, ...]:
     """One verdict per held ISIN, the ones that ask for action first."""
     by = {w.isin: w for w in weights}
     order = {"exit": 0, "trim": 1, "add": 2, "review": 3, "hold": 4}
-    found = [verdict(i, n, by.get(i), theses.get(i), money) for i, n in names.items()]
+    if rules == "limits":
+        found = [limit_verdict(i, n, by.get(i), money) for i, n in names.items()]
+    else:
+        found = [verdict(i, n, by.get(i), theses.get(i), money) for i, n in names.items()]
     found.sort(key=lambda v: (order[v.call], -(v.weight or 0), v.isin))
     return tuple(found)
 
 
-def for_book(book: Book, prices: PriceBook, theses: dict[Isin, Thesis]) -> tuple[Verdict, ...]:
+def for_book(
+    book: Book, prices: PriceBook, theses: dict[Isin, Thesis], rules: Rules = "thesis"
+) -> tuple[Verdict, ...]:
     """A verdict for every ISIN you hold, from the same weights the map uses."""
     ws, _, unpriced = weights(book, prices)
     names: dict[Isin, str] = {}
@@ -148,7 +176,7 @@ def for_book(book: Book, prices: PriceBook, theses: dict[Isin, Thesis]) -> tuple
         names[pos.isin] = short_name(inst.name) if inst else pos.isin
     # weights are shares of what has a price; say so while anything has none
     money = "your priced money" if unpriced and ws else "your money"
-    return verdicts(names, ws, theses, money)
+    return verdicts(names, ws, theses, money, rules)
 
 
 _SCHEMA = """

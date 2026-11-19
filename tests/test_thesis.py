@@ -307,3 +307,36 @@ def test_web_says_a_damaged_theses_file_and_still_shows_holdings(
     assert r.status_code == 200
     assert "Your theses could not be read" in r.text and "INFOSYS LIMITED" in r.text
     assert "could not be read" in web.get(f"/thesis/{INFY}").text
+
+
+# ------------------------------------------------- limits only (option B)
+
+
+@given(weights_, theses_)
+def test_limits_only_uses_the_25_percent_line_and_nothing_you_wrote(
+    w: int | None, thesis: Thesis | None
+) -> None:
+    names = {INFY: "Infosys"}
+    ws = (_w(INFY, w),) if w is not None else ()
+    (v,) = verdicts(names, ws, {INFY: thesis} if thesis else {}, rules="limits")
+    expected = "review" if w is None else ("trim" if w > CONCENTRATED_ONE else "hold")
+    assert v.call == expected and v.target is None
+    if w is not None:
+        assert _p(w) in v.because and _p(CONCENTRATED_ONE) in v.because
+
+
+def test_cli_and_page_show_limits_only_without_any_thesis(data: Path) -> None:
+    r = runner.invoke(cli, ["verdicts", "--json", "--rules", "limits"])
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["rules"] == "limits"
+    calls = {v["isin"]: v["call"] for v in out["verdicts"]}
+    assert calls[INFY] == "trim"  # the only priced holding: 100% of priced money
+    assert calls[HDFC] == "review"  # no price
+    assert not (data / "theses.db").exists() or not ThesisStore.open(data / "theses.db").all()
+
+    web = TestClient(create_app(data / "ledger.db", PORT), base_url=HOST)
+    page = web.get("/?rules=limits").text
+    assert "▼ trim" in page and "Write thesis" not in page and "Why you hold it" not in page
+    assert 'href="/?rules=limits#verdicts" aria-current="true"' in page
+    assert "Write thesis" in web.get("/").text
