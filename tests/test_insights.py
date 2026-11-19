@@ -717,3 +717,34 @@ def _paise(rupees_: object) -> int:
     from decimal import Decimal
 
     return int(Decimal(str(rupees_)) * 100)
+
+
+@pytest.mark.parametrize(
+    "stmt",
+    [
+        "UPDATE quotes SET on_date='2026-11-C7'",
+        "UPDATE quotes SET source='bhavhopy'",
+        "UPDATE quotes SET micro_rupees='abc'",
+    ],
+    ids=["bad-date", "bad-source", "text-price"],
+)
+def test_insights_says_a_damaged_prices_db_is_damaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stmt: str
+) -> None:
+    """The #23 verifier: `stockin insights` raised a traceback on a prices.db
+    with a damaged row. It now gives the damaged-prices message, exit 2."""
+    import sqlite3
+
+    runner = CliRunner()
+    fixtures = Path(__file__).parent / "fixtures"
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
+    for name in ("mf-2026-01.json", "demat-2026-02.json"):
+        assert runner.invoke(app, ["import", "cas", str(fixtures / "cas" / name)]).exit_code == 0
+    eod_file = fixtures / "eod" / "bhavcopy-sample.csv"
+    assert runner.invoke(app, ["prices", "import", str(eod_file)]).exit_code in (0, 1)
+    with sqlite3.connect(tmp_path / "prices.db") as c:
+        c.execute(stmt)
+    r = runner.invoke(app, ["insights"])
+    assert r.exit_code == 2, r.output
+    assert "damaged" in r.output, r.output
+    assert isinstance(r.exception, SystemExit)  # a clean exit, not a traceback
