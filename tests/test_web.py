@@ -51,7 +51,7 @@ def test_upload_shows_holdings_and_reconcile(client: TestClient, tmp_path: Path)
     home = client.get("/").text
     assert "INFOSYS LIMITED" in home and "TATA CONSULTANCY" not in home
     assert "13,010.60" in home and "unknown" in home
-    assert "reconcile OK" in home
+    assert "✓ reconciled" in home
 
     rec = client.get("/reconcile").text
     assert "OK: no mismatches" in rec
