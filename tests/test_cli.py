@@ -20,6 +20,7 @@ def test_doctor_fresh_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         "data_dir": "ok",
         "ledger": "warn",
         "quotes": "warn",
+        "assets": "warn",
         "telegram": "warn",
     }
     assert list(tmp_path.iterdir()) == []  # doctor is read-only

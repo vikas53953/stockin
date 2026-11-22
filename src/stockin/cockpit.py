@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .insights import Insight, Weight, pct, rupees, tenths_of
+from .insights import CONCENTRATED_ONE, Insight, Weight, pct, rupees, tenths_of
 from .money import Money
 from .story import GROUP_SLOT
 from .thesis import BAND, Verdict
@@ -52,6 +52,7 @@ class Decide:
     weight: float | None  # percent; None when the holding has no price
     target: float | None  # percent
     band: float  # percent either side of the target
+    cap: float  # percent: the one-holding rule-of-thumb line, from insights
     weight_text: str
     target_text: str
 
@@ -139,6 +140,7 @@ def decide(
             weight=_bps_pct(v.weight) if v.weight is not None else None,
             target=_bps_pct(v.target) if v.target is not None else None,
             band=_bps_pct(BAND),
+            cap=_bps_pct(CONCENTRATED_ONE),
             # the sentence's own text; an exit sentence prints no weight
             weight_text=v.weight_text
             or (pct(tenths_of(v.weight, 10_000)) if v.weight is not None else ""),

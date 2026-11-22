@@ -20,13 +20,31 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
+from pydantic import TypeAdapter, ValidationError
 
 from . import __version__, notify
 from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
-from .insights import Insight, all_insights
-from .money import Bps, Money, Price, Value
+from .insights import Insight, all_insights, tenths_of
+from .money import Bps, Money, Price, Qty, Value, percent
+from .networth import (
+    KIND_NAME,
+    KINDS,
+    AssetsDamaged,
+    AssetStore,
+    Closed,
+    Entry,
+    Fd,
+    Gold,
+    Kind,
+    Stated,
+    current,
+    entry_value,
+    label_key,
+    networth,
+    parse_targets,
+)
 from .prices import (
     Jump,
     PriceBook,
@@ -110,6 +128,7 @@ def diagnose(root: Path) -> Doctor:
         checks.append(DoctorCheck(name="data_dir", status="ok", detail=str(root)))
     checks.append(_ledger_check(root / "ledger.db"))
     checks.append(_quotes_check(root / "prices.db"))
+    checks.append(_assets_check(root / "assets.db"))
     checks.append(_telegram_check(root))
     return Doctor(
         version=__version__,
@@ -155,7 +174,33 @@ def _quotes_check(path: Path) -> DoctorCheck:
     return DoctorCheck(name="quotes", status="ok", detail=f"{n} end-of-day prices, latest {latest}")
 
 
+def _assets_check(path: Path) -> DoctorCheck:
+    """Read-only: assets.db is opened with mode=ro and never created here."""
+    try:
+        with AssetStore.open(path, readonly=True) as store:
+            n = len(store.entries())
+    except FileNotFoundError:
+        return DoctorCheck(
+            name="assets",
+            status="warn",
+            detail="no bank, FD, EPF, gold or loan entries yet",
+            hint="add one with: stockin asset add bank --value 50000",
+        )
+    except AssetsDamaged as exc:
+        return DoctorCheck(
+            name="assets",
+            status="fail",
+            detail=str(exc),
+            hint="copy assets.db somewhere safe first: it is the only copy of what you typed",
+        )
+    return DoctorCheck(name="assets", status="ok", detail=f"{n} entries in {path}")
+
+
 JsonFlag = Annotated[bool, typer.Option("--json", help="Print machine-readable JSON.")]
+_ENTRY_JSON: TypeAdapter[Entry] = TypeAdapter(Entry)
+_ENTRIES_JSON: TypeAdapter[tuple[Stated | Fd | Gold, ...]] = TypeAdapter(
+    tuple[Stated | Fd | Gold, ...]
+)
 
 
 @app.command()
@@ -661,6 +706,274 @@ def verdicts_cmd(as_json: JsonFlag = False) -> None:
     typer.echo("(your own rules applied to your own numbers; not advice)")
 
 
+asset_app = typer.Typer(
+    no_args_is_help=True, help="What the CAS does not cover: bank, FD, EPF, PPF, NPS, gold, loans."
+)
+app.add_typer(asset_app, name="asset")
+target_app = typer.Typer(no_args_is_help=True, help="The asset mix you aim for.")
+app.add_typer(target_app, name="target")
+
+
+def assets_path() -> Path:
+    return data_dir() / "assets.db"
+
+
+_ASSETS_HINT = "copy assets.db somewhere safe first: it is the only copy of what you typed"
+
+
+@contextmanager
+def _open_assets() -> Generator[AssetStore]:
+    """assets.db for the length of a command. Damage found on open, on read
+    or on write is said with a hint, never a traceback."""
+    try:
+        with AssetStore.open(assets_path()) as store:
+            yield store
+    except AssetsDamaged as exc:
+        raise _fail(str(exc), _ASSETS_HINT) from None
+
+
+def _day(text: str | None, what: str) -> date:
+    if text is None:
+        return _today()
+    try:
+        day = date.fromisoformat(text.strip())
+    except ValueError:
+        raise _fail(f"{what} {text!r} is not a date like 2026-10-31") from None
+    if day > _today():
+        raise _fail(f"{what} {day} is in the future")
+    return day
+
+
+def _rupees(text: str | None, what: str) -> Money:
+    if text is None:
+        raise _fail(f"{what} is required for this kind")
+    try:
+        return Money.rupees(text)
+    except ValueError as exc:
+        raise _fail(f"{what}: {exc}") from None
+
+
+def _kind(text: str) -> Kind:
+    k = text.strip().lower()
+    for kind in KINDS:
+        if k == kind:
+            return kind
+    raise _fail(f"{text!r} is not a kind", f"kinds: {', '.join(KINDS)}")
+
+
+_FOR: dict[str, tuple[str, ...]] = {
+    "value": ("bank", "epf", "ppf", "nps", "property", "other", "loan"),
+    "principal": ("fd",),
+    "rate": ("fd",),
+    "start": ("fd",),
+    "months": ("fd",),
+    "grams": ("gold",),
+    "rate_per_gram": ("gold",),
+}
+
+
+@asset_app.command("add")
+def asset_add(
+    kind: Annotated[str, typer.Argument(help=f"One of: {', '.join(KINDS)}.")],
+    label: Annotated[
+        str | None, typer.Option(help="Your name for it, e.g. 'SBI savings'. Defaults to the kind.")
+    ] = None,
+    value: Annotated[
+        str | None,
+        typer.Option(help="Balance in rupees (bank, EPF, PPF, NPS, property, other, loan)."),
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="Date of the balance, YYYY-MM-DD. Default today.")
+    ] = None,
+    principal: Annotated[str | None, typer.Option(help="FD: amount deposited, in rupees.")] = None,
+    rate: Annotated[str | None, typer.Option(help="FD: interest rate a year, e.g. 7.1.")] = None,
+    start: Annotated[str | None, typer.Option(help="FD: date it was opened, YYYY-MM-DD.")] = None,
+    months: Annotated[int | None, typer.Option(help="FD: term in months.")] = None,
+    grams: Annotated[str | None, typer.Option(help="Gold: grams you hold in total.")] = None,
+    rate_per_gram: Annotated[
+        str | None, typer.Option("--rate-per-gram", help="Gold: rupees a gram.")
+    ] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Record a balance (or an FD, or gold) as of a day. Adding it again for a
+    later day keeps the history; the same day again corrects it."""
+    k = _kind(kind)
+    given = {
+        "value": value,
+        "principal": principal,
+        "rate": rate,
+        "start": start,
+        "months": months,
+        "grams": grams,
+        "rate_per_gram": rate_per_gram,
+    }
+    wrong = [n for n, v in given.items() if v is not None and k not in _FOR[n]]
+    if wrong:
+        flags = ", ".join("--" + n.replace("_", "-") for n in wrong)
+        raise _fail(f"{flags} do{'es' if len(wrong) == 1 else ''} not apply to {k}")
+    name = (label if label is not None else KIND_NAME[k]).strip()
+    day = _day(as_of, "--as-of")
+    try:
+        entry: Entry
+        if k == "fd":
+            if rate is None or start is None or months is None:
+                raise _fail("an FD needs --principal, --rate, --start and --months")
+            opened = _day(start, "--start")
+            entry = Fd(
+                label=name,
+                # an FD exists from the day it opened, so it can be closed at
+                # maturity without the entry being dated later than that
+                as_of=day if as_of is not None else opened,
+                principal=_rupees(principal, "--principal"),
+                rate=percent(rate),
+                start=opened,
+                months=months,
+            )
+        elif k == "gold":
+            if grams is None or rate_per_gram is None:
+                raise _fail("gold needs --grams and --rate-per-gram")
+            entry = Gold(
+                label=name, as_of=day, grams=Qty.parse(grams), rate=Price.rupees(rate_per_gram)
+            )
+        else:
+            entry = Stated(kind=k, label=name, as_of=day, amount=_rupees(value, "--value"))
+    except ValidationError as exc:
+        raise _fail(_first_error(exc)) from None
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+    with _open_assets() as store:
+        store.put(entry)
+    if as_json:
+        typer.echo(_ENTRY_JSON.dump_json(entry, indent=2).decode())
+        return
+    shown = entry_value(entry, _today()) if not isinstance(entry, Closed) else Money(paise=0)
+    typer.echo(f"saved {KIND_NAME[k]} '{entry.label}' as of {entry.as_of}: ₹{shown} today")
+
+
+def _first_error(exc: ValidationError) -> str:
+    err = exc.errors()[0]
+    where = ".".join(str(p) for p in err["loc"])
+    return f"{where}: {err['msg']}" if where else err["msg"]
+
+
+@asset_app.command("close")
+def asset_close(
+    kind: Annotated[str, typer.Argument(help=f"One of: {', '.join(KINDS)}.")],
+    label: Annotated[str | None, typer.Option(help="The name you gave it.")] = None,
+    on: Annotated[
+        str | None, typer.Option(help="Date it ended, YYYY-MM-DD. Default today.")
+    ] = None,
+) -> None:
+    """You no longer hold it (paid out, repaid, sold). Its history is kept."""
+    k = _kind(kind)
+    name = (label if label is not None else KIND_NAME[k]).strip()
+    day = _day(on, "--on")
+    with _open_assets() as store:
+        mine = [e for e in store.entries() if e.kind == k and label_key(e.label) == label_key(name)]
+        if not mine:
+            raise _fail(f"no {k} called '{name}'", "see them with: stockin asset list")
+        latest = max(e.as_of for e in mine)
+        if day < latest:
+            raise _fail(
+                f"{KIND_NAME[k]} '{name}' has an entry dated {latest}, after {day}",
+                f"close it on or after that day: --on {latest}",
+            )
+        store.put(Closed(kind=k, label=name, as_of=day))
+    typer.echo(f"closed {KIND_NAME[k]} '{name}' from {day}; its history is kept")
+
+
+@asset_app.command("list")
+def asset_list(as_json: JsonFlag = False) -> None:
+    """Every entry you hold today, with its value today."""
+    today = _today()
+    with _open_assets() as store:
+        held = current(store.entries(), today)
+    if as_json:
+        typer.echo(_ENTRIES_JSON.dump_json(held, indent=2).decode())
+        return
+    if not held:
+        typer.echo("nothing yet: add one with stockin asset add KIND ...")
+        return
+    for e in held:
+        typer.echo(
+            f"{KIND_NAME[e.kind]:<9} {e.label:<30} {'₹' + str(entry_value(e, today)):>19}"
+            f"  as of {e.as_of}"
+        )
+
+
+@target_app.command("set")
+def target_set(
+    pairs: Annotated[
+        list[str], typer.Argument(help="CLASS=PERCENT pairs adding to 100, e.g. equity=60 debt=25.")
+    ],
+) -> None:
+    """Set the mix you aim for. Classes: equity, debt, gold, cash, retirement,
+    real_estate, other. Replaces any mix set before."""
+    try:
+        targets = parse_targets(pairs)
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+    with _open_assets() as store:
+        store.set_targets(targets)
+    typer.echo("target mix saved: " + ", ".join(f"{b} {_bps(v)}" for b, v in targets.items()))
+
+
+@target_app.command("clear")
+def target_clear() -> None:
+    """Forget the target mix."""
+    with _open_assets() as store:
+        store.set_targets({})
+    typer.echo("target mix cleared")
+
+
+def _bps(bps: int) -> str:
+    """Exact, no float: 6000 -> '60%', 1250 -> '12.5%', 1234 -> '12.34%'."""
+    whole, frac = divmod(bps, 100)
+    return f"{whole}.{frac:02d}".rstrip("0").rstrip(".") + "%"
+
+
+def _drift(bps: int, target: int) -> str:
+    """Shown weight minus shown target, in the tenths the notes decide on, so
+    the column never contradicts the sentence under it: 2504 against 2000 is
+    '+5.0', not '+5.04'. A gap of exactly whole points drops the '.0'."""
+    gap = tenths_of(bps, 10_000) - tenths_of(target, 10_000)
+    whole, frac = divmod(abs(gap), 10)
+    exact = (bps - target) % 100 == 0
+    return ("+" if gap >= 0 else "-") + (str(whole) if exact else f"{whole}.{frac}")
+
+
+def _optional_book() -> Book | None:
+    try:
+        with Ledger.open(ledger_path()) as ledger:
+            return ledger.book()
+    except LedgerMissing:
+        return None
+    except LedgerOutdated as exc:
+        raise _fail(str(exc), REBUILD_HINT) from None
+
+
+@app.command("networth")
+def networth_cmd(as_json: JsonFlag = False) -> None:
+    """Everything you own minus loans, split by asset class, with drift from your target mix."""
+    book = _optional_book()
+    held = frozenset(h.isin for h in book.holdings()) if book else frozenset[Isin]()
+    prices = (_price_book(held) if held else None) or PriceBook(quotes={})
+    with _open_assets() as store:
+        entries, targets = store.entries(), store.targets()
+    nw = networth(book, prices, entries, targets, _today())
+    if as_json:
+        typer.echo(nw.model_dump_json(indent=2))
+        return
+    typer.echo(f"Net worth ₹{nw.total}  (own ₹{nw.owned}, owe ₹{nw.owed})  on {nw.on}")
+    for s in nw.slices:
+        aim = ""
+        if s.target is not None and s.drift is not None:
+            aim = f"  target {_bps(s.target)}  drift {_drift(s.bps, s.target)} pts"
+        typer.echo(f"  {s.name:<12} {'₹' + str(s.value):>19}  {_bps(s.bps):>7}{aim}")
+    for n in nw.notes:
+        typer.echo(f"- {n.text}")
+
+
 @app.command("reconcile")
 def reconcile_cmd(as_json: JsonFlag = False) -> None:
     """Check every statement balance against the transactions. Exit 1 on any mismatch."""
@@ -928,8 +1241,8 @@ def _unchecked(symbol: str, q: live.LiveQuote, close: Quote | None, today: date)
         )
     if live.beyond_band(close.price, q.price):
         return (
-            f"{symbol}: live \u20b9{_rupees(q.price)} is more than {live.BAND_PERCENT}% from "
-            f"the close of \u20b9{_rupees(close.price)} on {close.on} (a split, a bonus "
+            f"{symbol}: live \u20b9{_price_rupees(q.price)} is more than {live.BAND_PERCENT}% from "
+            f"the close of \u20b9{_price_rupees(close.price)} on {close.on} (a split, a bonus "
             "or a bad quote?); the close stands"
         )
     return None
@@ -952,9 +1265,8 @@ def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
         if close is not None and close.source == "bhavcopy" and close.on == today:
             # the exchange's own close beats the day's last live trade
             # (prices._RANK), so no quote is asked for: this is the price in use
-            settled = (
-                f"today's official close of \u20b9{_rupees(close.price)} is in; verdicts use it"
-            )
+            closed = _price_rupees(close.price)
+            settled = f"today's official close of \u20b9{closed} is in; verdicts use it"
             fallbacks.append(Fallback(isin=isin, reason=settled))
             continue
         wanted.append(isin)
@@ -1011,12 +1323,14 @@ def _print_live(view: LiveView, book: Book) -> None:
     for q in view.live:
         inst = book.instrument(q.isin)
         name = inst.name if inst else q.isin
-        typer.echo(f"  LIVE  {q.symbol:<12} \u20b9{_rupees(q.price)}  at {q.at:%H:%M}  {name}")
+        typer.echo(
+            f"  LIVE  {q.symbol:<12} \u20b9{_price_rupees(q.price)}  at {q.at:%H:%M}  {name}"
+        )
     for f in view.end_of_day:
         typer.echo(f"  CLOSE {f.isin}  kept the end-of-day price: {f.reason}")
 
 
-def _rupees(p: Price) -> str:
+def _price_rupees(p: Price) -> str:
     whole, frac = divmod(p.micro_rupees, 1_000_000)
     return f"{whole:,}.{frac // 10_000:02d}"
 

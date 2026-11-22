@@ -97,6 +97,39 @@ jobs:
           if ($home_page.StatusCode -ne 200 -or $home_page.Content -notmatch "What to decide") { Write-Error "home page"; exit 1 }
           if ($holding.StatusCode -ne 200 -or $holding.Content -notmatch "Quality compounder") { Write-Error "holding page"; exit 1 }
           "home and holding page: 200, decide tile and thesis shown"
+      - name: Sprint 2 on Windows (assets, target mix, net worth)
+        run: |
+          $env:PATH = "$(uv tool dir --bin);$env:PATH"
+          $env:STOCKIN_DATA = "$HOME\stockin-data"
+          stockin asset add bank --label "SBI savings" --value 250000 --as-of 2026-11-01
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin asset add epf --value 845000 --as-of 2026-10-31
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin asset add fd --label "HDFC FD" --principal 200000 --rate 7.1 --start 2026-04-01 --months 12
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin asset add gold --grams 20 --rate-per-gram 7650
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin asset add loan --label "Home loan" --value 1200000
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin target set equity=60 debt=20 gold=10 cash=10
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin asset list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin networth
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nw = stockin networth --json | Out-String | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bps = ($nw.slices | Measure-Object -Property bps -Sum).Sum
+          if ($nw.total.paise -ne ($nw.owned.paise - $nw.owed.paise) -or $bps -ne 10000) { Write-Error "net worth does not add up"; exit 1 }
+          stockin asset close loan --label "home LOAN"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ErrorActionPreference = "Continue"  # PowerShell 5.1 turns a native command's stderr into an error record
+          stockin asset add bank --value 1.234 2>&1 | Out-String
+          $ErrorActionPreference = "Stop"
+          if ($LASTEXITCODE -ne 2) { Write-Error "a 3-decimal amount was not refused"; exit 1 }
+          stockin doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "net worth adds up: total = owned - owed, mix = 100%"
       - name: Sprint 3 on Windows (alerts)
         run: |
           $env:PATH = "$(uv tool dir --bin);$env:PATH"

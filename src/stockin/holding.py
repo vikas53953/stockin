@@ -45,6 +45,8 @@ class LotRow:
     units: str
     cost: str | None
     long_term: str  # "long-term since 3 Jan 2026", "turns long-term on ...", ...
+    held: float | None = None  # percent of the way from purchase to long-term, 0..100
+    days_left: int | None = None  # days until long-term; 0 once it is
 
 
 @dataclass(frozen=True)
@@ -162,13 +164,29 @@ def holding_page(
                 lots.append(LotRow(label, None, str(lot.qty), None, "date unknown"))
                 continue
             lt = long_term_from(lot.acquired_on)
+            done: float | None = None
+            left: int | None = None
             if not equity:
                 when = "not equity: different tax rules"
             elif lt <= today:
                 when = f"long-term since {_day(lt)}"
+                done, left = 100.0, 0
             else:
-                when = f"turns long-term on {_day(lt)}, in {(lt - today).days} days"
-            lots.append(LotRow(label, _day(lot.acquired_on), str(lot.qty), rupees(lot.cost), when))
+                left = (lt - today).days
+                when = f"turns long-term on {_day(lt)}, in {left} days"
+                span = (lt - lot.acquired_on).days
+                done = max(0.0, min(100.0, (span - left) / span * 100)) if span > 0 else 0.0
+            lots.append(
+                LotRow(
+                    label,
+                    _day(lot.acquired_on),
+                    str(lot.qty),
+                    rupees(lot.cost),
+                    when,
+                    held=done,
+                    days_left=left,
+                )
+            )
     note = (
         "Units bought before your statements start have no known date or cost, "
         "so no tax date is claimed for them."

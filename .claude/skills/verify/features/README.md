@@ -18,10 +18,9 @@ Each feature file has an H1 and one paragraph, followed by four H2s: `Sub-featur
 |---|---|
 | [Doctor](./doctor.md) | Working |
 | [Import a CAS and list holdings](./import-cas.md) | Working |
-| Add a manual asset (`stockin asset add`) | Not built yet |
+| [Net worth: assets, target mix, `stockin networth`](./networth.md) | Working (CLI); web page in Sprint 2 PR 2 |
 | [Reconcile](./reconcile.md) | Working |
 | [Local web app](./web.md) (`stockin web`) | Working |
-| Net worth (`stockin networth`) | Not built yet |
 | Thesis and review (`stockin thesis add`, `stockin review`) | Not built yet |
 | [Alerts](./alerts.md) (`stockin alerts check/list/connect/send/test`) | Working |
 | [Live prices and watch](./live.md) (`stockin prices live`, `stockin watch`) | Working |

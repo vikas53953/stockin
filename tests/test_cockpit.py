@@ -8,6 +8,7 @@ tiles on data built the way an import builds it.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import cas_fixtures as fx
@@ -15,9 +16,10 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 from test_insights import STOCKS, _five_holdings, _prices  # type: ignore[attr-defined]
 
-from stockin.cockpit import MAX_DECIDE, cockpit, decide, flows, known, mix
-from stockin.facts import parse_isin
+from stockin.cockpit import MAX_DECIDE, Cockpit, cockpit, decide, flows, known, mix
+from stockin.facts import Isin, parse_isin
 from stockin.insights import (
+    CONCENTRATED_ONE,
     Insight,
     Weight,
     all_insights,
@@ -189,3 +191,90 @@ def test_an_exit_with_no_price_still_reaches_the_decide_tile() -> None:
     assert "growth stalls" in view.decide[0].because
     assert view.unpriced == ((hdfc, "HDFC BANK"),)
     assert view.review == ((parse_isin("INE002A01018"), "RELIANCE"),)
+
+
+def test_an_exit_sorts_first_and_every_extra_call_keeps_its_name_and_link() -> None:
+    on = date(2026, 11, 22)
+    names = {
+        parse_isin("INE009A01021"): "INFOSYS",
+        parse_isin("INE040A01034"): "HDFC BANK",
+        parse_isin("INE002A01018"): "RELIANCE",
+        parse_isin("INE062A01020"): "SBI",
+        parse_isin("INE467B01029"): "TCS",
+        parse_isin("INF204KB14I2"): "NIFTY BEES",
+    }
+    isins = list(names)
+    total = sum(3000 - 100 * n for n in range(len(isins)))
+    ws = tuple(
+        Weight(
+            isin=i,
+            name=names[i],
+            group="Stocks",
+            value=Money(paise=3000 - 100 * n),
+            bps=Money(paise=3000 - 100 * n).share_of(Money(paise=total)),
+            cost=None,
+        )
+        for n, i in enumerate(isins)
+    )
+    vs = []
+    for n, w in enumerate(ws):
+        broken = n == len(ws) - 1  # the smallest holding is the exit
+        t = Thesis(isin=w.isin, why="w", target=Bps(500), broken=broken, written=on)
+        vs.append(verdict(w.isin, w.name, w, t))
+    view = cockpit((), ws, tuple(vs), frozenset(names))
+    assert view.decide[0].call == "exit" and view.decide[0].isin == isins[-1]
+    assert view.decide[0].cap == CONCENTRATED_ONE / 100
+    shown = [(d.isin, d.name) for d in view.decide] + [(i, n) for i, n, _ in view.more_decide]
+    assert sorted(shown) == sorted(names.items())
+    assert all(c == next(v.call for v in vs if v.isin == i) for i, _, c in view.more_decide)
+
+
+def _six_calls() -> tuple[dict[Isin, str], Cockpit]:
+    on = date(2026, 11, 22)
+    names = {
+        parse_isin("INE009A01021"): "INFOSYS",
+        parse_isin("INE040A01034"): "HDFC BANK",
+        parse_isin("INE002A01018"): "RELIANCE",
+        parse_isin("INE062A01020"): "SBI",
+        parse_isin("INE467B01029"): "TCS",
+        parse_isin("INF204KB14I2"): "NIFTY BEES",
+    }
+    total = sum(3000 - 100 * n for n in range(len(names)))
+    ws = tuple(
+        Weight(
+            isin=i,
+            name=names[i],
+            group="Stocks",
+            value=Money(paise=3000 - 100 * n),
+            bps=Money(paise=3000 - 100 * n).share_of(Money(paise=total)),
+            cost=None,
+        )
+        for n, i in enumerate(names)
+    )
+    vs = tuple(
+        verdict(w.isin, w.name, w, Thesis(isin=w.isin, why="w", target=Bps(500), written=on))
+        for w in ws
+    )
+    return names, cockpit((), ws, vs, frozenset(names))
+
+
+def test_the_page_draws_every_call_with_its_own_name_link_and_rule_line() -> None:
+    from jinja2 import Environment, PackageLoader, select_autoescape
+
+    env = Environment(loader=PackageLoader("stockin", "templates"), autoescape=select_autoescape())
+    names, view = _six_calls()
+    story = {"holdings": 6, "total": None, "priced": 6, "changed": None, "tiles": (), "cards": ()}
+    page = env.get_template("home.html").render(
+        empty=False, cockpit=view, story=story, ok=True, groups=(), priced_on="2026-11-20"
+    )
+    decide = page.split('id="verdicts"')[1].split("</section>")[0]
+    rows = re.findall(r'class="decide-name" href="/holding/([A-Z0-9]{12})">([^<]+)<', decide)
+    chips = re.findall(
+        r'class="chip-link" href="/holding/([A-Z0-9]{12})">'
+        r'<span class="pill[^"]*">[^<]*</span> ([^<]+)</a>',
+        decide,
+    )
+    assert len(rows) == MAX_DECIDE and len(chips) == len(names) - MAX_DECIDE
+    assert sorted(rows + chips) == sorted(names.items())
+    line = f"dashed line {CONCENTRATED_ONE / 100:.0f}%"
+    assert decide.count(line) == MAX_DECIDE
