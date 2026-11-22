@@ -14,7 +14,7 @@ import random
 import tempfile
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, getcontext
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,25 @@ from hypothesis import strategies as st
 
 from stockin.book import Book, reconcile
 from stockin.facts import Buy, Isin, Sell, Txn
-from stockin.money import Money, Price, Qty, div_half_even
+from stockin.money import Bps, Money, Price, Qty, div_half_even
+from stockin.networth import (
+    BUCKETS,
+    KIND_BUCKET,
+    AssetStore,
+    Closed,
+    Entry,
+    Fd,
+    Gold,
+    Stated,
+    _add_months,  # pyright: ignore[reportPrivateUsage]
+    current,
+    entry_value,
+    fd_maturity,
+    fd_value,
+    label_key,
+    networth,
+    shares,
+)
 from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, is_jump, left_out
 from stockin.sources import cas, eod
 from stockin.store import Ledger, LedgerWriter
@@ -630,3 +648,158 @@ def test_no_held_price_leaves_a_day_unreported_and_the_earlier_file_puts_it_back
         assert all(q.isin not in after for q in gone)
         a.take(first, accept_jumps=True)
         assert a.digest() == want
+
+
+# ---------------------------------------------------------------- net worth
+# Sprint 2: the entries you type (bank, FD, EPF, gold, loans), the store that
+# keeps them, and the picture built from them.
+
+
+_NW_DAY0 = date(2024, 1, 1)
+nw_days = st.integers(0, 1_400).map(lambda n: _NW_DAY0 + timedelta(days=n))
+nw_labels = st.sampled_from(["SBI", "sbi", "HDFC  FD", "hdfc fd", "Home", "Gold", "PPF"])
+nw_paise = st.integers(0, 10**12)
+
+
+@st.composite
+def fds(draw: st.DrawFn) -> Fd:
+    return Fd(
+        label=draw(nw_labels),
+        as_of=draw(nw_days),
+        principal=Money(paise=draw(st.integers(1, 10**12))),
+        rate=Bps(draw(st.integers(0, 5_000))),
+        start=draw(nw_days),
+        months=draw(st.integers(1, 120)),
+    )
+
+
+def entries() -> st.SearchStrategy[Entry]:
+    stated = st.builds(
+        Stated,
+        kind=st.sampled_from(["bank", "epf", "ppf", "nps", "property", "other", "loan"]),
+        label=nw_labels,
+        as_of=nw_days,
+        amount=nw_paise.map(lambda p: Money(paise=p)),
+    )
+    gold = st.builds(
+        Gold,
+        label=nw_labels,
+        as_of=nw_days,
+        grams=st.integers(0, 10**9).map(lambda m: Qty(micros=m)),
+        rate=st.integers(1, 10**10).map(lambda m: Price(micro_rupees=m)),
+    )
+    closed = st.builds(
+        Closed,
+        kind=st.sampled_from(["bank", "fd", "gold", "loan", "epf"]),
+        label=nw_labels,
+        as_of=nw_days,
+    )
+    return st.one_of(stated, fds(), gold, closed)
+
+
+def _unique_days(es: list[Entry]) -> list[Entry]:
+    """One entry per (kind, label, day): the store keeps one, by design."""
+    seen: dict[tuple[str, str, date], Entry] = {}
+    for e in es:
+        seen.setdefault((e.kind, label_key(e.label), e.as_of), e)
+    return list(seen.values())
+
+
+@given(fds(), nw_days, nw_days)
+def test_an_fd_never_shrinks_starts_at_its_principal_and_stops_at_maturity(
+    fd: Fd, a: date, b: date
+) -> None:
+    early, late = min(a, b), max(a, b)
+    assert fd.principal.paise <= fd_value(fd, early).paise <= fd_value(fd, late).paise
+    assert fd_value(fd, fd.start) == fd.principal
+    end = fd_maturity(fd)
+    assert fd_value(fd, late) == fd_value(fd, min(late, end))
+
+
+@given(fds(), st.integers(0, 40))
+def test_on_each_quarter_day_an_fd_equals_the_compound_interest_formula(fd: Fd, q: int) -> None:
+    """Oracle: P x (1 + r/4)^q, worked in Decimal at 80 digits, half-even."""
+    assume(fd.months >= 6)
+    day = _add_months(fd.start, 3 * q)
+    assume(day <= fd_maturity(fd))
+    getcontext().prec = 80
+    want = Decimal(fd.principal.paise) * (1 + Decimal(fd.rate) / 40_000) ** q
+    assert fd_value(fd, day).paise == int(want.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+@given(st.lists(st.integers(0, 10**15), min_size=1, max_size=8))
+def test_shares_add_to_100_percent_and_each_is_within_a_basis_point(vs: list[int]) -> None:
+    assume(sum(vs) > 0)
+    out = shares(vs)
+    assert sum(out) == 10_000
+    for v, s in zip(vs, out, strict=True):
+        assert abs(Fraction(v * 10_000, sum(vs)) - s) < 1
+
+
+@given(st.lists(entries(), max_size=12), st.randoms(use_true_random=False), nw_days)
+def test_the_current_entries_do_not_depend_on_order(
+    es: list[Entry], rnd: random.Random, today: date
+) -> None:
+    es = _unique_days(es)
+    shuffled = es[:]
+    rnd.shuffle(shuffled)
+    assert current(es, today) == current(shuffled, today)
+    for e in current(es, today):
+        later = [
+            x
+            for x in es
+            if (x.kind, label_key(x.label)) == (e.kind, label_key(e.label)) and e.as_of < x.as_of
+        ]
+        assert all(x.as_of > today for x in later)  # nothing newer is ignored
+
+
+@given(st.lists(entries(), max_size=10), st.randoms(use_true_random=False))
+def test_the_store_round_trips_and_ignores_order_and_repeats(
+    es: list[Entry], rnd: random.Random
+) -> None:
+    es = _unique_days(es)
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "a.db", Path(d) / "b.db"
+        with AssetStore.open(a) as store:
+            for e in es:
+                store.put(e)
+        twice = es + es
+        rnd.shuffle(twice)
+        with AssetStore.open(b) as store:
+            for e in twice:
+                store.put(e)
+        with AssetStore.open(a) as sa, AssetStore.open(b) as sb:
+            assert sa.entries() == sb.entries()
+            assert sorted(sa.entries(), key=repr) == sorted(es, key=repr)
+
+
+targets_ = st.lists(st.integers(0, 10_000), min_size=len(BUCKETS), max_size=len(BUCKETS)).map(
+    lambda xs: dict(zip(BUCKETS, shares(xs), strict=True)) if sum(xs) else {}
+)
+
+
+@given(st.lists(entries(), max_size=12), targets_, nw_days)
+def test_net_worth_adds_up_and_the_mix_is_exactly_100_percent(
+    es: list[Entry], targets: dict[str, int], today: date
+) -> None:
+    es = _unique_days(es)
+    t = {b: Bps(v) for b, v in targets.items() if v > 0}
+    nw = networth(None, PriceBook(quotes={}), es, t, today)  # type: ignore[arg-type]
+    held = current(es, today)
+    owned = sum(entry_value(e, today).paise for e in held if KIND_BUCKET[e.kind] is not None)
+    owed = sum(entry_value(e, today).paise for e in held if KIND_BUCKET[e.kind] is None)
+    assert (nw.owned.paise, nw.owed.paise) == (owned, owed)
+    assert nw.total.paise == owned - owed
+    assert sum(ln.value.paise for ln in nw.lines if ln.bucket) == owned
+    if owned > 0:
+        assert sum(s.bps for s in nw.slices) == 10_000
+        for s in nw.slices:
+            assert abs(Fraction(s.value.paise * 10_000, owned) - s.bps) < 1
+            if s.target is not None:
+                assert s.drift == s.bps - s.target
+        if t:  # drifts of targeted classes balance the untargeted ones
+            assert sum(s.drift or 0 for s in nw.slices) == -sum(
+                s.bps for s in nw.slices if s.target is None
+            )
+    else:
+        assert all(s.bps == 0 and s.drift is None for s in nw.slices)
