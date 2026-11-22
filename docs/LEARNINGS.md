@@ -151,6 +151,18 @@ The owner ran the whole drop 1 checklist on Windows with the synthetic sample PD
 - **Rule:** every command for the owner goes in its own fenced code block, with the step to take before the next one (wait, open a new window) written outside the block. Test checklists in `/mnt/project-files/stockin/qa/` follow the same layout.
 - **Caught since:** nothing yet.
 
+### 24. A screen that explains everything in words teaches less, not more
+- **What happened:** after accepting Sprint 1, the owner asked for the whole app to be redesigned as "a visual experience rather than a wall of text". Measured on the synthetic sample, the home page was about 4,000 px tall on a laptop and about 6,000 px on a phone; six of nine verdict rows repeated "No thesis yet", and each insight card carried a 60–90 word paragraph under a small chart.
+- **Lesson:** the insight engine was right and the presentation buried it. Words were the main act and the charts were decoration.
+- **Rule:** every block leads with a chart and a headline of at most 12 words; the longer explanation sits behind a "Why?" disclosure. Pages are built from one shared kit (`static/tokens.css`, `static/ui.css`, `templates/_ui.html`) so later sprints look the same. The owner picked direction A (Cockpit: side menu and tile grid) from three clickable options on 2026-11-22.
+- **Caught since:** nothing yet; the redesign PRs are in progress.
+
+### 25. A redesign must keep every state the old screen handled, not only the happy one
+- **What happened:** the first verifier on PR #31 (home as a cockpit) FAILed it. The new Decide tile drew each verdict as a gauge and skipped verdicts with no weight. An exit on a holding with no price has no weight, so before `stockin prices fetch` (the normal state right after an import) the exit vanished from home, where the old page showed it. Reviews caused by a missing price were also counted as "need your reason", so holdings that already had a thesis were asked for one. Four injected bugs survived: no test asserted that an exit reaches home, that a review chip opens the thesis form, or that a card keeps its Why? and Learn text.
+- **Lesson:** the PR's tests checked that the new charts agree with their sentences on a priced book. They never compared the new screen with the old one in the states the old one handled: no prices, damaged theses, more calls than fit.
+- **Rule:** a redesign PR adds a test for each state the old screen handled (empty, no prices, damaged prices, damaged theses, overflow) that asserts the same facts still appear, and a test for every link a tile adds.
+- **Caught since:** nothing yet; the fix is in verification.
+
 ## Sprint 1, drop 2 retro (2026-11-22)
 
 The owner installed drop 2 on Windows, ran the test checklist, and said every step went well. Sprint 1 (both drops) is accepted. v0.1 is to be tagged on `fa8e76b`, the main commit the owner tested; this session cannot push tags, so the owner creates it (not yet on GitHub when this was written).
@@ -166,27 +178,21 @@ The owner installed drop 2 on Windows, ran the test checklist, and said every st
 | Install commands pasted as one line (lesson 23) | One command per code block (PIPELINE #18) |
 | No real CAS has been through the app (lesson 16) | Not caught yet: still an open risk |
 
-### 24. A screen that explains everything in words teaches less, not more
-- **What happened:** after accepting Sprint 1, the owner asked for the whole app to be redesigned as "a visual experience rather than a wall of text". Measured on the synthetic sample, the home page was about 4,000 px tall on a laptop and about 6,000 px on a phone; six of nine verdict rows repeated "No thesis yet", and each insight card carried a 60–90 word paragraph under a small chart.
-- **Lesson:** the insight engine was right and the presentation buried it. Words were the main act and the charts were decoration.
-- **Rule:** every block leads with a chart and a headline of at most 12 words; the longer explanation sits behind a "Why?" disclosure. Pages are built from one shared kit (`static/tokens.css`, `static/ui.css`, `templates/_ui.html`) so later sprints look the same. The owner picked direction A (Cockpit: side menu and tile grid) from three clickable options on 2026-11-22.
-- **Caught since:** nothing yet; the redesign PRs are in progress.
-
 ## Sprint 3 (2026-11-22)
 
-### 25. "Never twice" has to hold through every state that hides a holding for a moment
+### 26. "Never twice" has to hold through every state that hides a holding for a moment
 - **What happened:** the #28 verifier (PASS+NOTES) moved `prices.db` aside for one check and back for the next. Every verdict went to review and back, and the same TRIM alert was made a second time, although the README said "the same numbers never alert twice".
 - **Lesson:** a dedupe rule was tested against real changes of call (trim, hold, trim) but not against the states that only mean "something is missing right now" (no price, no thesis).
 - **Rule:** review keeps the call before it (#32), and the alert properties walk histories that include review. A claim of "never" in a doc names the property that pins it.
 - **Caught since:** nothing yet.
 
-### 26. A mutation run must prove the test runner reported, not just grep for failures
-- **What happened:** the author's mutation script for #32 and the live-prices PR printed a survivor as a blank line. `pytest -q` on top of the repo's `addopts = "-q"` prints no summary at all, so the script's grep for "passed|failed" found nothing for a surviving mutant, and L1 (half-up rounding) and L5 (a past day's trade counted as live) looked caught until they were run by hand.
+### 27. A mutation run must prove the test runner reported, not just grep for failures
+- **What happened:** in the author's mutation script for #33, `pytest -q` on top of the repo's `addopts = "-q"` printed no summary, so the script's grep for "passed|failed" printed a blank line for a surviving mutant. L1 (half-up rounding) and L5 (a past day's trade counted as live) looked caught until they were rerun by hand. The first run's output was only in the author's session; `evidence/pr-33/author/` keeps the reruns (the #33 verifier noted this).
 - **Lesson:** a check that can only see failures cannot tell "all passed" from "nothing ran".
-- **Rule:** mutation scripts run `pytest -o addopts="" -q` and record the summary line; a mutant with no summary line counts as not run, never as killed.
+- **Rule:** mutation scripts run `pytest -o addopts="" -q` and record the summary line; a mutant with no summary line counts as not run, never as killed. Evidence keeps the first run, not only the rerun.
 - **Caught since:** L1 and L5, both now killed by new tests (exact half-paise ties; Friday's close seen on Monday evening).
 
-### 27. Something meant to run all day must be checked with two copies running at once
+### 28. Something meant to run all day must be checked with two copies running at once
 - **What happened:** the #32 verifier (PASS+NOTES) ran `alerts send` and `alerts check --send` at the same moment against a slow fake Telegram. The same TRIM went out twice, and an alert withdrawn mid-send was sent and then vanished from the history. One run at a time, everything held.
 - **Lesson:** the owner wants Stockin running 24/7 (`stockin watch` plus a scheduled task), so overlapping runs are normal use, not a crafted case.
 - **Rule:** each Telegram message is sent under alerts.db's write lock (one message at a time, so a check waits seconds, not minutes), and tests run three senders at once and a check during a send. A watch pass that fails is said and tried again on the next pass instead of ending the watch.

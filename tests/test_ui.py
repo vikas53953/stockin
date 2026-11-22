@@ -54,21 +54,35 @@ def test_every_page_has_the_shell_and_marks_where_you_are(
 
 
 def test_the_menu_links_land_on_real_anchors(client: TestClient) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "cas" / "mf-2026-01.json"
+    with fixture.open("rb") as fh:
+        client.post("/import", files={"statement": ("mf.json", fh, "application/json")})
     html = client.get("/").text
-    assert 'id="import"' in html  # /#import, the upload form
+    side, tabs = html.split('aria-label="Main (phone)"')
+    anchors = re.findall(r'href="/#([\w-]+)"', side)
+    assert set(anchors) == {"holdings", "verdicts", "import"}
+    for a in anchors:
+        assert f'id="{a}"' in html
+    # the phone tabs carry every live link and no "soon" entry
+    assert re.findall(r'href="(/[^"]*)"', tabs) == re.findall(
+        r'class="nav-item" href="(/[^"]*)"', side
+    )
+    assert "soon" not in tabs and "Net worth" not in tabs and "Alerts" not in tabs
+    assert tabs.count('class="nav-item"') == side.count('class="nav-item" href=')
 
 
 def test_static_files_are_served_locally_and_only_locally(client: TestClient) -> None:
     for name in ("tokens.css", "ui.css"):
         r = client.get(f"/static/{name}")
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/css")
+        assert r.headers["cache-control"] == "no-cache"
     r = client.get("/static/ui.css", headers={"host": "evil.example:8765"})
     assert r.status_code == 403
 
 
 def test_ui_css_uses_only_tokens_for_colour() -> None:
     css = (Path(__file__).parents[1] / "src/stockin/static/ui.css").read_text()
-    assert not re.findall(r"#[0-9a-fA-F]{3,8}\b", css)
+    assert not re.findall(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch|lab)\(", css)
 
 
 @given(
