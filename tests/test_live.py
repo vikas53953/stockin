@@ -189,6 +189,7 @@ class Net:
     def __init__(self, price: str = "1650.00", age: timedelta = timedelta(minutes=3)) -> None:
         self.price, self.age, self.asked, self.lists = price, age, [], 0
         self.down = False
+        self.now = MON
 
     def symbols(self) -> tuple[dict[Isin, str], bool]:
         self.lists += 1
@@ -198,7 +199,9 @@ class Net:
 
     def quote(self, isin: Isin, symbol: str) -> LiveQuote:
         self.asked.append(symbol)
-        return live.parse_chart(chart(f"{symbol}.NS", self.price, MON - self.age), isin, symbol)
+        return live.parse_chart(
+            chart(f"{symbol}.NS", self.price, self.now - self.age), isin, symbol
+        )
 
 
 @pytest.fixture
@@ -371,7 +374,9 @@ def test_a_partial_symbol_list_is_used_but_not_kept(
 
     monkeypatch.setattr(live, "fetch_symbols", partial)
     first = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
-    assert "not listed" in first["end_of_day"][0]["reason"]
+    reason = first["end_of_day"][0]["reason"]
+    # round 2, R-2: INFY is listed; the list was cut short, and the reason says that
+    assert "not listed" not in reason and "incomplete" in reason
     second = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
     assert second["live"][0]["isin"] == INFY and len(calls) == 2
 
@@ -388,19 +393,356 @@ def test_the_symbol_list_is_downloaded_again_on_a_new_day(
     assert net.lists == 2
 
 
-@pytest.mark.parametrize("price", ["750.25", "3001.20"])
-def test_a_live_price_that_jumps_keeps_the_close(data: Path, net: Net, price: str) -> None:
-    """R-2: a split day must not send an ADD or TRIM on its own; the same
-    2x rule as price files."""
+# close ₹1,500.55 (2026-11-14): 20% of it is exactly ₹300.11
+HELD = ["750.25", "750.30", "3001.00", "3001.20", "15005.50", "1800.67", "1200.43"]
+USED = ["1800.66", "1200.44", "1500.55", "1650.00", "1350.00"]
+
+
+@pytest.mark.parametrize("price", HELD)
+def test_a_live_price_beyond_the_band_keeps_the_close(data: Path, net: Net, price: str) -> None:
+    """Round 1 R-2 and round 2 R-1: a split or bonus day must not drive a
+    verdict. ₹750.30 is a 1:1 split that opened a paisa up, which the 2x rule
+    let through. The last two are one paisa past 20% up and down."""
     net.price = price
     view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
-    assert view["live"] == [] and "split or bonus" in view["end_of_day"][0]["reason"]
+    assert view["live"] == []
+    assert "more than 20% from the close" in view["end_of_day"][0]["reason"]
 
 
-def test_a_live_price_just_inside_the_jump_rule_is_used(data: Path, net: Net) -> None:
-    net.price = "3001.00"  # close 1500.55: exactly 2x is not a jump
+@pytest.mark.parametrize("price", USED)
+def test_a_live_price_within_the_band_is_used(data: Path, net: Net, price: str) -> None:
+    """Exactly 20% up or down is a day NSE's widest band allows."""
+    net.price = price
     view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
-    assert view["live"][0]["price"]["micro_rupees"] == 3_001_000_000
+    assert view["end_of_day"] == []
+    assert view["live"][0]["price"] == Price.rupees(price).model_dump(mode="json")
+
+
+def test_a_split_day_that_opens_up_makes_no_alert(data: Path, net: Net) -> None:
+    """Round 2 R-1 on `watch`: the held price is not what verdicts see."""
+    net.price = "750.30"
+    r = runner.invoke(cli, ["watch", "--once"])
+    assert r.exit_code == 0, r.output
+    assert "0 live, 1 at close, 0 new alerts" in r.output
+    book, _ = cli_mod._live_pass(_book())  # pyright: ignore[reportPrivateUsage]
+    assert book.get(INFY) == Quote(
+        isin=INFY, on=date(2026, 11, 14), price=Price.rupees("1500.55"), source="bhavcopy"
+    )
+
+
+def _book() -> cli_mod.Book:
+    with cli_mod._open_ledger() as ledger:  # pyright: ignore[reportPrivateUsage]
+        return ledger.book()
+
+
+def test_the_reason_names_the_quote_and_the_close_the_right_way_round(data: Path, net: Net) -> None:
+    """V2-7 survivor."""
+    net.price = "750.30"
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    reason = view["end_of_day"][0]["reason"]
+    assert "live ₹750.30" in reason and "close of ₹1,500.55 on 2026-11-14" in reason
+
+
+@given(
+    st.integers(min_value=1, max_value=10**13),
+    st.integers(min_value=1, max_value=10**13),
+)
+def test_the_band_is_exactly_20_percent_of_the_close_both_ways(close: int, new: int) -> None:
+    """Whole micro-rupees, no float: beyond the band means strictly more
+    than a fifth of the close away, up or down."""
+    want = Fraction(abs(new - close), close) > Fraction(1, 5)
+    assert live.beyond_band(Price(micro_rupees=close), Price(micro_rupees=new)) is want
+
+
+@pytest.mark.parametrize("close", [1, 5, 10_000, 1_500_550_000, 10**13])
+def test_the_band_at_its_edges(close: int) -> None:
+    """Random pairs almost never land on the edge itself."""
+    c = Price(micro_rupees=close)
+    up, down = close + close // 5, close - close // 5
+    assert not live.beyond_band(c, Price(micro_rupees=up))
+    assert live.beyond_band(c, Price(micro_rupees=up + 1))
+    if close % 5 == 0:
+        assert not live.beyond_band(c, Price(micro_rupees=down))
+        if down > 1:
+            assert live.beyond_band(c, Price(micro_rupees=down - 1))
+
+
+@pytest.mark.parametrize(("days", "used"), [(7, True), (8, False), (120, False)])
+def test_a_live_price_is_checked_only_against_a_recent_close(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch, days: int, used: bool
+) -> None:
+    """Round 2 C-3: a share that really doubled since a months-old close is
+    not called a split. An old close cannot check a live price at all, and
+    the reason says so and what to run."""
+    net.now = datetime(2026, 11, 14, 13, 20, tzinfo=IST) + timedelta(days=days)
+    monkeypatch.setattr(prices_mod, "_now", lambda: net.now)
+    net.price = "1650.00" if used else "3100.00"
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    if used:
+        assert view["live"][0]["isin"] == INFY and view["end_of_day"] == []
+        return
+    reason = view["end_of_day"][0]["reason"]
+    assert view["live"] == [] and "split" not in reason
+    assert "2026-11-14" in reason and "too old" in reason and "stockin prices fetch" in reason
+
+
+def test_a_live_price_with_no_close_to_check_it_against_is_not_used(data: Path, net: Net) -> None:
+    (data / "prices.db").unlink()
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    reason = view["end_of_day"][0]["reason"]
+    assert view["live"] == [] and "no end-of-day price" in reason
+
+
+# ------------------------------------------------------------ #33 verifier, round 2
+
+
+def test_a_list_without_etfs_is_not_complete() -> None:
+    """Round 2 R-2: the mirror of round 1's R-3."""
+    equity = (FIX / "live" / "EQUITY_L-sample.csv").read_bytes()
+
+    def get(url: str) -> bytes | None:
+        return equity if url == live.EQUITY_LIST_URL else None  # the ETF list: 404
+
+    found, complete = live.fetch_symbols(get)
+    assert found[INFY] == "INFY" and complete is False
+
+    def both(url: str) -> bytes | None:
+        return equity if url == live.EQUITY_LIST_URL else ETF_LIST
+
+    found, complete = live.fetch_symbols(both)
+    assert found[NIFTYBEES] == "NIFTYBEES" and found[INFY] == "INFY" and complete is True
+
+
+ETF_LIST = b"Symbol,Underlying,SecurityName,ISINNumber\nNIFTYBEES,Nifty 50,BeES,INF204KB14I2\n"
+NIFTYBEES = parse_isin("INF204KB14I2")
+
+
+def test_a_list_without_etfs_is_not_kept_for_the_day(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 R-2 end to end: the ETF list fails once; nothing is cached,
+    and the next pass downloads both."""
+    equity = (FIX / "live" / "EQUITY_L-sample.csv").read_bytes()
+    etf_answers: list[bytes | None] = [None, ETF_LIST]
+    asked: list[str] = []
+
+    def get(url: str) -> bytes | None:
+        asked.append(url)
+        return equity if url == live.EQUITY_LIST_URL else etf_answers.pop(0)
+
+    fetch = live.fetch_symbols
+    monkeypatch.setattr(live, "fetch_symbols", lambda: fetch(get))
+    first, complete = cli_mod._symbols(MON.date())  # pyright: ignore[reportPrivateUsage]
+    assert NIFTYBEES not in first and complete is False
+    assert not (data / "nse-symbols.json").exists()
+    second, complete = cli_mod._symbols(MON.date())  # pyright: ignore[reportPrivateUsage]
+    assert second[NIFTYBEES] == "NIFTYBEES" and complete is True and len(asked) == 4
+    third, complete = cli_mod._symbols(MON.date())  # pyright: ignore[reportPrivateUsage]
+    assert third == second and complete is True and len(asked) == 4  # kept now
+
+
+def test_one_unreadable_nse_list_does_not_drop_the_other() -> None:
+    """V2-6 survivor: NSE changes one file's header, or answers with a page."""
+    equity = (FIX / "live" / "EQUITY_L-sample.csv").read_bytes()
+
+    def get(url: str) -> bytes | None:
+        return equity if url == live.EQUITY_LIST_URL else b"<html>Access denied</html>"
+
+    found, complete = live.fetch_symbols(get)
+    assert found[INFY] == "INFY" and complete is False
+
+    def other(url: str) -> bytes | None:
+        return b"NAME,CODE\nx,y\n" if url == live.EQUITY_LIST_URL else ETF_LIST
+
+    found, complete = live.fetch_symbols(other)
+    assert found == {NIFTYBEES: "NIFTYBEES"} and complete is False
+
+
+def test_a_404_on_a_quote_is_no_quote_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """V2-5 survivor."""
+    import urllib.error
+    import urllib.request
+    from email.message import Message
+
+    def gone(req: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", Message(), None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", gone)
+    with pytest.raises(LiveRejected, match="INFY: no quote found"):
+        live.fetch_quote(INFY, "INFY")
+
+
+def test_todays_official_close_is_shown_as_what_verdicts_use(data: Path, net: Net) -> None:
+    """Round 2 C-2: once today's bhavcopy is in, it beats the day's last
+    live trade, so `prices live` says CLOSE and asks for no quote."""
+    today = data / "bhavcopy-today.csv"
+    sample = (FIX / "eod" / "bhavcopy-sample.csv").read_text(encoding="utf-8")
+    today.write_text(sample.replace("2026-11-14", "2026-11-16"), encoding="utf-8")
+    assert runner.invoke(cli, ["prices", "import", str(today)]).exit_code in (0, 1)
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert view["live"] == [] and net.asked == [] and net.lists == 0
+    assert view["end_of_day"] == [
+        {
+            "isin": INFY,
+            "reason": "today's official close of ₹1,500.55 is in; verdicts use it",
+        }
+    ]
+    human = runner.invoke(cli, ["prices", "live"]).output
+    assert "LIVE" not in human and f"CLOSE {INFY}" in human
+
+
+def test_ctrl_c_during_a_pass_ends_watch(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V2-1 survivor: the guard around a pass must not swallow Ctrl+C."""
+    passes: list[int] = []
+
+    def interrupted(send: bool) -> None:
+        passes.append(1)
+        raise KeyboardInterrupt
+
+    def sleep(s: int) -> None:
+        raise AssertionError("the watch went on after Ctrl+C")
+
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON)
+    monkeypatch.setattr(cli_mod, "_watch_pass", interrupted)
+    monkeypatch.setattr(cli_mod, "_sleep", sleep)
+    r = runner.invoke(cli, ["watch", "--send"])
+    assert r.exit_code == 0 and passes == [1] and r.output.strip() == "stopped"
+
+
+TOKEN = "123456:" + "A" * 35  # the shape of a bot token; synthetic
+
+
+class Phone:
+    """Stands in for Telegram: records what the watch sends."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.got: list[str] = []
+        self.down = False
+        monkeypatch.setenv("STOCKIN_TELEGRAM_TOKEN", TOKEN)
+        monkeypatch.setenv("STOCKIN_TELEGRAM_CHAT", "555")
+        monkeypatch.setattr(cli_mod.notify, "http_transport", lambda token: self.call)
+
+    def call(self, method: str, params: dict[str, str]) -> object:
+        if self.down:
+            raise cli_mod.notify.TelegramError("could not reach Telegram (timed out)")
+        assert method == "sendMessage" and params["chat_id"] == "555"
+        self.got.append(params["text"])
+        return None
+
+
+def _run_watch(
+    monkeypatch: pytest.MonkeyPatch, outcomes: list[BaseException | None], *args: str
+) -> str:
+    """`watch` with one pass per outcome (None is a good pass), then Ctrl+C."""
+    left = list(outcomes)
+
+    def one_pass(send: bool) -> None:
+        outcome = left.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    def sleep(s: int) -> None:
+        if not left:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON)
+    monkeypatch.setattr(cli_mod, "_watch_pass", one_pass)
+    monkeypatch.setattr(cli_mod, "_sleep", sleep)
+    r = runner.invoke(cli, ["watch", *args])
+    assert r.exit_code == 0 and left == [], r.output
+    return r.output
+
+
+def test_a_watch_that_keeps_failing_tells_telegram_once_per_streak(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 C-1: nobody reads stderr on a 24/7 setup."""
+    phone = Phone(monkeypatch)
+    boom = RuntimeError("database disk image\nis malformed")
+    out = _run_watch(monkeypatch, [boom] * 2, "--send")
+    assert phone.got == [] and "in a row" not in out  # two failed passes can be a blip
+    out = _run_watch(monkeypatch, [boom] * 6, "--send")
+    notice = (
+        "Stockin watch cannot run: RuntimeError: database disk image is malformed. "
+        "It has failed 3 checks in a row and keeps trying."
+    )
+    assert phone.got == [notice]  # one line, once, however long the streak
+    assert out.count("error: watch has failed 3 checks in a row; told Telegram") == 1
+    assert out.count("this pass failed") == 6
+    phone.got.clear()
+    out = _run_watch(monkeypatch, [boom] * 3 + [None] + [boom] * 2 + [None] + [boom] * 3, "--send")
+    assert len(phone.got) == 2  # a good pass ends the streak; the short one says nothing
+
+
+def test_the_failure_notice_carries_the_reason_already_said(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass that ends with a said error (typer.Exit) counts too, and the
+    notice carries that error, here a prices.db that is not a database."""
+    phone = Phone(monkeypatch)
+    (data / "prices.db").write_bytes(b"not a database, " * 64)
+    slept: list[int] = []
+
+    def sleep(s: int) -> None:
+        slept.append(s)
+        if len(slept) == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON)
+    monkeypatch.setattr(cli_mod, "_sleep", sleep)
+    r = runner.invoke(cli, ["watch", "--send"])
+    assert r.exit_code == 0, r.output
+    (notice,) = phone.got
+    assert notice.startswith("Stockin watch cannot run: ") and "prices.db" in notice
+    assert "\n" not in notice
+
+
+def test_the_failure_notice_is_tried_again_until_telegram_takes_it(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phone = Phone(monkeypatch)
+    phone.down = True
+    boom = RuntimeError("something new")
+    left: list[BaseException | None] = [boom] * 5
+
+    def one_pass(send: bool) -> None:
+        if len(left) == 1:
+            phone.down = False  # Telegram is back for the fifth failed pass
+        raise left.pop(0)  # type: ignore[misc]
+
+    def sleep(s: int) -> None:
+        if not left:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON)
+    monkeypatch.setattr(cli_mod, "_watch_pass", one_pass)
+    monkeypatch.setattr(cli_mod, "_sleep", sleep)
+    r = runner.invoke(cli, ["watch", "--send"])
+    assert r.output.count("did not reach Telegram") == 2  # the third and fourth pass
+    assert len(phone.got) == 1 and "failed 5 checks in a row" in phone.got[0]
+
+
+def test_the_failure_notice_never_holds_the_token_and_needs_send(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phone = Phone(monkeypatch)
+    boom = RuntimeError(f"could not open https://example.invalid/bot{TOKEN}/x")
+    out = _run_watch(monkeypatch, [boom] * 3, "--send")
+    (notice,) = phone.got
+    assert TOKEN not in notice and "***" in notice and TOKEN not in out
+    phone.got.clear()
+    out = _run_watch(monkeypatch, [RuntimeError("x")] * 4)  # no --send: stderr only
+    assert phone.got == []
+    assert out.count("error: watch has failed 3 checks in a row") == 1
+
+
+def test_a_failing_watch_with_no_telegram_says_so(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _run_watch(monkeypatch, [RuntimeError("x")] * 4, "--send")
+    assert out.count("Telegram is not connected, so no notice was sent") == 1
 
 
 def test_watch_once_send_sends(data: Path, net: Net, monkeypatch: pytest.MonkeyPatch) -> None:
