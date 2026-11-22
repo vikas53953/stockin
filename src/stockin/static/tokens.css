@@ -1,0 +1,26 @@
+/* Stockin design tokens: colour, type, space, radius. Light first; dark redefines
+   only the tokens. Every component in ui.css reads these and nothing else, so a
+   page from any sprint looks the same. Series colours (s0..s5) are the validated
+   categorical palette (fixed order, never cycled); status colours (ok, warn,
+   bad) are kept apart from them and always ship with an icon or a word. */
+:root{
+  --bg:#f4f6f4;--panel:#fff;--panel-2:#f8faf8;--fg:#18201c;--muted:#5d6862;--faint:#8a948f;
+  --line:#dfe3df;--chip:#eef2ef;
+  --accent:#0f6e52;--accent-soft:#dcefe7;--on-accent:#fff;
+  --ok:#0f6e52;--warn:#9a5b00;--bad:#b42318;
+  --s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s0:#8a948f;--on-fill:#111;
+  --font:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --display:"Space Grotesk","Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --r-sm:6px;--r:10px;--r-lg:14px;
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:24px;--sp-6:32px;
+  --side-w:200px;--tabbar-h:60px;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1311;--panel:#171c19;--panel-2:#1b211e;--fg:#e6ece8;--muted:#9ba7a0;--faint:#76817b;
+  --line:#2a332e;--chip:#202824;
+  --accent:#4cc79a;--accent-soft:#1d3b30;--on-accent:#0f1311;
+  --ok:#4cc79a;--warn:#f0a43c;--bad:#ff7b6e;
+  --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s0:#6d7772;--on-fill:#fff;
+  color-scheme:dark}}

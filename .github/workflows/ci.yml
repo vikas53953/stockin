@@ -130,6 +130,16 @@ jobs:
           stockin doctor
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "net worth adds up: total = owned - owed, mix = 100%"
+      - name: Sprint 3 on Windows (alerts)
+        run: |
+          $env:PATH = "$(uv tool dir --bin);$env:PATH"
+          $env:STOCKIN_DATA = "$HOME\stockin-data"
+          stockin alerts check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin alerts check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin alerts list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Live price download on Windows (informational; NSE may refuse CI machines)
         continue-on-error: true
         run: |

@@ -109,7 +109,8 @@ Each holding gets one verdict, with the reason beside it:
 
 ### 8. Get alerts and ask questions
 
-- Telegram tells you when a price crosses a level you set, when a review falls due, or when your mix drifts.
+- `stockin alerts check` keeps one alert each time a holding's verdict turns into add, trim or exit, worded exactly as the verdict. The same numbers never alert twice; `stockin alerts list` shows them all.
+- Telegram sends those alerts to your phone.
 - The dashboard at `http://stockin:8000` on your tailnet shows the same data in a browser.
 - Claude can query your ledger through the read-only MCP server. Every number it quotes comes from a tool, not from the model.
 
