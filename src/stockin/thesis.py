@@ -74,6 +74,8 @@ class Verdict(Value):
     because: str
     weight: Bps | None
     target: Bps | None
+    weight_text: str = ""  # the weight exactly as `because` prints it
+    target_text: str = ""  # the target exactly as `because` prints it
 
 
 def _hundredths(bps: int) -> str:
@@ -104,8 +106,17 @@ def verdict(
     w = weight.bps if weight else None
     target = thesis.target if thesis else None
 
-    def out(call: Call, because: str) -> Verdict:
-        return Verdict(isin=isin, name=name, call=call, because=because, weight=w, target=target)
+    def out(call: Call, because: str, now: str = "", aim: str = "") -> Verdict:
+        return Verdict(
+            isin=isin,
+            name=name,
+            call=call,
+            because=because,
+            weight=w,
+            target=target,
+            weight_text=now,
+            target_text=aim,
+        )
 
     def p(bps: int) -> str:
         return pct(tenths_of(bps, 10_000))
@@ -126,22 +137,30 @@ def verdict(
             return out(
                 "trim",
                 f"{name} is {now} of {money}, more than {band} above your target of {aim}.",
+                now,
+                aim,
             )
         if w < target - BAND:
             now, aim = _shown(w, target, -gap > BAND // 10)
             return out(
                 "add",
                 f"{name} is {now} of {money}, more than {band} below your target of {aim}.",
+                now,
+                aim,
             )
         now, aim = _shown(w, target, abs(gap) <= BAND // 10)
-        return out("hold", f"{name} is {now} of {money}, within {band} of your target of {aim}.")
+        return out(
+            "hold", f"{name} is {now} of {money}, within {band} of your target of {aim}.", now, aim
+        )
     if w > CONCENTRATED_ONE:
         line = p(CONCENTRATED_ONE)
         (now, _) = _shown(w, CONCENTRATED_ONE, tenths_of(w, 10_000) > CONCENTRATED_ONE // 10)
         return out(
-            "trim", f"{name} is {now} of {money}, above the {line} line, and you set no target."
+            "trim",
+            f"{name} is {now} of {money}, above the {line} line, and you set no target.",
+            now,
         )
-    return out("hold", f"Your thesis stands and {name} is {p(w)} of {money}.")
+    return out("hold", f"Your thesis stands and {name} is {p(w)} of {money}.", p(w))
 
 
 def verdicts(

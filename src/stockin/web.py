@@ -16,6 +16,7 @@ password is passed to casparser and never stored, logged or echoed.
 
 from __future__ import annotations
 
+import mimetypes
 import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -29,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
+from .cockpit import cockpit
 from .facts import Isin
 from .holding import holding_page
 from .insights import all_insights, short_name, weights
@@ -41,6 +43,10 @@ from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, for_book, pars
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
 
 STATIC = Path(__file__).parent / "static"
+
+# A Windows registry can map .css to text/plain, which browsers refuse as a
+# stylesheet; say what our own files are.
+mimetypes.add_type("text/css", ".css")
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
 
@@ -145,7 +151,11 @@ def create_app(db: Path, port: int) -> FastAPI:
             *(f"http://{h}" for h in allowed_hosts),
         ):
             return PlainTextResponse("cross-site request refused", 403)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            # revalidate, so an upgrade's new ui.css is used straight away
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -202,17 +212,20 @@ def create_app(db: Path, port: int) -> FastAPI:
         today = india_today()
         days = sorted(q.on for q in priced.quotes.values())
         theses, theses_damaged = read_theses()
+        insights = all_insights(book, priced, today)
+        verdicts = for_book(book, priced, theses) if theses_damaged is None else ()
         return page(
             "home.html",
             groups=_groups(book, holdings, prices),
             summary=_summary(report),
             ok=report.ok,
             empty=False,
-            story=story(all_insights(book, priced, today), ws, total.paise, len(holdings)),
+            story=story(insights, ws, total.paise, len(holdings)),
+            cockpit=cockpit(insights, ws, verdicts),
             priced_on=days[-1].isoformat() if days else None,
             damaged=damaged,
             prices_hint=PRICES_HINT,
-            verdicts=for_book(book, priced, theses) if theses_damaged is None else (),
+            verdicts=verdicts,
             theses=theses,
             theses_damaged=theses_damaged,
         )

@@ -28,32 +28,40 @@
 
 {#- A share of your money against your own target.
     weight, target, band and cap are percents. The band is target ± band;
-    cap is the rule-of-thumb line (25% by default); slot is the series colour. -#}
-{%- macro gauge(weight, label, slot=1, target=none, band=5, cap=25) -%}
+    cap is the rule-of-thumb line (25% by default); slot is the series colour.
+    weight_text and target_text, when given, are printed instead of the
+    rounded floats, so the key repeats the sentence beside it exactly. -#}
+{%- macro gauge(weight, label, slot=1, target=none, band=5, cap=25, weight_text=none, target_text=none) -%}
+{%- set wt = weight_text or '%.1f%%'|format(weight) -%}
+{%- set tt = target_text or ('%.1f%%'|format(target) if target is not none else '') -%}
 <div class="gauge">
-  <div class="gauge-track" role="img" aria-label="{{ label }}: {{ '%.1f'|format(weight) }}%{% if target is not none %}, your target {{ '%.1f'|format(target) }}%{% endif %}">
+  <div class="gauge-track" role="img" aria-label="{{ label }}: {{ wt }}{% if target is not none %}, your target {{ tt }}{% endif %}">
     <span class="gauge-fill s{{ slot }}" style="width:{{ clamp(weight) }}%"></span>
     {% if target is not none %}<span class="gauge-band" style="left:{{ clamp(target - band) }}%;width:{{ clamp([target + band, 100]|min - [target - band, 0]|max) }}%"></span>{% endif %}
     {% if cap is not none %}<span class="gauge-cap" style="left:{{ clamp(cap) }}%"></span>{% endif %}
   </div>
-  <div class="gauge-key"><span><b>{{ '%.1f'|format(weight) }}%</b> of your money</span>{% if target is not none %}<span>target {{ '%.1f'|format(target) }}%</span>{% endif %}{% if cap is not none %}<span>dashed line {{ '%.0f'|format(cap) }}%</span>{% endif %}</div>
+  <div class="gauge-key"><span><b>{{ wt }}</b> of your money</span>{% if target is not none %}<span>target {{ tt }}</span>{% endif %}{% if cap is not none %}<span>dashed line {{ '%.0f'|format(cap) }}%</span>{% endif %}</div>
 </div>
 {%- endmacro -%}
 
-{#- Parts of a whole on one bar, with a legend. parts: list of (label, percent, slot). -#}
+{#- Parts of a whole on one bar, with a legend. parts: list of (label, percent, slot)
+    or (label, percent, slot, text); text, when given, is printed instead of the percent. -#}
 {%- macro seg(parts, label) -%}
-<div class="seg" role="img" aria-label="{{ label }}: {% for name, pct, slot in parts %}{{ name }} {{ '%.1f'|format(pct) }}%{{ ', ' if not loop.last }}{% endfor %}">
-  {% for name, pct, slot in parts %}<span class="seg-part s{{ slot }}" style="width:{{ clamp(pct) }}%" title="{{ name }} {{ '%.1f'|format(pct) }}%"></span>{% endfor %}
+<div class="seg" role="img" aria-label="{{ label }}: {% for p in parts %}{{ p[0] }} {{ p[3] if p|length > 3 else '%.1f%%'|format(p[1]) }}{{ ', ' if not loop.last }}{% endfor %}">
+  {% for p in parts %}<span class="seg-part s{{ p[2] }}" style="width:{{ clamp(p[1]) }}%" title="{{ p[0] }} {{ p[3] if p|length > 3 else '%.1f%%'|format(p[1]) }}"></span>{% endfor %}
 </div>
-<div class="legend">{% for name, pct, slot in parts %}<span><i class="sw s{{ slot }}"></i>{{ name }} {{ '%.1f'|format(pct) }}%</span>{% endfor %}</div>
+<div class="legend">{% for p in parts %}<span><i class="sw s{{ p[2] }}"></i>{{ p[0] }} {{ p[3] if p|length > 3 else '%.1f%%'|format(p[1]) }}</span>{% endfor %}</div>
 {%- endmacro -%}
 
-{#- How much of your money has a known cost: known in green, unknown hatched. -#}
-{%- macro known_bar(known) -%}
-<div class="kbar" role="img" aria-label="Cost known for {{ '%.1f'|format(known) }}% of your money, unknown for {{ '%.1f'|format(100 - known) }}%">
+{#- How much of your money has a known cost: known in green, unknown hatched.
+    known_text and unknown_text, when given, are printed instead of the floats. -#}
+{%- macro known_bar(known, known_text=none, unknown_text=none) -%}
+{%- set kt = known_text or '%.1f%%'|format(known) -%}
+{%- set ut = unknown_text or '%.1f%%'|format(100 - known) -%}
+<div class="kbar" role="img" aria-label="Cost known for {{ kt }} of your money, unknown for {{ ut }}">
   <span class="kbar-known" style="width:{{ clamp(known) }}%"></span><span class="kbar-unknown"></span>
 </div>
-<div class="legend"><span><i class="sw kbar-known"></i>known {{ '%.1f'|format(known) }}%</span><span><i class="sw sw-unknown"></i>unknown {{ '%.1f'|format(100 - known) }}%</span></div>
+<div class="legend"><span><i class="sw kbar-known"></i>known {{ kt }}</span><span><i class="sw sw-unknown"></i>unknown {{ ut }}</span></div>
 {%- endmacro -%}
 
 {#- Money in and out. rows: list of (label, amount text, width percent, "in" or "out"). -#}

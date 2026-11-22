@@ -170,7 +170,7 @@ def test_with_prices_the_story_and_map_come_from_the_insights(home: TestClient) 
     for i in found[: MAX_CARDS + 1]:
         assert i["headline"].replace("'", "&#39;") in page
     priced = [p for i in found if i["kind"] == "concentration" for p in i["series"]]
-    assert page.count('class="tile ') == len(priced) > 0
+    assert page.count('class="tile-map-cell ') == len(priced) > 0
     assert "No prices yet" not in page
     assert re.search(r"value \(₹\)", page, re.I)
 
@@ -280,13 +280,21 @@ def test_the_page_draws_each_tile_with_its_own_width_and_height() -> None:
         _weight("INE009A01021", "A", "Stocks", 700, total),
         _weight("INF179K01BE2", "B", "Stocks", 300, total),
     )
+    from stockin.cockpit import cockpit
+
     s = story((), ws, total, 2)
     html = _env.get_template("home.html").render(
-        empty=False, story=s, summary={"mismatch": 0}, ok=True, groups=(), priced_on="2026-11-17"
+        empty=False,
+        story=s,
+        cockpit=cockpit((), ws, ()),
+        summary={"mismatch": 0},
+        ok=True,
+        groups=(),
+        priced_on="2026-11-17",
     )
     for t in s.tiles:
         assert f"width:{t.w:.3f}%;height:{t.h:.3f}%" in html  # verifier's M6
-    assert "prices 2026-11-17" in html
+    assert "end of day · 2026-11-17" in html
 
 
 @pytest.mark.parametrize("months", [[1, 2, 4, 5], [1, 2, 3, 4, 5]])
