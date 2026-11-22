@@ -4,6 +4,7 @@ insight, and the page itself through HTTP with synthetic statements."""
 from __future__ import annotations
 
 import re
+from datetime import date
 from itertools import combinations
 from pathlib import Path
 
@@ -16,8 +17,9 @@ from typer.testing import CliRunner
 from stockin.cli import app as cli
 from stockin.facts import parse_isin
 from stockin.insights import Insight, Point, Weight, pct, tenths_of
-from stockin.money import Money
-from stockin.story import GROUP_SLOT, MAP_H, MAP_W, MAX_CARDS, card, squarify, story, tiles
+from stockin.money import Bps, Money
+from stockin.story import GROUP_SLOT, LEARN, MAP_H, MAP_W, MAX_CARDS, card, squarify, story, tiles
+from stockin.thesis import Thesis, ThesisStore
 from stockin.web import create_app
 
 FIX = Path(__file__).parent / "fixtures"
@@ -170,7 +172,7 @@ def test_with_prices_the_story_and_map_come_from_the_insights(home: TestClient) 
     for i in found[: MAX_CARDS + 1]:
         assert i["headline"].replace("'", "&#39;") in page
     priced = [p for i in found if i["kind"] == "concentration" for p in i["series"]]
-    assert page.count('class="tile ') == len(priced) > 0
+    assert page.count('class="tile-map-cell ') == len(priced) > 0
     assert "No prices yet" not in page
     assert re.search(r"value \(₹\)", page, re.I)
 
@@ -280,13 +282,21 @@ def test_the_page_draws_each_tile_with_its_own_width_and_height() -> None:
         _weight("INE009A01021", "A", "Stocks", 700, total),
         _weight("INF179K01BE2", "B", "Stocks", 300, total),
     )
+    from stockin.cockpit import cockpit
+
     s = story((), ws, total, 2)
     html = _env.get_template("home.html").render(
-        empty=False, story=s, summary={"mismatch": 0}, ok=True, groups=(), priced_on="2026-11-17"
+        empty=False,
+        story=s,
+        cockpit=cockpit((), ws, ()),
+        summary={"mismatch": 0},
+        ok=True,
+        groups=(),
+        priced_on="2026-11-17",
     )
     for t in s.tiles:
         assert f"width:{t.w:.3f}%;height:{t.h:.3f}%" in html  # verifier's M6
-    assert "prices 2026-11-17" in html
+    assert "end of day · 2026-11-17" in html
 
 
 @pytest.mark.parametrize("months", [[1, 2, 4, 5], [1, 2, 3, 4, 5]])
@@ -303,3 +313,42 @@ def test_a_sip_card_shows_each_sips_months_and_agrees_with_its_sentence(months: 
     assert sum(not m.paid for m in shown) == ins.numbers["missed"]
     assert len(c.streaks) == ins.numbers["sips"]
     assert c.bars == ()
+
+
+def test_before_prices_an_exit_still_shows_and_a_saved_thesis_is_not_asked_for_again(
+    home: TestClient, tmp_path: Path
+) -> None:
+
+    infy, hdfc = parse_isin("INE009A01021"), parse_isin("INF179K01BE2")
+    ask = r'href="/thesis/([A-Z0-9]{12})" title="Write thesis for'
+    assert set(re.findall(ask, home.get("/").text)) == {infy, hdfc}  # no theses: both asked
+    on = date(2026, 11, 22)
+    with ThesisStore.open(tmp_path / "theses.db") as store:
+        store.put(Thesis(isin=infy, why="w", broken=True, exit_if="growth stalls", written=on))
+        store.put(Thesis(isin=hdfc, why="w", target=Bps(1000), written=on))
+    page = home.get("/").text
+    decide = page.split('id="verdicts"')[1].split("</section>")[0]
+    assert "✕ exit" in decide and f'href="/holding/{infy}"' in decide
+    assert "growth stalls" in decide
+    waits = decide.split("wait for a price")[1]
+    assert f'href="/holding/{hdfc}"' in waits
+    assert not re.findall(ask, page) and "need your reason" not in page
+
+
+def test_every_card_keeps_its_why_and_learn_text(home: TestClient) -> None:
+    import html
+    import json
+
+    r = runner.invoke(cli, ["prices", "import", str(EOD / "bhavcopy-sample.csv")])
+    assert r.exit_code in (0, 1), r.output
+    found = json.loads(runner.invoke(cli, ["insights", "--json"]).output)["insights"]
+    page = html.unescape(home.get("/").text)
+    shown = [i for i in found if i["headline"] in page]
+    assert any(i["kind"] == "what_changed" for i in shown)
+    text = re.sub(r"<[^>]+>", "", page)
+    for i in shown:
+        assert i["detail"] in page, i["kind"]
+    learned = [LEARN[i["kind"]] for i in shown if LEARN.get(i["kind"])]
+    assert learned  # at least one card on this book teaches something
+    for line in learned:
+        assert f"Learn: {line}" in text

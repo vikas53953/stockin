@@ -20,8 +20,8 @@ from typing import Annotated, Literal
 import typer
 from pydantic import TypeAdapter, ValidationError
 
-from . import __version__
-from .alerts import AlertsDamaged, AlertStore, Sent
+from . import __version__, notify
+from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights, tenths_of
@@ -127,12 +127,24 @@ def diagnose(root: Path) -> Doctor:
     checks.append(_ledger_check(root / "ledger.db"))
     checks.append(_quotes_check(root / "prices.db"))
     checks.append(_assets_check(root / "assets.db"))
+    checks.append(_telegram_check(root))
     return Doctor(
         version=__version__,
         data_dir=str(root),
         ok=all(c.status != "fail" for c in checks),
         checks=tuple(checks),
     )
+
+
+def _telegram_check(root: Path) -> DoctorCheck:
+    try:
+        bot = notify.load(root)
+    except ValueError as exc:
+        return DoctorCheck(name="telegram", status="fail", detail=str(exc))
+    if bot is None:
+        hint = "optional: stockin alerts connect"
+        return DoctorCheck(name="telegram", status="warn", detail="not connected", hint=hint)
+    return DoctorCheck(name="telegram", status="ok", detail=f"connected: {bot}")
 
 
 _DAMAGED_HINT = "move prices.db aside (prices download again) and run `stockin prices fetch`"
@@ -1005,6 +1017,9 @@ def _open_alerts() -> Generator[AlertStore]:
     try:
         with AlertStore.open(alerts_path()) as store:
             yield store
+    except AlertsBlocked as exc:
+        hint = "another stockin may be running, or the data folder is read-only; try again"
+        raise _fail(str(exc), hint) from None
     except AlertsDamaged as exc:
         hint = "move alerts.db aside; Stockin starts a fresh one (past alerts are lost)"
         raise _fail(str(exc), hint) from None
@@ -1022,8 +1037,11 @@ def _alert_lines(found: tuple[Sent, ...]) -> None:
         typer.echo(f"{when}  {s.alert.call.upper():<5} {s.alert.because}  [{state}]")
 
 
+SendFlag = Annotated[bool, typer.Option("--send", help="Also send pending alerts to Telegram.")]
+
+
 @alerts_app.command("check")
-def alerts_check(as_json: JsonFlag = False) -> None:
+def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
     """Work out today's verdicts and keep an alert for each one that newly turned
     into add, trim or exit. Running it again on the same numbers adds nothing."""
     with _open_ledger() as ledger:
@@ -1038,19 +1056,22 @@ def alerts_check(as_json: JsonFlag = False) -> None:
     view = AlertsView(priced_on=max(days).isoformat() if days else None, alerts=added)
     if as_json:
         typer.echo(view.model_dump_json(indent=2))
-        return
-    if not added:
+    elif not added:
         typer.echo("no new alerts: no verdict turned into add, trim or exit since the last check")
-        return
-    typer.echo(f"{len(added)} new alert{'s' if len(added) > 1 else ''}:")
-    _alert_lines(added)
+    else:
+        typer.echo(f"{len(added)} new alert{'s' if len(added) > 1 else ''}:")
+        _alert_lines(added)
+    if send:
+        _send_pending(quiet=as_json)
 
 
 @alerts_app.command("list")
 def alerts_list(as_json: JsonFlag = False) -> None:
     """Every alert kept, oldest first, and whether it was sent."""
-    with _open_alerts() as store:
-        found = store.outbox()
+    found: tuple[Sent, ...] = ()
+    if alerts_path().exists() or alerts_path().is_symlink():  # a view never creates the file
+        with _open_alerts() as store:
+            found = store.outbox()
     if as_json:
         typer.echo(AlertsView(priced_on=None, alerts=found).model_dump_json(indent=2))
         return
@@ -1058,6 +1079,87 @@ def alerts_list(as_json: JsonFlag = False) -> None:
         typer.echo("no alerts yet: run `stockin alerts check` after prices are fetched")
         return
     _alert_lines(found)
+
+
+def _bot() -> notify.Bot:
+    try:
+        bot = notify.load(data_dir())
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+    if bot is None:
+        raise _fail("Telegram is not connected yet", "connect it: stockin alerts connect")
+    return bot
+
+
+def _transport(bot: notify.Bot) -> notify.Transport:
+    try:
+        return notify.http_transport(bot.token)
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+
+
+def _send_pending(quiet: bool = False) -> None:
+    bot = _bot()
+    call = _transport(bot)
+    with _open_alerts() as store:
+        done, error = notify.deliver(store, call, bot.chat, india_now)
+        left = len(store.outbox(pending_only=True))
+    n = len(done)
+    typer.echo(f"sent {n} alert{'' if n == 1 else 's'} to Telegram", err=quiet)
+    if error is not None:
+        typer.echo(f"error: {error}", err=True)
+        typer.echo(f"  {left} still pending; they go out on the next send", err=True)
+        raise typer.Exit(1)
+
+
+@alerts_app.command("send")
+def alerts_send() -> None:
+    """Send every pending alert to Telegram, oldest first. Exit 1 if any is left pending."""
+    _send_pending()
+
+
+@alerts_app.command("connect")
+def alerts_connect() -> None:
+    """Connect your own Telegram bot: paste its token, message it once, done.
+
+    The token is typed, not passed on the command line, so it never lands in
+    your shell history. It is saved to telegram.json in your data folder,
+    readable only by you."""
+    raw = typer.prompt("Paste your bot token from @BotFather (hidden)", hide_input=True)
+    try:
+        token = notify.parse_token(raw)
+        call = notify.http_transport(token)
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+    typer.echo("Now open Telegram, send any message (for example: hi) to your bot,")
+    typer.prompt("then press Enter here", default="", show_default=False)
+    try:
+        chat = notify.find_chat(call)
+    except notify.TelegramError as exc:
+        raise _fail(str(exc), "check the token with @BotFather and try again") from None
+    if chat is None:
+        raise _fail(
+            "your bot has no message from you yet",
+            "send it a message in Telegram, then run stockin alerts connect again",
+        )
+    bot = notify.Bot(token=token, chat=chat)
+    try:
+        notify.send_one(call, chat, "Stockin is connected. Alerts will arrive here.")
+    except notify.TelegramError as exc:
+        raise _fail(str(exc)) from None
+    path = notify.save(data_dir(), bot)
+    typer.echo(f"connected: {bot}. Saved to {path} (only you can read it).")
+
+
+@alerts_app.command("test")
+def alerts_test() -> None:
+    """Send one test message to your Telegram, to prove the connection."""
+    bot = _bot()
+    try:
+        notify.send_one(_transport(bot), bot.chat, "Stockin test message: alerts reach you here.")
+    except notify.TelegramError as exc:
+        raise _fail(str(exc)) from None
+    typer.echo(f"sent a test message ({bot})")
 
 
 def _utf8_output() -> None:
