@@ -367,3 +367,22 @@ def test_the_page_keeps_every_fact_the_view_model_holds(web: TestClient, data: P
             assert lot.units in table and lot.long_term in table
             if lot.cost:
                 assert lot.cost in table
+
+
+def test_a_fund_that_is_not_equity_says_why_even_beside_undated_units() -> None:
+    import cas_fixtures as fx
+    from test_insights import _sip_history, _statement
+
+    from stockin.book import Book
+    from stockin.prices import PriceBook
+    from stockin.sources import cas
+
+    # March statement: Jan+Feb arrive undated, March is dated; the fund is debt
+    st_ = cas.from_casparser(_statement(_sip_history([1, 2, 3]), 3, 3), "sha")
+    insts = tuple(i.model_copy(update={"asset_class": "debt"}) for i in st_.instruments)
+    book = Book.of(tuple(st_.facts), insts, tuple(st_.accounts))
+    h = holding_page(book, PriceBook(quotes={}), {}, parse_isin(fx.HDFC_MF), TODAY)
+    assert h is not None and any(r.bought is None for r in h.lots)
+    tile = _clock(_render(h))
+    assert "Not equity: different tax rules, so no long-term date is shown for 1 purchase." in tile
+    assert "before your statements" in tile

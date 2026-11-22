@@ -403,3 +403,31 @@ def test_random_byte_damage_to_the_ledger_never_breaks_the_import_page(tmp_path:
         with bad.open("rb") as fh:
             r = client.post("/import", files={"statement": ("bad.json", fh, "application/json")})
         assert r.status_code == 200 and "Not imported" in r.text
+
+
+def _render_import(cover: object) -> str:
+    from jinja2 import Environment, PackageLoader, select_autoescape
+
+    env = Environment(loader=PackageLoader("stockin", "templates"), autoescape=select_autoescape())
+    return env.get_template("import.html").render(
+        error=None, filename=None, report=None, groups=(), cover=cover, source_label=source_label
+    )
+
+
+def test_the_page_draws_every_gap_line_and_one_axis_label_for_one_month() -> None:
+    ps = (
+        Period(source="cams_kfin_cas", start=date(2026, 1, 1), end=date(2026, 1, 31)),
+        Period(source="cams_kfin_cas", start=date(2026, 4, 1), end=date(2026, 4, 30)),
+        Period(source="nsdl_cas", start=date(2026, 1, 1), end=date(2026, 1, 31)),
+        Period(source="nsdl_cas", start=date(2026, 3, 1), end=date(2026, 3, 31)),
+    )
+    cover = coverage(ps)
+    assert cover is not None and len(cover.gap_lines) == 2
+    page = _render_import(cover)
+    said = re.findall(r'<p class="small">.*?</p>', page, re.S)
+    for line in cover.gap_lines:
+        assert sum(line in p for p in said) == 1
+    one = coverage(ps[:1])
+    page = _render_import(one)
+    axis = page.split('class="cover-lane cover-axis"')[1].split("</div>")[0]
+    assert axis.count("Jan 2026") == 1
