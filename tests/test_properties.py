@@ -705,6 +705,16 @@ def _unique_days(es: list[Entry]) -> list[Entry]:
     return list(seen.values())
 
 
+def _one_a_day(es: list[Entry]) -> list[Entry]:
+    """One entry per (kind, label, day). Between a value and a close on one
+    day the later write wins, so there the order is meant to matter; that
+    case has its own property below."""
+    seen: dict[tuple[str, str, date], Entry] = {}
+    for e in es:
+        seen.setdefault((e.kind, label_key(e.label), e.as_of), e)
+    return list(seen.values())
+
+
 @given(fds(), nw_days, nw_days)
 def test_an_fd_never_shrinks_starts_at_its_principal_and_stops_at_maturity(
     fd: Fd, a: date, b: date
@@ -757,7 +767,7 @@ def test_the_current_entries_do_not_depend_on_order(
 def test_the_store_round_trips_and_ignores_order_and_repeats(
     es: list[Entry], rnd: random.Random
 ) -> None:
-    es = _unique_days(es)
+    es = _one_a_day(es)
     with tempfile.TemporaryDirectory() as d:
         a, b = Path(d) / "a.db", Path(d) / "b.db"
         with AssetStore.open(a) as store:
@@ -771,6 +781,45 @@ def test_the_store_round_trips_and_ignores_order_and_repeats(
         with AssetStore.open(a) as sa, AssetStore.open(b) as sb:
             assert sa.entries() == sb.entries()
             assert sorted(sa.entries(), key=repr) == sorted(es, key=repr)
+
+
+_ONE_DAY = _NW_DAY0 + timedelta(days=700)
+one_day_writes = st.one_of(
+    st.builds(
+        Stated,
+        kind=st.just("bank"),
+        label=st.sampled_from(["SBI", "sbi"]),
+        as_of=st.just(_ONE_DAY),
+        amount=nw_paise.map(lambda p: Money(paise=p)),
+    ),
+    st.builds(
+        Closed, kind=st.just("bank"), label=st.sampled_from(["SBI", "sbi"]), as_of=st.just(_ONE_DAY)
+    ),
+)
+
+
+@given(st.lists(st.one_of(one_day_writes, entries()), max_size=12), nw_days)
+def test_on_one_day_the_later_of_a_value_and_a_close_wins(es: list[Entry], today: date) -> None:
+    """Writes in any sequence, a value and a close for one label on one day
+    among them: what the store calls current is what is current among the
+    last write of each (kind, label, day). A value saved after a close
+    counts, a close after a value ends it, and writing the last one again
+    changes nothing."""
+    last: dict[tuple[str, str, date], Entry] = {}
+    for e in es:
+        last[(e.kind, label_key(e.label), e.as_of)] = e
+    want = current(list(last.values()), today)
+    with tempfile.TemporaryDirectory() as d:
+        with AssetStore.open(Path(d) / "a.db") as store:
+            for e in es:
+                store.put(e)
+            assert current(store.entries(), today) == want
+            before = store.entries()
+            for e in last.values():
+                store.put(e)
+            assert current(store.entries(), today) == want
+        with AssetStore.open(Path(d) / "a.db") as store:
+            assert len(store.entries()) == len(before)
 
 
 targets_ = st.lists(st.integers(0, 10_000), min_size=len(BUCKETS), max_size=len(BUCKETS)).map(

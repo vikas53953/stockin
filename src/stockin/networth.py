@@ -222,6 +222,9 @@ class Closed(_Entry):
 
     entry: Literal["closed"] = "closed"
     kind: Kind
+    reopened: bool = False
+    """A value was written for this same day after the close, so that value
+    counts: on one day the later write wins. Only the store sets it."""
 
 
 Entry = Annotated[Stated | Fd | Gold | Closed, Field(discriminator="entry")]
@@ -290,19 +293,26 @@ def entry_value(e: Stated | Fd | Gold, on: date) -> Money:
             return Money.of(e.grams, e.rate)
 
 
+def _rank(e: Entry) -> tuple[date, int, bytes]:
+    """Later day first; on one day a close, then a value, then a reopened close."""
+    within = 1 if not isinstance(e, Closed) else 0 if e.reopened else 2
+    return (e.as_of, within, _ENTRY.dump_json(e))
+
+
 def current(entries: Iterable[Entry], today: date) -> tuple[Stated | Fd | Gold, ...]:
     """The latest snapshot per (kind, label key) dated on or before `today`,
-    unless that snapshot closed it. On one day a close wins over a balance:
-    "I hold it, and it ended today" means it ended. Order of `entries` never
-    matters: the store keeps one value and one close per key and day."""
+    unless that snapshot closed it. On one day the later write wins: a close
+    after a balance ends it, and a balance after a close (a renewed FD, a
+    close made by mistake) counts. The store records which came later on the
+    close itself (`reopened`), so the order of `entries` never matters: it
+    keeps one value and one close per key and day."""
     latest: dict[tuple[str, str], Entry] = {}
     for e in entries:
         if e.as_of > today:
             continue
         key = (e.kind, label_key(e.label))
         held = latest.get(key)
-        rank = (e.as_of, isinstance(e, Closed), _ENTRY.dump_json(e))
-        if held is None or rank > (held.as_of, isinstance(held, Closed), _ENTRY.dump_json(held)):
+        if held is None or _rank(e) > _rank(held):
             latest[key] = e
     out = [e for _, e in sorted(latest.items()) if not isinstance(e, Closed)]
     return tuple(out)
@@ -653,16 +663,16 @@ class AssetStore:
                     (ok,) = conn.execute("PRAGMA integrity_check(1)").fetchone()
                     if ok != "ok":
                         raise AssetsDamaged(f"{path} failed SQLite's integrity check ({ok})")
-                    tables = {
-                        n
-                        for (n,) in conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table'"
-                        )
-                    }
-                    if tables != {"entries", "targets"}:
+                    # every object, not only tables: a trigger, view or index
+                    # can change what a read or a write does (WITHOUT ROWID
+                    # tables have no automatic index, so there are exactly two)
+                    found = sorted(
+                        f"{t} {n}" for t, n in conn.execute("SELECT type, name FROM sqlite_master")
+                    )
+                    if found != ["table entries", "table targets"]:
                         raise AssetsDamaged(
-                            f"{path} does not hold Stockin's tables (found: "
-                            f"{', '.join(sorted(tables)) or 'none'})"
+                            f"{path} does not hold exactly Stockin's two tables (found: "
+                            f"{', '.join(found) or 'none'})"
                         )
                 elif not readonly:
                     conn.executescript(_SCHEMA)
@@ -701,18 +711,29 @@ class AssetStore:
     def put(self, entry: Entry) -> None:
         """Add a snapshot. The same snapshot again changes nothing; another
         value for the same kind, label and day replaces it (a correction),
-        and so does another close. A value and a close can share a day."""
+        and so does another close. A value and a close can share a day, and
+        the later write wins: a value written after that day's close marks
+        the close `reopened` (both rows stay), and a close written again
+        closes it again."""
+        if isinstance(entry, Closed):
+            entry = entry.model_copy(update={"reopened": False})  # this write is the later one
+        where = (entry.kind, label_key(entry.label), entry.as_of.isoformat())
         with _guard(self._path), self._conn:
             self._conn.execute(
                 "INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?)",
-                (
-                    entry.kind,
-                    label_key(entry.label),
-                    entry.as_of.isoformat(),
-                    int(isinstance(entry, Closed)),
-                    _ENTRY.dump_json(entry).decode(),
-                ),
+                (*where, int(isinstance(entry, Closed)), _ENTRY.dump_json(entry).decode()),
             )
+            if isinstance(entry, Closed):
+                return
+            row = self._conn.execute(
+                "SELECT body FROM entries WHERE kind=? AND key=? AND as_of=? AND closed=1", where
+            ).fetchone()
+            if row is not None:
+                closed = _ENTRY.validate_json(row[0]).model_copy(update={"reopened": True})
+                self._conn.execute(
+                    "UPDATE entries SET body=? WHERE kind=? AND key=? AND as_of=? AND closed=1",
+                    (_ENTRY.dump_json(closed).decode(), *where),
+                )
 
     def set_targets(self, targets: Mapping[Bucket, Bps]) -> None:
         """Replace the whole target mix; an empty mapping clears it."""

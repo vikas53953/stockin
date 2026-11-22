@@ -7,7 +7,7 @@
 - `asset-add`: one snapshot per kind, label and day; the same day again replaces it; labels ignore case and extra spaces.
 - `asset-fd`: an FD is valued by formula (quarterly compounding from 6 months, simple interest under 6), capped at maturity; a matured FD gets a note.
 - `asset-gold`: grams x `--rate-per-gram`.
-- `asset-close`: a `Closed` snapshot; history stays. A close and a value can share a day (the close wins); `--on` before the entry's latest date is refused with the date to use. An FD's entry is dated the day it opened unless `--as-of` is given, so it closes at maturity.
+- `asset-close`: a `Closed` snapshot; history stays. A close and a value can share a day, and the later write wins (a value added after that day's close counts; both rows stay, the close marked `reopened`); `--on` before the entry's latest date is refused with the date to use. An FD's entry is dated the day it opened unless `--as-of` is given, so it closes at maturity.
 - `asset-list`: current entries and their value today.
 - `target-set` / `target-clear`: CLASS=PERCENT pairs adding to exactly 100.
 - `networth`: total = owned - owed; slices add to 10,000 bps; drift = weight - target; notes (drift, on target, stale > 90 days, matured FD, loans, market share, unpriced).

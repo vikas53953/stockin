@@ -24,7 +24,7 @@ from . import __version__
 from .alerts import AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
-from .insights import Insight, all_insights
+from .insights import Insight, all_insights, tenths_of
 from .money import Bps, Money, Price, Qty, Value, percent
 from .networth import (
     KIND_NAME,
@@ -817,7 +817,7 @@ def asset_add(
         typer.echo(_ENTRY_JSON.dump_json(entry, indent=2).decode())
         return
     shown = entry_value(entry, _today()) if not isinstance(entry, Closed) else Money(paise=0)
-    typer.echo(f"saved {KIND_NAME[k]} '{entry.label}' as of {day}: ₹{shown} today")
+    typer.echo(f"saved {KIND_NAME[k]} '{entry.label}' as of {entry.as_of}: ₹{shown} today")
 
 
 def _first_error(exc: ValidationError) -> str:
@@ -902,6 +902,16 @@ def _bps(bps: int) -> str:
     return f"{whole}.{frac:02d}".rstrip("0").rstrip(".") + "%"
 
 
+def _drift(bps: int, target: int) -> str:
+    """Shown weight minus shown target, in the tenths the notes decide on, so
+    the column never contradicts the sentence under it: 2504 against 2000 is
+    '+5.0', not '+5.04'. A gap of exactly whole points drops the '.0'."""
+    gap = tenths_of(bps, 10_000) - tenths_of(target, 10_000)
+    whole, frac = divmod(abs(gap), 10)
+    exact = (bps - target) % 100 == 0
+    return ("+" if gap >= 0 else "-") + (str(whole) if exact else f"{whole}.{frac}")
+
+
 def _optional_book() -> Book | None:
     try:
         with Ledger.open(ledger_path()) as ledger:
@@ -928,8 +938,7 @@ def networth_cmd(as_json: JsonFlag = False) -> None:
     for s in nw.slices:
         aim = ""
         if s.target is not None and s.drift is not None:
-            sign = "+" if s.drift >= 0 else "-"
-            aim = f"  target {_bps(s.target)}  drift {sign}{_bps(abs(s.drift))[:-1]} pts"
+            aim = f"  target {_bps(s.target)}  drift {_drift(s.bps, s.target)} pts"
         typer.echo(f"  {s.name:<12} {'₹' + str(s.value):>19}  {_bps(s.bps):>7}{aim}")
     for n in nw.notes:
         typer.echo(f"- {n.text}")
