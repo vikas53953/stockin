@@ -66,7 +66,7 @@ def test_the_menu_links_land_on_real_anchors(client: TestClient) -> None:
     for a in anchors:
         assert f'id="{a}"' in html
     pages = set(re.findall(r'class="nav-item" href="(/[a-z]*)"', side))
-    assert pages == {"/", "/import", "/reconcile"}
+    assert pages == {"/", "/import", "/reconcile", "/networth"}
     for href in pages:
         assert client.get(href).status_code == 200, href
     # the phone tabs carry every live link and no "soon" entry
