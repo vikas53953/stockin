@@ -127,8 +127,9 @@ last one at most 7 calendar days older is held too. NSE's widest daily price
 band is 20%, so a share that moved further in a few trading days is rare,
 and a 1:1 split whose ex-date close sits just above half the old close
 (₹750.30 against ₹1,500.55) is caught here, not let through by the 2x rule
-(#33 verifier 3, R-1). A fund's NAV moves a few percent a week. The same
-band guards live prices (sources/live.py)."""
+(#33 verifier 3, R-1). A fund's NAV moves a few percent a week. Against a
+price more than 7 days old only the 2x rule applies: after a longer gap
+without prices, a split that closes just above half is stored."""
 
 
 class Jump(Value):
@@ -159,22 +160,29 @@ def is_jump(last: Quote, new: Quote) -> bool:
 
 
 def hold_jumps(
-    file: PriceFile, last: PriceBook, stored: Mapping[Isin, Quote]
+    file: PriceFile,
+    last: PriceBook,
+    stored: Mapping[Isin, Quote],
+    same: PriceBook | None = None,
 ) -> tuple[PriceFile, tuple[Jump, ...]]:
     """Split `file` into what may be stored and the jumps held back. `last`
-    is the book from earlier days; `stored` is what prices.db already has for
-    this file's source and day. A quote that is already stored was accepted
+    is the book from earlier days; `same` is that book from the file's own
+    source only, so the 20% band still sees the last NAV when a bhavcopy
+    close stands in front of it in `last` (or the other way round, #38
+    verifier R-1). `stored` is what prices.db already has for this file's
+    source and day. A quote that is already stored was accepted
     before and is not held again. A held ISIN gets no price for the day (not
     even the one stored before), so what a file leaves behind never depends
     on a damaged copy imported before it."""
     keep: list[Quote] = []
     held: list[Jump] = []
     for q in file.quotes:
-        prev = last.get(q.isin)
-        if prev is None or q == stored.get(q.isin) or not is_jump(prev, q):
+        prevs = [p for p in (last.get(q.isin), same.get(q.isin) if same else None) if p]
+        jumped = next((p for p in prevs if is_jump(p, q)), None)
+        if jumped is None or q == stored.get(q.isin):
             keep.append(q)
         else:
-            held.append(Jump(quote=q, last=prev))
+            held.append(Jump(quote=q, last=jumped))
     return file.model_copy(update={"quotes": tuple(keep)}), tuple(held)
 
 
@@ -407,14 +415,22 @@ class PriceStore:
         changed and the jumps held."""
         held: tuple[Jump, ...] = ()
         if not accept_jumps:
-            last = self.book((q.isin for q in file.quotes), file.day - timedelta(days=1))
-            file, held = hold_jumps(file, last, self.stored(file.source, file.day))
+            isins = [q.isin for q in file.quotes]
+            before = file.day - timedelta(days=1)
+            last = self.book(isins, before)
+            same = self.book(isins, before, sources=(file.source,))
+            file, held = hold_jumps(file, last, self.stored(file.source, file.day), same)
         return self.replace(file), held
 
-    def book(self, isins: Iterable[Isin], on_or_before: date | None = None) -> PriceBook:
+    def book(
+        self,
+        isins: Iterable[Isin],
+        on_or_before: date | None = None,
+        sources: Iterable[Source] | None = None,
+    ) -> PriceBook:
         """The best quote per ISIN: each source's newest file that prices it
         (file day on or before `on_or_before`; default any), then
-        `PriceBook.best` between the sources."""
+        `PriceBook.best` between the sources (default all)."""
         sql = "SELECT on_date, micro_rupees FROM quotes WHERE isin=? AND source=?"
         tail: tuple[str, ...] = ()
         if on_or_before is not None:
@@ -424,7 +440,7 @@ class PriceStore:
         quotes: list[Quote] = []
         with _guard(self._path):
             for isin in sorted(set(isins)):
-                for source in _RANK:
+                for source in _RANK if sources is None else sources:
                     for on, micros in self._conn.execute(sql, (isin, source, *tail)):
                         quotes.append(_quote(isin, on, source, micros))
         return PriceBook.best(quotes)

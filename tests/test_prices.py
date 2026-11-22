@@ -1290,10 +1290,10 @@ def test_a_jump_is_more_than_double_or_less_than_half() -> None:
     ("days", "new", "held"),
     [
         (1, "750.30", True),  # #33 verifier 3: a 1:1 split closing just above half
-        (1, "1800.66", False),  # +19.9997%: inside the band
-        (1, "1800.67", True),  # +20.0003%
-        (1, "1200.44", False),  # -19.9997%
-        (1, "1200.43", True),
+        (1, "1800.66", False),  # exactly +20%: on the band is a real day
+        (1, "1800.67", True),  # +20.0007%
+        (1, "1200.44", False),  # exactly -20%
+        (1, "1200.43", True),  # -20.0007%
         (7, "1800.67", True),  # a week old is still close
         (8, "1800.67", False),  # older: only the 2x rule
         (8, "750.30", False),

@@ -107,6 +107,8 @@ Each holding gets one verdict, with the reason beside it:
 | exit-check | Price below your invalidation level |
 | review-due | Your review date has passed |
 
+Verdicts use end-of-day prices from `stockin prices fetch` (public AMFI and NSE files). A price that moved more than 20% from the same source's price of the last 7 days, or more than double or less than half any earlier one, is held back until you check it (a split, a bonus or a damaged file) and rerun with `--accept-jumps`. After more than a week without a fetch only the 2x rule applies, so run `stockin prices fetch` at least once a week.
+
 ### 8. Get alerts and ask questions
 
 - `stockin alerts check` keeps one alert each time a holding's verdict turns into add, trim or exit, worded exactly as the verdict. The same numbers never alert twice; `stockin alerts list` shows them all.
