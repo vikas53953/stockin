@@ -3,6 +3,7 @@ insight, and the page itself through HTTP with synthetic statements."""
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from itertools import combinations
@@ -165,7 +166,6 @@ def test_with_prices_the_story_and_map_come_from_the_insights(home: TestClient) 
     assert r.exit_code in (0, 1), r.output
     insights = runner.invoke(cli, ["insights", "--json"])
     assert insights.exit_code == 0, insights.output
-    import json
 
     found = json.loads(insights.output)["insights"]
     page = home.get("/").text
@@ -337,7 +337,6 @@ def test_before_prices_an_exit_still_shows_and_a_saved_thesis_is_not_asked_for_a
 
 def test_every_card_keeps_its_why_and_learn_text(home: TestClient) -> None:
     import html
-    import json
 
     r = runner.invoke(cli, ["prices", "import", str(EOD / "bhavcopy-sample.csv")])
     assert r.exit_code in (0, 1), r.output
