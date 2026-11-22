@@ -171,6 +171,9 @@ def test_the_sip_months_are_this_funds_months_from_the_insight() -> None:
     own = [(p.label, p.value > 0) for p in ins.series if p.key.endswith(f":{isin}")]
     assert [(m.label, m.paid) for m in h.sip] == own
     assert len(own) == 5 and sum(not m.paid for m in h.sip) == 1
+    page = _render(h)  # the page draws each month, paid or missed
+    for m in h.sip:
+        assert f'title="{m.label}: {"paid" if m.paid else "missed"}"' in page
 
 
 def test_units_from_before_your_statements_get_no_tax_date() -> None:
@@ -189,6 +192,10 @@ def test_units_from_before_your_statements_get_no_tax_date() -> None:
     assert unknown[0].long_term == "date unknown" and "no known date" in h.lots_note
     assert [r.bought for r in known] == ["5 Mar 2026"]
     assert known[0].long_term == "turns long-term on 6 Mar 2027, in 107 days"
+    # the tax clock bar: 366 days from purchase to long-term, 107 still to go
+    assert known[0].days_left == 107
+    assert known[0].held == pytest.approx((366 - 107) / 366 * 100)
+    assert unknown[0].held is None and unknown[0].days_left is None
 
 
 def test_lots_say_their_long_term_date_or_why_there_is_none(data: Path) -> None:
@@ -201,6 +208,36 @@ def test_lots_say_their_long_term_date_or_why_there_is_none(data: Path) -> None:
             assert "no known date" in h.lots_note
         else:
             assert re.match(r"(long-term since|turns long-term on) \d", lot.long_term)
+            # the bar and its label are one number: full exactly when long-term
+            assert lot.held is not None and 0 <= lot.held <= 100
+            assert (lot.days_left == 0) == (lot.held == 100) == lot.long_term.startswith("long")
+            if lot.days_left:
+                assert lot.long_term.endswith(f"in {lot.days_left} days")
+
+
+@given(
+    month=st.integers(1, 12),
+    day=st.integers(1, 28),
+    today=st.dates(date(2026, 1, 1), date(2028, 12, 31)),
+)
+def test_the_tax_clock_bar_matches_its_sentence_for_any_purchase_day(
+    month: int, day: int, today: date
+) -> None:
+    import cas_fixtures as fx
+    from test_insights import _book, _statement, _trade
+
+    from stockin.prices import PriceBook
+
+    book = _book([_statement({fx.HDFC_MF: [_trade(month, day)]}, 1, 12)])
+    h = holding_page(book, PriceBook(quotes={}), {}, parse_isin(fx.HDFC_MF), today)
+    assert h is not None
+    for lot in h.lots:
+        if lot.held is None:
+            continue
+        assert 0 <= lot.held <= 100
+        assert (lot.days_left == 0) == (lot.held == 100) == lot.long_term.startswith("long")
+        if lot.days_left:
+            assert lot.long_term.endswith(f"in {lot.days_left} days")
 
 
 @pytest.fixture
@@ -232,3 +269,120 @@ def test_a_holding_you_do_not_have_is_404_and_damage_is_said(web: TestClient, da
     (data / "prices.db").write_bytes(b"not a database at all, just text, long enough to matter")
     r = web.get(f"/holding/{INFY}")
     assert r.status_code == 200 and "Prices could not be read" in r.text
+
+
+def test_the_page_draws_each_tax_clock_bar_from_its_own_lot(web: TestClient, data: Path) -> None:
+    from stockin.prices import india_today
+
+    book, prices = _book_and_prices(data)
+    h = holding_page(book, prices, {}, HDFC, india_today())
+    assert h is not None
+    dated = [lot for lot in h.lots if lot.held is not None]
+    assert dated  # the fixture's fund has purchases with dates
+    page = web.get(f"/holding/{HDFC}").text
+    widths = [
+        float(w) for w in re.findall(r'class="clock-fill[^"]*" style="width:([\d.]+)%"', page)
+    ]
+    lefts = re.findall(r'<span class="clock-left">([^<]+)</span>', page)
+    assert widths == [pytest.approx(lot.held, abs=0.01) for lot in dated]
+    want = ["long-term" if lot.days_left == 0 else f"{lot.days_left} days" for lot in dated]
+    assert lefts[: len(dated)] == want
+
+
+def _render(h: object) -> str:
+    from jinja2 import Environment, PackageLoader, select_autoescape
+
+    env = Environment(loader=PackageLoader("stockin", "templates"), autoescape=select_autoescape())
+    return env.get_template("holding.html").render(h=h, damaged=None, theses_damaged=None)
+
+
+def _clock(page: str) -> str:
+    return page.split('aria-label="Purchases and tax dates"')[1].split("<details")[0]
+
+
+def test_the_tax_clock_tile_draws_every_kind_of_purchase_on_a_fixed_day() -> None:
+    import cas_fixtures as fx
+    from test_insights import _book, _sip_history, _statement
+
+    from stockin.prices import PriceBook
+
+    # March statement: Jan+Feb units arrive undated; the March buy is dated
+    book = _book([_statement(_sip_history([1, 2, 3]), 3, 3)])
+    isin = parse_isin(fx.HDFC_MF)
+    before = holding_page(book, PriceBook(quotes={}), {}, isin, date(2026, 11, 19))
+    after = holding_page(book, PriceBook(quotes={}), {}, isin, date(2027, 4, 1))
+    assert before is not None and after is not None
+    tile = _clock(_render(before))
+    assert "107 days" in tile and "long-term</span>" not in tile
+    assert "bar = time held of the year" in tile
+    undated = next(r for r in before.lots if r.bought is None)
+    assert re.search(r"before your statements.*?" + re.escape(f"{undated.units} units"), tile, re.S)
+    # once a year has passed the bar is full and says so, never "0 days"
+    tile = _clock(_render(after))
+    assert re.search(r'class="clock-fill done" style="width:100.00%"', tile)
+    assert "long-term</span>" in tile and "0 days" not in tile
+
+
+def test_a_fund_that_is_not_equity_says_why_it_has_no_tax_bar() -> None:
+    import cas_fixtures as fx
+    from test_insights import _statement, _trade
+
+    from stockin.book import Book
+    from stockin.prices import PriceBook
+    from stockin.sources import cas
+
+    st_ = cas.from_casparser(_statement({fx.ICICI_MF: [_trade(1, 5), _trade(2, 5)]}, 1, 2), "sha")
+    insts = tuple(i.model_copy(update={"asset_class": "debt"}) for i in st_.instruments)
+    book = Book.of(tuple(st_.facts), insts, tuple(st_.accounts))
+    h = holding_page(book, PriceBook(quotes={}), {}, parse_isin(fx.ICICI_MF), TODAY)
+    assert h is not None
+    tile = _clock(_render(h))
+    assert "Not equity: different tax rules, so no long-term date is shown for 2 purchases." in tile
+    assert "clock-fill" not in tile and "bar = time held" not in tile
+
+
+def test_the_page_keeps_every_fact_the_view_model_holds(web: TestClient, data: Path) -> None:
+    import html
+
+    from stockin.prices import india_today
+
+    with ThesisStore.open(data / "theses.db") as store:
+        store.put(_t(1000).model_copy(update={"broken": True, "exit_if": "growth stalls"}))
+    book, prices = _book_and_prices(data)
+    with ThesisStore.open(data / "theses.db") as store:
+        theses = store.all()
+    for isin in (INFY, HDFC):
+        h = holding_page(book, prices, theses, isin, india_today())
+        assert h is not None
+        page = html.unescape(web.get(f"/holding/{isin}").text)
+        assert h.verdict.because in page
+        if h.price:
+            assert f"price {h.price}" in page
+        if h.lots_note:
+            assert h.lots_note in page
+        for m in h.sip:
+            assert f"{m.label}: {'paid' if m.paid else 'missed'}" in page
+        table = page.split("All purchases")[1]
+        for lot in h.lots:
+            assert lot.units in table and lot.long_term in table
+            if lot.cost:
+                assert lot.cost in table
+
+
+def test_a_fund_that_is_not_equity_says_why_even_beside_undated_units() -> None:
+    import cas_fixtures as fx
+    from test_insights import _sip_history, _statement
+
+    from stockin.book import Book
+    from stockin.prices import PriceBook
+    from stockin.sources import cas
+
+    # March statement: Jan+Feb arrive undated, March is dated; the fund is debt
+    st_ = cas.from_casparser(_statement(_sip_history([1, 2, 3]), 3, 3), "sha")
+    insts = tuple(i.model_copy(update={"asset_class": "debt"}) for i in st_.instruments)
+    book = Book.of(tuple(st_.facts), insts, tuple(st_.accounts))
+    h = holding_page(book, PriceBook(quotes={}), {}, parse_isin(fx.HDFC_MF), TODAY)
+    assert h is not None and any(r.bought is None for r in h.lots)
+    tile = _clock(_render(h))
+    assert "Not equity: different tax rules, so no long-term date is shown for 1 purchase." in tile
+    assert "before your statements" in tile
