@@ -18,7 +18,7 @@ from stockin.cli import app as cli
 from stockin.facts import parse_isin
 from stockin.insights import Insight, Point, Weight, pct, tenths_of
 from stockin.money import Bps, Money
-from stockin.story import GROUP_SLOT, MAP_H, MAP_W, MAX_CARDS, card, squarify, story, tiles
+from stockin.story import GROUP_SLOT, LEARN, MAP_H, MAP_W, MAX_CARDS, card, squarify, story, tiles
 from stockin.thesis import Thesis, ThesisStore
 from stockin.web import create_app
 
@@ -345,7 +345,10 @@ def test_every_card_keeps_its_why_and_learn_text(home: TestClient) -> None:
     page = html.unescape(home.get("/").text)
     shown = [i for i in found if i["headline"] in page]
     assert any(i["kind"] == "what_changed" for i in shown)
+    text = re.sub(r"<[^>]+>", "", page)
     for i in shown:
         assert i["detail"] in page, i["kind"]
-        if i.get("learn"):
-            assert f"Learn: {i['learn']}" in re.sub(r"<[^>]+>", "", page), i["kind"]
+    learned = [LEARN[i["kind"]] for i in shown if LEARN.get(i["kind"])]
+    assert learned  # at least one card on this book teaches something
+    for line in learned:
+        assert f"Learn: {line}" in text
