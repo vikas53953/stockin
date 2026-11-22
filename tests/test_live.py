@@ -136,7 +136,7 @@ def test_only_a_fresh_trade_from_today_is_live() -> None:
 
 
 @given(st.lists(st.sampled_from(["live", "bhavcopy", "amfi"]), max_size=3), st.randoms())
-def test_live_beats_a_close_only_on_its_own_day_in_any_order(
+def test_on_one_day_the_close_beats_live_beats_nav_in_any_order(
     sources: list[str], rnd: object
 ) -> None:
     day = date(2026, 11, 16)
@@ -153,7 +153,7 @@ def test_live_beats_a_close_only_on_its_own_day_in_any_order(
     assert best == PriceBook.best(quotes).get(INFY)
     assert best is not None
     if sources:
-        rank = {"live": 0, "bhavcopy": 1, "amfi": 2}
+        rank = {"bhavcopy": 0, "live": 1, "amfi": 2}  # the official close wins its day
         assert best.on == day and best.source == min(sources, key=rank.__getitem__)
 
 
@@ -190,11 +190,11 @@ class Net:
         self.price, self.age, self.asked, self.lists = price, age, [], 0
         self.down = False
 
-    def symbols(self) -> dict[Isin, str]:
+    def symbols(self) -> tuple[dict[Isin, str], bool]:
         self.lists += 1
         if self.down:
             raise LiveRejected("could not download NSE's list of symbols")
-        return live.parse_symbols((FIX / "live" / "EQUITY_L-sample.csv").read_bytes())
+        return live.parse_symbols((FIX / "live" / "EQUITY_L-sample.csv").read_bytes()), True
 
     def quote(self, isin: Isin, symbol: str) -> LiveQuote:
         self.asked.append(symbol)
@@ -300,3 +300,156 @@ def test_watch_keeps_going_after_a_failed_pass(
     monkeypatch.setattr(cli_mod, "_sleep", sleep)
     r = runner.invoke(cli, ["watch"])
     assert r.exit_code == 0 and len(passes) == 2 and slept == [300, 300]
+
+
+# ------------------------------------------------------------ #33 verifier notes
+
+
+def _truncating_server(body: bytes, length: int) -> tuple[str, object]:
+    """A server that promises `length` bytes and sends `body` then hangs up."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % length + body)
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{srv.getsockname()[1]}", srv
+
+
+@pytest.mark.parametrize(
+    ("body", "length"),
+    [(b'{"chart":{', 5000), (b"[" * 100_000 + b"]" * 100_000, 200_000)],
+)
+def test_a_broken_http_answer_falls_back_never_crashes(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, length: int
+) -> None:
+    """R-1: cut short (IncompleteRead) or nested past the parser's depth."""
+    base, srv = _truncating_server(body, length)
+    monkeypatch.setattr(live, "CHART_URL", base + "/{symbol}")
+    try:
+        with pytest.raises(LiveRejected):
+            live.fetch_quote(INFY, "INFY")
+    finally:
+        srv.close()  # type: ignore[attr-defined]
+
+
+def test_a_garbled_status_line_on_the_symbol_list_is_skipped() -> None:
+    import http.client
+
+    def get(url: str) -> bytes | None:
+        if url == live.EQUITY_LIST_URL:
+            raise http.client.BadStatusLine("garbage")
+        return b"SYMBOL,ISIN NUMBER\nNIFTYBEES,INF204KB14I2\n"
+
+    found, complete = live.fetch_symbols(get)
+    assert found == {parse_isin("INF204KB14I2"): "NIFTYBEES"} and complete is False
+
+
+def test_a_partial_symbol_list_is_used_but_not_kept(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-3: the equity list failed once; the next pass must try again."""
+    calls: list[int] = []
+
+    def partial() -> tuple[dict[Isin, str], bool]:
+        calls.append(1)
+        return (
+            ({parse_isin("INF204KB14I2"): "NIFTYBEES"}, False) if len(calls) == 1 else net.symbols()
+        )
+
+    monkeypatch.setattr(live, "fetch_symbols", partial)
+    first = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert "not listed" in first["end_of_day"][0]["reason"]
+    second = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert second["live"][0]["isin"] == INFY and len(calls) == 2
+
+
+def test_the_symbol_list_is_downloaded_again_on_a_new_day(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V4 survivor: the cache is for one day."""
+    runner.invoke(cli, ["prices", "live"])
+    runner.invoke(cli, ["prices", "live"])
+    assert net.lists == 1
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON + timedelta(days=1))
+    runner.invoke(cli, ["prices", "live"])
+    assert net.lists == 2
+
+
+@pytest.mark.parametrize("price", ["750.25", "3001.20"])
+def test_a_live_price_that_jumps_keeps_the_close(data: Path, net: Net, price: str) -> None:
+    """R-2: a split day must not send an ADD or TRIM on its own; the same
+    2x rule as price files."""
+    net.price = price
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert view["live"] == [] and "split or bonus" in view["end_of_day"][0]["reason"]
+
+
+def test_a_live_price_just_inside_the_jump_rule_is_used(data: Path, net: Net) -> None:
+    net.price = "3001.00"  # close 1500.55: exactly 2x is not a jump
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert view["live"][0]["price"]["micro_rupees"] == 3_001_000_000
+
+
+def test_watch_once_send_sends(data: Path, net: Net, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V9 survivor."""
+    sent: list[bool] = []
+    monkeypatch.setattr(cli_mod, "_send_pending", lambda quiet=False: sent.append(True))
+    assert runner.invoke(cli, ["watch", "--once", "--send"]).exit_code == 0
+    assert runner.invoke(cli, ["watch", "--once"]).exit_code == 0
+    assert sent == [True]
+
+
+def test_watch_survives_an_unexpected_error_in_a_pass(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-1: only Ctrl+C ends a watch."""
+    passes: list[int] = []
+
+    def boom(send: bool) -> None:
+        passes.append(1)
+        raise RuntimeError("something new")
+
+    slept: list[int] = []
+
+    def sleep(s: int) -> None:
+        slept.append(s)
+        if len(slept) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "india_now", lambda: MON)
+    monkeypatch.setattr(cli_mod, "_watch_pass", boom)
+    monkeypatch.setattr(cli_mod, "_sleep", sleep)
+    r = runner.invoke(cli, ["watch"])
+    assert r.exit_code == 0 and len(passes) == 2
+    assert "this pass failed (RuntimeError: something new); trying again" in r.output
+
+
+def test_a_quote_is_asked_for_once_with_a_short_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C-3: a slow or dead source costs one holding QUOTE_TIMEOUT seconds a
+    pass, not three attempts with pauses."""
+    import urllib.error
+    import urllib.request
+
+    asked: list[float] = []
+
+    def dead(req: object, timeout: float) -> object:
+        asked.append(timeout)
+        raise urllib.error.URLError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", dead)
+    with pytest.raises(LiveRejected):
+        live.fetch_quote(INFY, "INFY")
+    assert asked == [live.QUOTE_TIMEOUT] and live.QUOTE_TIMEOUT <= 10

@@ -30,4 +30,9 @@ With network, during market hours, `live` has INFY with a time within 20 minutes
 - Quotes are a few minutes behind and unofficial; anything odd (wrong symbol, not INR, no time, ≤ 0, beyond ₹1 crore) is refused, never guessed.
 - Prices are rounded half-even to the paise from the JSON text, never through a float.
 - On an NSE holiday the newest trade is from an earlier day, so nothing is live.
-- A live price beats only the same day's close; it is never written to `prices.db`.
+- During the day a live trade beats yesterday's close (it is newer). On the same day NSE's official close, once `stockin prices fetch` has it, beats the day's last live trade. Live prices are never written to `prices.db`.
+- A live price more than double or less than half the last close is not used (a split or bonus day, or a bad quote), the same 2x rule as price files; the close stands and the reason says so.
+- One quote is asked for once, with a 10-second timeout; a cut-off or garbled answer falls back to the close.
+- A partial symbol list (the equity list failed, the ETF list worked) is used for that pass but not kept, so the next pass downloads again.
+- `watch` never stops on an error in a pass: it prints `error: this pass failed (...)` and tries again next pass. Only Ctrl+C ends it.
+- `watch` does not download end-of-day files. Schedule `stockin prices fetch` once each evening (after about 19:00 IST) next to it.

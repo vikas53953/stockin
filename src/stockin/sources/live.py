@@ -17,9 +17,12 @@ Parsers are pure functions of the bytes; `fetch_*` are the only network calls.
 from __future__ import annotations
 
 import csv
+import http.client
 import io
 import json
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
@@ -117,7 +120,7 @@ def parse_chart(data: bytes, isin: Isin, symbol: str) -> LiveQuote:
     try:
         raw: Any = json.loads(data, parse_float=Decimal, parse_int=Decimal)
         meta: Any = raw["chart"]["result"][0]["meta"]
-    except (ValueError, KeyError, IndexError, TypeError):
+    except (ValueError, KeyError, IndexError, TypeError, RecursionError):
         raise LiveRejected(f"{symbol}: the quote could not be read") from None
     if not isinstance(meta, dict):
         raise LiveRejected(f"{symbol}: the quote could not be read")
@@ -142,31 +145,51 @@ def parse_chart(data: bytes, isin: Isin, symbol: str) -> LiveQuote:
 Get = Callable[[str], bytes | None]
 
 
-def fetch_symbols(get: Get = eod._get) -> dict[Isin, str]:  # pyright: ignore[reportPrivateUsage]
+_FETCH_ERRORS = (OSError, http.client.HTTPException, ValueError, RecursionError)
+"""Every way one HTTP answer can go wrong: refused, reset, cut short
+(IncompleteRead), a garbled status line (BadStatusLine), or bytes no parser
+can hold (#33 verifier R-1). Each is a fallback to the close, never a crash."""
+
+
+def fetch_symbols(get: Get = eod._get) -> tuple[dict[Isin, str], bool]:  # pyright: ignore[reportPrivateUsage]
+    """The ISIN-to-symbol pairs from both NSE lists, and whether the equity
+    list (the long one) was among them. A partial list is used but not
+    kept, so the next pass tries again (#33 verifier R-3)."""
     out: dict[Isin, str] = {}
+    complete = False
     for url in (EQUITY_LIST_URL, ETF_LIST_URL):
         try:
             data = get(url)
-        except OSError:
+            found = parse_symbols(data) if data is not None else {}
+        except (*_FETCH_ERRORS, LiveRejected):
             continue
-        if data is not None:
-            try:
-                out |= parse_symbols(data)
-            except LiveRejected:
-                continue
+        out |= found
+        complete = complete or (url == EQUITY_LIST_URL and bool(found))
     if not out:
         raise LiveRejected("could not download NSE's list of symbols")
-    return out
+    return out, complete
 
 
-def _get_quick(url: str) -> bytes | None:
-    return eod._get(url, timeout=15)  # pyright: ignore[reportPrivateUsage]
+QUOTE_TIMEOUT = 10
+"""Seconds for one quote, tried once: a slow source costs one holding ten
+seconds per pass, not 45 (#33 verifier C-3)."""
 
 
-def fetch_quote(isin: Isin, symbol: str, get: Get = _get_quick) -> LiveQuote:
+def _get_once(url: str) -> bytes | None:
+    req = urllib.request.Request(url, headers={"User-Agent": eod._UA})  # pyright: ignore[reportPrivateUsage]
+    try:
+        with urllib.request.urlopen(req, timeout=QUOTE_TIMEOUT) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def fetch_quote(isin: Isin, symbol: str, get: Get = _get_once) -> LiveQuote:
     try:
         data = get(CHART_URL.format(symbol=urllib.parse.quote(f"{symbol}.NS")))
-    except OSError as exc:
+    except _FETCH_ERRORS as exc:
         raise LiveRejected(
             f"{symbol}: could not reach the quote source ({type(exc).__name__})"
         ) from None

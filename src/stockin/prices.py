@@ -32,10 +32,13 @@ from .facts import Isin
 from .money import Money, Price, Qty, Value
 
 Source = Literal["live", "bhavcopy", "amfi"]
-_RANK: dict[str, int] = {"live": -1, "bhavcopy": 0, "amfi": 1}
-"""Tie-break on the same day: a live trade beats that day's close (it is
-newer), and the exchange close (what you could sell at) beats the AMFI NAV.
-Only an ETF has both. Live quotes are never stored: prices.db holds files."""
+_RANK: dict[str, int] = {"bhavcopy": 0, "live": 1, "amfi": 2}
+"""Tie-break on the same day: the exchange's official close (what you could
+sell at) beats a live trade, which beats the AMFI NAV. So after the close
+NSE's bhavcopy, once fetched, replaces the day's last live trade (#33
+verifier C-5); during the day there is no bhavcopy for today yet, and the
+live trade wins by date. Only an ETF has all three. Live quotes are never
+stored: prices.db holds files."""
 _STORED: tuple[Source, ...] = ("bhavcopy", "amfi")
 
 

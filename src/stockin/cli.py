@@ -37,6 +37,7 @@ from .prices import (
     Quote,
     india_now,
     india_today,
+    is_jump,
     left_out,
 )
 from .sources import cas, eod, live
@@ -891,7 +892,9 @@ def _symbols(today: date) -> dict[Isin, str]:
             return {Isin(k): str(v) for k, v in dict(cached["symbols"]).items()}
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    found = live.fetch_symbols()
+    found, complete = live.fetch_symbols()
+    if not complete:
+        return found  # used for this pass, not kept: the next pass tries again
     try:
         body = {"day": today.isoformat(), "symbols": dict(sorted(found.items()))}
         path.write_text(json.dumps(body), encoding="utf-8")
@@ -928,6 +931,15 @@ def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
             q = live.fetch_quote(isin, symbol)
         except live.LiveRejected as exc:
             fallbacks.append(Fallback(isin=isin, reason=str(exc)))
+            continue
+        close = eod_book.get(isin)
+        if close is not None and is_jump(close.price, q.price):
+            jump = (
+                f"{symbol}: ₹{_rupees(q.price)} is more than double or less than half "
+                f"the close of ₹{_rupees(close.price)} (a split or bonus?); the close "
+                "stands, as it does for a jump in a price file"
+            )
+            fallbacks.append(Fallback(isin=isin, reason=jump))
             continue
         as_price = live.as_quote(q, now)
         if as_price is None:
@@ -992,8 +1004,7 @@ def watch(
                 _watch_pass(send)
                 return
             if live.market_open(now):
-                with suppress(typer.Exit):  # said on stderr; tried again next pass
-                    _watch_pass(send)
+                _guarded_pass(send)
             wait = every if live.market_open(now) else _until_open(now)
             if not live.market_open(now):
                 typer.echo(
@@ -1002,6 +1013,17 @@ def watch(
             _sleep(wait)
     except KeyboardInterrupt:
         typer.echo("stopped")
+
+
+def _guarded_pass(send: bool) -> None:
+    """One pass of a long watch. Whatever goes wrong is said in one line and
+    tried again next pass; only Ctrl+C ends the watch (#33 verifier R-1)."""
+    try:
+        _watch_pass(send)
+    except typer.Exit:
+        pass  # already said on stderr
+    except Exception as exc:
+        typer.echo(f"error: this pass failed ({type(exc).__name__}: {exc}); trying again", err=True)
 
 
 def _until_open(now: datetime) -> int:
