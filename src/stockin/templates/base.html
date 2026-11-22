@@ -1,134 +1,51 @@
+{% import "_ui.html" as ui %}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}Stockin{% endblock %}</title>
-<style>
-:root{--bg:#f7f8f6;--panel:#fff;--fg:#18201c;--muted:#5d6862;--line:#dfe3df;--accent:#0f6e52;--ok:#0f6e52;--warn:#9a5b00;--bad:#b42318;--chip:#eef2ef;
-  --font:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#111513;--panel:#181e1b;--fg:#e6ece8;--muted:#9ba7a0;--line:#2a332e;--accent:#4cc79a;--ok:#4cc79a;--warn:#f0a43c;--bad:#ff7b6e;--chip:#202824;color-scheme:dark}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--font)}
-.wrap{max-width:980px;margin:0 auto;padding:28px max(16px,env(safe-area-inset-left)) 64px max(16px,env(safe-area-inset-right));display:grid;gap:24px}
-nav{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
-nav b{font-size:20px;letter-spacing:-.01em}
-nav a{color:var(--muted);text-decoration:none}
-nav a[aria-current]{color:var(--fg);font-weight:600}
-nav .tag{margin-left:auto;font:12px var(--mono);color:var(--muted)}
-h1{font-size:22px;margin:0}
-h2{font-size:16px;margin:0 0 8px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:12px;min-width:0}
-.muted{color:var(--muted)}
-.chips{display:flex;gap:8px;flex-wrap:wrap}
-.chip{font:13px var(--mono);padding:3px 10px;border-radius:999px;background:var(--chip)}
-.chip.ok{color:var(--ok)}.chip.bad{color:var(--bad);font-weight:600}.chip.warn{color:var(--warn)}
-.scroll{overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-th{font:12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-td.num,th.num{text-align:right}
-td.name{white-space:normal;min-width:120px}
-@media (max-width:560px){th,td{padding:8px 5px}th{white-space:normal}}
-tr:last-child td{border-bottom:0}
-.acct{font-weight:600;padding-top:14px;white-space:normal}
-.isin{font:12.5px var(--mono);color:var(--muted)}
-.unknown{color:var(--muted);font-style:italic}
-.status-mismatch{color:var(--bad);font-weight:600}.status-inferred{color:var(--warn)}.status-match{color:var(--ok)}
-form{display:grid;gap:12px;min-width:0}
-label,.panel>*{min-width:0}
-input[type=file],input[type=password]{width:100%}
-label{display:grid;gap:4px;font-weight:500}
-input[type=file],input[type=password]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);max-width:100%}
-button{font:inherit;font-weight:600;padding:9px 16px;border-radius:8px;border:0;background:var(--accent);color:var(--bg);cursor:pointer;justify-self:start}
-button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.notice{padding:12px 14px;border-radius:10px;border:1px solid var(--line)}
-.notice.bad{border-color:var(--bad);color:var(--bad)}
-.notice.ok{border-color:var(--ok)}
-/* home story (direction A with B's map) */
-:root{--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s0:#8a948f;--on-fill:#111}
-@media (prefers-color-scheme:dark){:root{--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s0:#6d7772;--on-fill:#fff}}
-.s1{background:var(--s1)}.s2{background:var(--s2)}.s3{background:var(--s3)}.s4{background:var(--s4)}.s5{background:var(--s5)}.s0{background:var(--s0)}
-.hero{display:grid;gap:8px}
-.hero-top{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:baseline;justify-content:space-between}
-.total{font-size:30px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.changed{margin:0;font-size:16px}.changed-head{font-weight:600}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:10px;align-content:start;min-width:0}
-.card h2{font-size:17px;margin:0;line-height:1.35}
-.card p{margin:0}
-.badge{font:12px var(--mono);justify-self:start;padding:2px 8px;border-radius:999px;background:var(--chip)}
-.tone-warn .badge{color:var(--warn)}.tone-good .badge{color:var(--ok)}.tone-unknown .badge{color:var(--muted)}
-.learn{font-size:13.5px;color:var(--muted)}
-.bars{display:grid;gap:6px}
-.bar-row{display:grid;grid-template-columns:minmax(0,9em) 1fr auto;gap:8px;align-items:center;font-size:13px}
-.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar-track{position:relative;height:12px}
-.bar{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;min-width:2px}
-.bar-line{position:absolute;top:-3px;bottom:-3px;border-left:2px dashed var(--fg)}
-.bar-value{font:12.5px var(--mono);font-variant-numeric:tabular-nums}
-.line-key{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
-.line-swatch{display:inline-block;width:0;height:12px;border-left:2px dashed var(--fg)}
-.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
-.legend span{display:inline-flex;gap:6px;align-items:center}
-.sw{display:inline-block;width:12px;height:12px;border-radius:3px}
-.map{position:relative;width:100%;aspect-ratio:100/56;min-height:220px}
-.tile{position:absolute;box-shadow:inset 0 0 0 1px var(--panel);border:1px solid var(--panel);border-radius:4px;padding:6px 8px;overflow:hidden;color:var(--on-fill);display:flex;flex-direction:column;gap:2px;min-width:0}
-.tile-name{font-weight:600;font-size:13px;line-height:1.25;overflow:hidden;text-overflow:ellipsis}
-.tile-share{font:12px var(--mono)}
-.tile.small{padding:2px 4px}.tile.small .tile-name{display:none}.tile.small .tile-share{font-size:10.5px}
-.tile:hover{outline:2px solid var(--fg);z-index:1}
-.streaks{display:grid;gap:8px}
-.streak{display:grid;gap:4px;font-size:13px}
-.streak-name{font-weight:500}
-.months{display:flex;flex-wrap:wrap;gap:4px}
-.month{font:11.5px var(--mono);padding:2px 6px;border-radius:6px;background:var(--chip);display:inline-flex;gap:4px}
-.month.paid b{color:var(--ok)}.month.missed{outline:1px solid var(--bad)}.month.missed b{color:var(--bad)}
-@media (max-width:560px){.map{aspect-ratio:1/1}}
-/* verdicts */
-.verdicts{list-style:none;margin:0;padding:0;display:grid}
-.verdict{display:grid;grid-template-columns:7.5em 1fr auto;gap:6px 12px;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--line)}
-.verdict:last-child{border-bottom:0}
-.call{font:600 12.5px var(--mono);padding:2px 8px;border-radius:999px;background:var(--chip);justify-self:start;white-space:nowrap}
-.call-exit .call{color:var(--bad)}.call-trim .call{color:var(--warn)}.call-add .call{color:var(--accent)}.call-review .call,.call-hold .call{color:var(--muted)}
-.edit{font-size:13px;color:var(--accent);white-space:nowrap}
-@media (max-width:560px){.verdict{grid-template-columns:1fr}.edit{justify-self:start}}
-textarea,input[type=text]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:100%;max-width:100%}
-textarea{min-height:5.5em;resize:vertical}
-/* holding page */
-.crumb{margin:0}.crumb a{color:var(--muted);text-decoration:none}
-.h-name{font-size:26px;letter-spacing:-.01em}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:12px}
-.lt{font-size:13.5px;color:var(--muted)}
-.wbar .line-key{flex-wrap:wrap}
-@media (max-width:560px){.stats{grid-template-columns:1fr 1fr}.stat-num{font-size:17px}}
-.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:grid;gap:2px;min-width:0}
-.stat-label{font:12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-.stat-num{font-size:20px;font-variant-numeric:tabular-nums}
-.v-head{display:grid;gap:8px}.v-head h2{font-size:17px;line-height:1.4;margin:0}
-.wbar{display:grid;gap:6px}
-.wtrack{position:relative;height:16px;background:var(--chip);border-radius:4px}
-.wfill{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;min-width:2px}
-.wband{position:absolute;top:-4px;bottom:-4px;border:2px solid var(--fg);border-radius:4px;opacity:.55}
-.wtarget{position:absolute;top:-6px;bottom:-6px;border-left:2px solid var(--fg)}
-.band-swatch{display:inline-block;width:14px;height:10px;border:2px solid var(--fg);border-radius:3px;opacity:.55}
-.thesis p{margin:0}.thesis{display:grid;gap:4px}
-.button-link{justify-self:start;font-weight:600;padding:8px 14px;border-radius:8px;background:var(--accent);color:var(--bg);text-decoration:none}
-a.tile{text-decoration:none}a.bar-row,a.verdict-name{color:inherit;text-decoration:none}
-a.bar-row:hover .bar-label,a.verdict-name:hover,td.name a:hover{text-decoration:underline}
-td.name a{color:inherit}
-.check{display:flex;gap:8px;align-items:center;font-weight:500}
-</style>
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/ui.css">
 </head>
 <body>
-<div class="wrap">
-<nav>
-  <b>Stockin</b>
-  <a href="/" {% if active == "home" %}aria-current="page"{% endif %}>Holdings</a>
-  <a href="/reconcile" {% if active == "reconcile" %}aria-current="page"{% endif %}>Reconcile</a>
+{#- One menu for every page. An entry with no href is shown as "soon": a later
+    sprint turns it on by giving it a route here and nothing else. -#}
+{% set nav = [
+  ("home", "Home", "/", "home"),
+  ("holdings", "Holdings", "/#holdings", "list"),
+  ("decide", "Decide", "/#verdicts", "check"),
+  (None, None, None, None),
+  ("networth", "Net worth", None, "pie"),
+  ("alerts", "Alerts", None, "bell"),
+  (None, None, None, None),
+  ("import", "Import", "/#import", "upload"),
+  ("reconcile", "Reconcile", "/reconcile", "scale"),
+] %}
+<div class="shell">
+<aside class="side" aria-label="Main menu">
+  <a class="brand" href="/">Stockin</a>
+  <nav aria-label="Main">
+  {% for key, label, href, icon in nav %}
+    {% if key is none %}<hr>
+    {% elif href %}<a class="nav-item" href="{{ href }}"{% if active == key %} aria-current="page"{% endif %}>{{ ui.icon(icon) }}{{ label }}</a>
+    {% else %}<span class="nav-item soon" aria-disabled="true">{{ ui.icon(icon) }}{{ label }}<span class="soon-tag">soon</span></span>
+    {% endif %}
+  {% endfor %}
+  </nav>
   <span class="tag">read-only · this computer only</span>
-</nav>
+</aside>
+<main class="main">
+<div class="wrap">
+<div class="mobile-brand"><b>Stockin</b><span class="tag">read-only · this computer only</span></div>
 {% block body %}{% endblock %}
 </div>
+</main>
+</div>
+<nav class="tabbar" aria-label="Main (phone)">
+{% for key, label, href, icon in nav if href %}
+  <a class="nav-item" href="{{ href }}"{% if active == key %} aria-current="page"{% endif %}>{{ ui.icon(icon) }}{{ label }}</a>
+{% endfor %}
+</nav>
 </body>
 </html>

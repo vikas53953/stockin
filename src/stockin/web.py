@@ -5,6 +5,7 @@ Pages, all drawn from the same objects the CLI prints:
   /thesis/ISIN write why you hold a holding, its target weight, or mark it broken
   /import      POST a CAS (PDF + password, or casparser JSON); shows the report
   /reconcile   every check, mismatches first
+  /static      the shared design tokens and components (tokens.css, ui.css)
 
 Nothing here can place an order. The writes are importing a statement,
 through the same `cas.read` -> `LedgerWriter.ingest` path as the CLI, and
@@ -24,6 +25,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from .book import Book, Check, Holding, ReconcileReport, reconcile
@@ -37,6 +39,8 @@ from .story import story
 from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, for_book, parse_percent
 
 PRICES_HINT = "Move prices.db aside, then run `stockin prices fetch` to download prices again."
+
+STATIC = Path(__file__).parent / "static"
 
 MAX_UPLOAD = 20 * 1024 * 1024  # a CAS PDF is well under 5 MB
 
@@ -142,6 +146,8 @@ def create_app(db: Path, port: int) -> FastAPI:
         ):
             return PlainTextResponse("cross-site request refused", 403)
         return await call_next(request)
+
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     def page(name: str, **ctx: object) -> HTMLResponse:
         return HTMLResponse(_env.get_template(name).render(**ctx))
