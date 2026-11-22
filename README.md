@@ -44,12 +44,19 @@ Demat statements list balances, not trades, so cost shows as `unknown` for demat
 
 ### 3. Add what the CAS does not cover
 
+> **Working.** `stockin asset add`, `asset list`, `asset close` and `target set` run today.
+
 ```bash
-stockin asset add epf  --balance 845000 --as-of 2026-10-31
-stockin asset add ppf  --balance 312000 --as-of 2026-10-31
-stockin asset add fd   --principal 200000 --rate 7.1 --start 2026-04-01 --months 12
-stockin asset add gold --grams 20
+stockin asset add bank --label "SBI savings" --value 250000
+stockin asset add epf  --value 845000 --as-of 2026-10-31
+stockin asset add ppf  --value 312000 --as-of 2026-10-31
+stockin asset add fd   --label "HDFC FD" --principal 200000 --rate 7.1 --start 2026-04-01 --months 12
+stockin asset add gold --grams 20 --rate-per-gram 7650
+stockin asset add loan --label "Home loan" --value 1200000
+stockin target set equity=60 debt=20 gold=10 cash=10
 ```
+
+Each line is a snapshot for its day: adding a later balance keeps the earlier one as history, and the same day again corrects it. An FD is valued by formula, compounded quarterly like a bank FD, so you enter it once. `stockin asset close loan --label "Home loan"` marks one as ended without deleting its history. Your entries live in `assets.db`, the only copy of what you typed, so back it up; rebuilding the ledger never touches it.
 
 ### 4. Check it matches
 
@@ -63,11 +70,13 @@ Every unit Stockin computes is compared with the CAS. Zero mismatches prints `OK
 
 ### 5. See your net worth
 
+> **Working.**
+
 ```bash
 stockin networth
 ```
 
-You see the total, the split by asset class, and the drift from your target mix.
+You see the total (everything you own minus loans), the split by asset class, the drift from your target mix, and a few sentences about what stands out: a class far from its target, a balance not updated in 90 days, a matured FD. Add, trim and exit verdicts stay measured against your market holdings only.
 
 ### 6. Write a thesis
 
