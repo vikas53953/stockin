@@ -157,6 +157,12 @@ The owner ran the whole drop 1 checklist on Windows with the synthetic sample PD
 - **Rule:** every block leads with a chart and a headline of at most 12 words; the longer explanation sits behind a "Why?" disclosure. Pages are built from one shared kit (`static/tokens.css`, `static/ui.css`, `templates/_ui.html`) so later sprints look the same. The owner picked direction A (Cockpit: side menu and tile grid) from three clickable options on 2026-11-22.
 - **Caught since:** nothing yet; the redesign PRs are in progress.
 
+### 25. A redesign must keep every state the old screen handled, not only the happy one
+- **What happened:** the first verifier on PR #31 (home as a cockpit) FAILed it. The new Decide tile drew each verdict as a gauge and skipped verdicts with no weight. An exit on a holding with no price has no weight, so before `stockin prices fetch` (the normal state right after an import) the exit vanished from home, where the old page showed it. Reviews caused by a missing price were also counted as "need your reason", so holdings that already had a thesis were asked for one. Four injected bugs survived: no test asserted that an exit reaches home, that a review chip opens the thesis form, or that a card keeps its Why? and Learn text.
+- **Lesson:** the PR's tests checked that the new charts agree with their sentences on a priced book. They never compared the new screen with the old one in the states the old one handled: no prices, damaged theses, more calls than fit.
+- **Rule:** a redesign PR adds a test for each state the old screen handled (empty, no prices, damaged prices, damaged theses, overflow) that asserts the same facts still appear, and a test for every link a tile adds.
+- **Caught since:** nothing yet; the fix is in verification.
+
 ## Sprint 1, drop 2 retro (2026-11-22)
 
 The owner installed drop 2 on Windows, ran the test checklist, and said every step went well. Sprint 1 (both drops) is accepted. v0.1 is to be tagged on `fa8e76b`, the main commit the owner tested; this session cannot push tags, so the owner creates it (not yet on GitHub when this was written).
