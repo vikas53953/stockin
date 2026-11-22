@@ -162,3 +162,14 @@ jobs:
           $env:STOCKIN_DATA = "$HOME\stockin-data"
           stockin prices fetch
           exit $LASTEXITCODE
+      - name: Live quotes and watch on Windows (informational; public sources may refuse CI machines)
+        continue-on-error: true
+        run: |
+          $env:PATH = "$(uv tool dir --bin);$env:PATH"
+          $env:STOCKIN_DATA = "$HOME\stockin-data"
+          stockin prices live
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin prices live --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin watch --once
+          exit $LASTEXITCODE

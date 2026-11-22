@@ -30,7 +30,7 @@ delivered stays pending and is tried again on the next run.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -125,7 +125,7 @@ class AlertStore:
                 raise AlertsBlocked(f"{path} could not be created ({exc.strerror})") from None
         if not path.is_file():
             raise AlertsDamaged(f"{path} is not a file")
-        conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+        conn = sqlite3.connect(path, timeout=30, isolation_level=None)
         store = cls(conn, path)
         try:
             with _guard(path), conn:
@@ -188,9 +188,34 @@ class AlertStore:
 
     def mark_sent(self, id: int, when: datetime) -> None:
         with _guard(self._path), self._conn:
-            self._conn.execute(
-                "UPDATE outbox SET sent = ? WHERE id = ? AND sent IS NULL", (when.isoformat(), id)
-            )
+            self._mark(id, when)
+
+    def _mark(self, id: int, when: datetime) -> None:
+        self._conn.execute(
+            "UPDATE outbox SET sent = ? WHERE id = ? AND sent IS NULL", (when.isoformat(), id)
+        )
+
+    @contextmanager
+    def sending(self, id: int) -> Generator[Callable[[datetime], None] | None]:
+        """Hold alerts.db's write lock while one alert is sent. Yields a
+        function that marks it sent, or None if it is no longer pending (a
+        second sender got there first, or a check withdrew it). While the
+        lock is held, no other sender can send it and no check can withdraw
+        it, so an alert is sent once and stays in the history (#32 verifier
+        R-1, R-2). The lock lasts one message, not the whole outbox."""
+        with _guard(self._path):
+            self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            with _guard(self._path):
+                row = self._conn.execute(
+                    "SELECT 1 FROM outbox WHERE id = ? AND sent IS NULL", (id,)
+                ).fetchone()
+            yield (lambda when: self._mark(id, when)) if row else None
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        with _guard(self._path):
+            self._conn.execute("COMMIT")
 
     def close(self) -> None:
         self._conn.close()

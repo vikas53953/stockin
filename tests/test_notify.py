@@ -317,3 +317,111 @@ def test_cli_send_before_connect_says_how(data: Path) -> None:
     doc = json.loads(runner.invoke(cli, ["doctor", "--json"]).output)
     (tg,) = [c for c in doc["checks"] if c["name"] == "telegram"]
     assert tg["status"] == "warn"
+
+
+# ------------------------------------------------------------ #32 verifier notes
+
+
+def test_two_senders_at_once_send_each_alert_once(tmp_path: Path) -> None:
+    """R-1: each message goes out under alerts.db's write lock, so a second
+    sender waits, then sees it is no longer pending."""
+    import time
+
+    path = tmp_path / "alerts.db"
+    with AlertStore.open(path) as store:
+        store.record([v(INFY, "trim")], made=T0)
+    got: list[str] = []
+    lock = threading.Lock()
+
+    def slow(method: str, params: dict[str, str]) -> Reply:
+        time.sleep(0.4)
+        with lock:
+            got.append(params["text"])
+        return Reply(ok=True)
+
+    def run() -> None:
+        with AlertStore.open(path) as s:
+            deliver(s, slow, 1, lambda: T0)
+
+    threads = [threading.Thread(target=run) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(got) == 1
+    with AlertStore.open(path) as store:
+        (kept,) = store.outbox()
+        assert kept.sent == T0
+
+
+def test_a_check_during_a_send_does_not_withdraw_what_went_out(tmp_path: Path) -> None:
+    """R-2: a check that would withdraw the alert waits for the send to
+    finish; the sent alert stays in the history."""
+    path = tmp_path / "alerts.db"
+    with AlertStore.open(path) as store:
+        store.record([v(INFY, "trim")], made=T0)
+    checker: list[threading.Thread] = []
+
+    def during(method: str, params: dict[str, str]) -> Reply:
+        def check() -> None:
+            with AlertStore.open(path) as s:
+                s.record([v(INFY, "hold")], made=T0)
+
+        t = threading.Thread(target=check)
+        t.start()
+        checker.append(t)
+        t.join(0.5)  # the check is blocked by the send's lock
+        assert t.is_alive()
+        return Reply(ok=True)
+
+    with AlertStore.open(path) as store:
+        done, err = deliver(store, during, 1, lambda: T0)
+    checker[0].join()
+    assert err is None and len(done) == 1
+    with AlertStore.open(path) as store:
+        (kept,) = store.outbox()
+        assert kept.sent == T0 and store.calls() == {INFY: "hold"}
+
+
+def test_a_config_others_can_read_is_a_doctor_warning(data: Path) -> None:
+    """C-1."""
+    if os.name != "posix":
+        pytest.skip("POSIX file modes")
+    path = notify.save(data, Bot(token=TOKEN, chat=555))
+    assert not notify.others_can_read(data)
+    path.chmod(0o644)
+    doc = json.loads(runner.invoke(cli, ["doctor", "--json"]).output)
+    (tg,) = [c for c in doc["checks"] if c["name"] == "telegram"]
+    assert tg["status"] == "warn" and "chmod 600" in tg["hint"] and TOKEN not in str(tg)
+
+
+def test_a_dangling_config_link_is_damage_not_absence(tmp_path: Path) -> None:
+    """C-2: the same answer alerts.db gives."""
+    notify.config_path(tmp_path).symlink_to(tmp_path / "gone.json")
+    with pytest.raises(ValueError, match="not there"):
+        notify.load(tmp_path)
+
+
+def test_the_refusal_names_both_local_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C-3."""
+    monkeypatch.setenv("STOCKIN_TELEGRAM_API", "https://evil.example")
+    with pytest.raises(ValueError, match="localhost"):
+        notify.api_base()
+
+
+def test_a_network_error_that_names_the_url_hides_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Author survivor T3: if an error ever carries the URL, the token in it
+    is replaced."""
+    import urllib.error
+    import urllib.request
+
+    def fails(req: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.URLError(f"cannot open {req.full_url}")
+
+    monkeypatch.delenv("STOCKIN_TELEGRAM_API", raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", fails)
+    with pytest.raises(TelegramError) as e:
+        notify.send_one(notify.http_transport(TOKEN), 1, "hi")
+    assert TOKEN not in str(e.value) and "***" in str(e.value)

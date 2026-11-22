@@ -1336,6 +1336,9 @@ def test_the_20_percent_band_compares_like_with_like(
         ([("bhavcopy", 16, "288.00"), ("amfi", 16, "288.20")], ("amfi", 17, "144.15"), True),
         # the reverse: a missed bhavcopy day leaves a newer NAV in front
         ([("bhavcopy", 16, "288.00"), ("amfi", 17, "288.20")], ("bhavcopy", 18, "200.00"), True),
+        # #38 verify-3 C-1: both checks trip on a 1:5 NAV split; the hold
+        # names the last NAV, not the close
+        ([("bhavcopy", 16, "288.00"), ("amfi", 16, "288.20")], ("amfi", 17, "57.64"), True),
         # a real move inside the band against its own source is stored
         ([("bhavcopy", 16, "288.00"), ("amfi", 16, "288.20")], ("amfi", 17, "300.00"), False),
     ],
@@ -1352,6 +1355,19 @@ def test_the_band_finds_the_same_source_price_behind_the_other_one(
         assert bool(jumps) is held
         if jumps:  # the price shown is the one it jumped from: its own source's
             assert jumps[0].last.source == source  # (#38 verify-2 V1)
+
+
+def test_a_hold_says_when_it_was_compared_with_the_other_source() -> None:
+    """#38 verify-3 C-1: an AMFI file held against an NSE close says so."""
+    from stockin.cli import _other_source  # pyright: ignore[reportPrivateUsage]
+    from stockin.prices import Jump
+
+    etf = "INF204KB14I2"
+    close = _q(etf, date(2026, 11, 16), "288.00", "bhavcopy")
+    nav = _q(etf, date(2026, 11, 16), "288.20", "amfi")
+    new = _q(etf, date(2026, 11, 17), "100.00", "amfi")
+    assert _other_source(Jump(quote=new, last=close)) == " (NSE close)"
+    assert _other_source(Jump(quote=new, last=nav)) == ""
 
 
 def test_hold_jumps_holds_only_new_jumps_and_does_not_ask_twice() -> None:
@@ -1415,6 +1431,7 @@ def test_a_price_that_jumps_is_held_until_accepted(
         "this file says 15,00,255.00 on 2026-11-14"
     ) in result.output
     assert "--accept-jumps" in result.output
+    assert "An ETF's split is held twice" in result.output  # #38 verify-3 C-2
     assert _held_infy(tmp_path) == ("1500.550000", "2026-11-13")
     as_json = runner.invoke(app, [*wild, "--json"])
     assert as_json.exit_code == 1

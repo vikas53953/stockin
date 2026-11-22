@@ -31,10 +31,15 @@ from pydantic import model_validator
 from .facts import Isin
 from .money import Money, Price, Qty, Value
 
-Source = Literal["bhavcopy", "amfi"]
-_RANK: dict[str, int] = {"bhavcopy": 0, "amfi": 1}
-"""Tie-break on the same day: the exchange close (what you could sell at)
-beats the AMFI NAV. Only an ETF has both."""
+Source = Literal["live", "bhavcopy", "amfi"]
+_RANK: dict[str, int] = {"bhavcopy": 0, "live": 1, "amfi": 2}
+"""Tie-break on the same day: the exchange's official close (what you could
+sell at) beats a live trade, which beats the AMFI NAV. So after the close
+NSE's bhavcopy, once fetched, replaces the day's last live trade (#33
+verifier C-5); during the day there is no bhavcopy for today yet, and the
+live trade wins by date. Only an ETF has all three. Live quotes are never
+stored: prices.db holds files."""
+_STORED: tuple[Source, ...] = ("bhavcopy", "amfi")
 
 
 MAX_PRICE_RUPEES = 10**7
@@ -177,7 +182,8 @@ def hold_jumps(
     keep: list[Quote] = []
     held: list[Jump] = []
     for q in file.quotes:
-        prevs = [p for p in (last.get(q.isin), same.get(q.isin) if same else None) if p]
+        # its own source first, so a hold names the like price (#38 verify-3 C-1)
+        prevs = [p for p in (same.get(q.isin) if same else None, last.get(q.isin)) if p]
         jumped = next((p for p in prevs if is_jump(p, q)), None)
         if jumped is None or q == stored.get(q.isin):
             keep.append(q)
@@ -392,6 +398,8 @@ class PriceStore:
     def replace(self, file: PriceFile) -> int:
         """Make prices.db say, for this file's source and day, exactly what
         `file` says. Returns the rows added, changed or removed."""
+        if file.source not in _STORED:
+            raise ValueError(f"{file.source} prices are not kept in prices.db")
         new = {q.isin: q for q in file.quotes}
         day = file.day.isoformat()
         with _guard(self._path), self._conn:
@@ -440,7 +448,7 @@ class PriceStore:
         quotes: list[Quote] = []
         with _guard(self._path):
             for isin in sorted(set(isins)):
-                for source in _RANK if sources is None else sources:
+                for source in _STORED if sources is None else sources:
                     for on, micros in self._conn.execute(sql, (isin, source, *tail)):
                         quotes.append(_quote(isin, on, source, micros))
         return PriceBook.best(quotes)

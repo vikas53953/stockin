@@ -13,7 +13,8 @@ your bot):
 
 Delivery is at least once: an alert is marked sent only after Telegram
 accepts it, so a failure leaves it pending for the next run, and one that
-Telegram accepted is never sent again. (A crash between Telegram accepting
+Telegram accepted is never sent again, even by two runs at once (each
+message is sent under alerts.db's write lock). (A crash between Telegram accepting
 a message and the mark is the one case that sends it twice; Telegram has
 no way to refuse a repeat.)
 """
@@ -81,6 +82,8 @@ def load(data: Path) -> Bot | None:
             raise ValueError("STOCKIN_TELEGRAM_CHAT is not a chat number")
         return Bot(token=parse_token(env_token), chat=int(env_chat.strip()))
     path = config_path(data)
+    if path.is_symlink() and not path.exists():
+        raise ValueError(f"{path} points at a file that is not there; run `stockin alerts connect`")
     if not path.exists():
         return None
     try:
@@ -88,6 +91,13 @@ def load(data: Path) -> Bot | None:
         return Bot(token=parse_token(str(raw["token"])), chat=raw["chat"])
     except (OSError, ValueError, KeyError, TypeError, ValidationError):
         raise ValueError(f"{path} is damaged; run `stockin alerts connect` again") from None
+
+
+def others_can_read(data: Path) -> bool:
+    """True when telegram.json is readable by other users (POSIX only:
+    Windows keeps a file in your profile private by its folder's access list)."""
+    path = config_path(data)
+    return os.name == "posix" and path.is_file() and path.stat().st_mode & 0o077 != 0
 
 
 def save(data: Path, bot: Bot) -> Path:
@@ -142,7 +152,7 @@ def api_base() -> str:
     host = urllib.parse.urlsplit(base).hostname
     if base.startswith("http://") and host in ("127.0.0.1", "localhost"):
         return base
-    raise ValueError("STOCKIN_TELEGRAM_API may only point at http://127.0.0.1")
+    raise ValueError("STOCKIN_TELEGRAM_API may only point at http://127.0.0.1 or http://localhost")
 
 
 def http_transport(token: str, timeout: float = 20) -> Transport:
@@ -187,11 +197,14 @@ def deliver(
     done: list[Sent] = []
     for s in store.outbox(pending_only=True):
         try:
-            send_one(call, chat, text(s.alert))
+            with store.sending(s.id) as mark:
+                if mark is None:  # sent by another run, or withdrawn
+                    continue
+                send_one(call, chat, text(s.alert))
+                when = now()
+                mark(when)
         except TelegramError as exc:
             return tuple(done), exc
-        when = now()
-        store.mark_sent(s.id, when)
         done.append(s.model_copy(update={"sent": when}))
     return tuple(done), None
 
