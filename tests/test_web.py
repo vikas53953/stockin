@@ -92,7 +92,18 @@ def test_other_hosts_and_cross_site_posts_are_refused(client: TestClient, tmp_pa
 
 def test_no_order_routes_exist(client: TestClient) -> None:
     routes = {getattr(r, "path", "") for r in client.app.routes}  # type: ignore[attr-defined]
-    assert routes <= {"/", "/reconcile", "/import", "/thesis/{isin}", "/holding/{isin}", "/static"}
+    assert routes <= {
+        "/",
+        "/reconcile",
+        "/import",
+        "/thesis/{isin}",
+        "/holding/{isin}",
+        "/networth",
+        "/networth/entry",
+        "/networth/close",
+        "/networth/targets",
+        "/static",
+    }
     # The static mount only reads files: it refuses every write.
     assert client.post("/static/ui.css").status_code == 405
 

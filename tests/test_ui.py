@@ -38,7 +38,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path / "data" / "ledger.db", PORT), base_url=HOST)
 
 
-@pytest.mark.parametrize(("path", "active"), [("/", "Home"), ("/reconcile", "Reconcile")])
+@pytest.mark.parametrize(
+    ("path", "active"), [("/", "Home"), ("/reconcile", "Reconcile"), ("/networth", "Net worth")]
+)
 def test_every_page_has_the_shell_and_marks_where_you_are(
     client: TestClient, path: str, active: str
 ) -> None:
@@ -48,9 +50,9 @@ def test_every_page_has_the_shell_and_marks_where_you_are(
     assert 'aria-label="Main menu"' in html and 'aria-label="Main (phone)"' in html
     current = re.findall(r'aria-current="page"><svg.*?</svg>(\w[\w ]*)</a>', html, re.S)
     assert current == [active, active]  # side menu and phone tabs agree
-    # Sprints 2 and 3 are shown as coming, never as a dead link.
-    assert re.search(r'nav-item soon"[^>]*>.*?Net worth<span class="soon-tag">soon', html, re.S)
-    assert 'href="/networth"' not in html
+    # Net worth (Sprint 2) is a real page now, in both menus.
+    assert html.count('href="/networth"') == 2
+    assert not re.search(r'nav-item soon"[^>]*>.*?Net worth<span', html, re.S)
 
 
 def test_the_menu_links_land_on_real_anchors(client: TestClient) -> None:
@@ -67,7 +69,8 @@ def test_the_menu_links_land_on_real_anchors(client: TestClient) -> None:
     assert re.findall(r'href="(/[^"]*)"', tabs) == re.findall(
         r'class="nav-item" href="(/[^"]*)"', side
     )
-    assert "soon" not in tabs and "Net worth" not in tabs and "Alerts" not in tabs
+    assert "soon" not in tabs and "Alerts" not in tabs
+    assert "Net worth" in tabs  # live since the /networth page
     assert tabs.count('class="nav-item"') == side.count('class="nav-item" href=')
 
 

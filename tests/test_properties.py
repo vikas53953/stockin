@@ -788,12 +788,15 @@ one_day_writes = st.one_of(
     st.builds(
         Stated,
         kind=st.just("bank"),
-        label=st.sampled_from(["SBI", "sbi"]),
+        label=st.sampled_from(["SBI", "sbi", "HDFC"]),
         as_of=st.just(_ONE_DAY),
         amount=nw_paise.map(lambda p: Money(paise=p)),
     ),
     st.builds(
-        Closed, kind=st.just("bank"), label=st.sampled_from(["SBI", "sbi"]), as_of=st.just(_ONE_DAY)
+        Closed,
+        kind=st.just("bank"),
+        label=st.sampled_from(["SBI", "sbi", "HDFC"]),
+        as_of=st.just(_ONE_DAY),
     ),
 )
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from stockin.cli import _drift  # pyright: ignore[reportPrivateUsage]
 from stockin.cli import app as cli
 from stockin.insights import pct, tenths_of, weights
 from stockin.money import Bps, Money, Price, Qty
@@ -774,12 +775,29 @@ def test_adding_an_fd_says_the_date_it_is_stored_under(empty: Path) -> None:
     assert "as of 2026-01-15" in out and f"as of {TODAY}" not in out
 
 
-def test_any_schema_object_beyond_the_two_tables_is_damage(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "CREATE TRIGGER t AFTER DELETE ON targets BEGIN DELETE FROM entries; END",
+        "CREATE INDEX i ON entries(as_of)",
+        "CREATE VIEW v AS SELECT * FROM entries",
+    ],
+)
+def test_any_schema_object_beyond_the_two_tables_is_damage(tmp_path: Path, extra: str) -> None:
     """C5: a trigger (or index, or view) can change what a write does."""
     path = tmp_path / "assets.db"
     _seeded(path)
     with sqlite3.connect(path) as c:
-        c.execute("CREATE TRIGGER t AFTER DELETE ON targets BEGIN DELETE FROM entries; END")
+        c.execute(extra)
     c.close()
     with pytest.raises(AssetsDamaged):
         AssetStore.open(path)
+
+
+def test_a_gap_that_shows_as_zero_has_no_sign() -> None:
+    """Round 3 N4/V6: 19.96% against 20% shows 0.0 points, so neither + nor -."""
+    assert _drift(1996, 2000) == "±0.0"
+    assert _drift(2000, 2000) == "±0"
+    assert _drift(2004, 2000) == "±0.0"
+    assert _drift(2050, 2000) == "+0.5"
+    assert _drift(1950, 2000) == "-0.5"
