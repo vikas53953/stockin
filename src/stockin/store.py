@@ -100,6 +100,14 @@ def _check_format(conn: sqlite3.Connection, db: Path) -> None:
         )
 
 
+class Period(Value):
+    """One imported statement's window: which source, from and to (inclusive)."""
+
+    source: str
+    start: date
+    end: date
+
+
 class ImportReport(Value):
     statement_sha: str
     source: str
@@ -161,6 +169,18 @@ class Ledger:
         for k, body in rows:
             out.setdefault(k, body)
         return list(out.values())
+
+    def periods(self) -> tuple[Period, ...]:
+        """Every imported statement's source and window, oldest first. The
+        order is the table's, so it never depends on import order."""
+        rows = self._conn.execute(
+            "SELECT source, period_start, period_end, sha256 FROM statements"
+            " ORDER BY period_start, period_end, source, sha256"
+        )
+        return tuple(
+            Period(source=src, start=date.fromisoformat(a), end=date.fromisoformat(b))
+            for src, a, b, _ in rows
+        )
 
     def statements(self) -> int:
         (n,) = self._conn.execute("SELECT count(*) FROM statements").fetchone()

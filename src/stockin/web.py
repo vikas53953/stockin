@@ -33,6 +33,7 @@ from .book import Book, Check, Holding, ReconcileReport, reconcile
 from .cockpit import cockpit
 from .facts import Isin
 from .holding import holding_page
+from .importview import Coverage, coverage, source_label, tally, twin
 from .insights import all_insights, short_name, weights
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
@@ -84,6 +85,8 @@ class CheckRow:
     account: str
     stated: str
     computed: str
+    stated_w: float  # bar widths on one scale, from importview.twin
+    computed_w: float
 
 
 def _groups(
@@ -112,6 +115,7 @@ def _check_rows(book: Book, report: ReconcileReport) -> tuple[CheckRow, ...]:
     order = {"mismatch": 0, "inferred": 1, "match": 2}
 
     def row(c: Check) -> CheckRow:
+        bars = twin(c.stated, c.computed)
         acct = book.account(c.account)
         inst = book.instrument(c.isin)
         return CheckRow(
@@ -123,6 +127,8 @@ def _check_rows(book: Book, report: ReconcileReport) -> tuple[CheckRow, ...]:
             account=acct.masked if acct else c.account,
             stated=str(c.stated),
             computed=str(c.computed),
+            stated_w=bars.stated,
+            computed_w=bars.computed,
         )
 
     ranked = sorted(report.checks, key=lambda c: (order[c.status], c.on, c.isin))
@@ -309,13 +315,32 @@ def create_app(db: Path, port: int) -> FastAPI:
     def reconcile_page() -> Response:
         book = read_book()
         if book is None:
-            return page("reconcile.html", checks=(), summary=None, ok=True)
+            return page("reconcile.html", checks=(), summary=None, ok=True, tally=())
         report = reconcile(book)
         return page(
             "reconcile.html",
             checks=_check_rows(book, report),
             summary=_summary(report),
             ok=report.ok,
+            tally=tally(report.checks),
+        )
+
+    def read_coverage() -> Coverage | None:
+        if not db.is_file():
+            return None
+        with Ledger.open(db) as ledger:
+            return coverage(ledger.periods())
+
+    @app.get("/import", response_class=HTMLResponse)
+    def import_page() -> Response:
+        return page(
+            "import.html",
+            error=None,
+            filename=None,
+            report=None,
+            groups=(),
+            cover=read_coverage(),
+            source_label=source_label,
         )
 
     @app.post("/import", response_class=HTMLResponse)
@@ -333,6 +358,8 @@ def create_app(db: Path, port: int) -> FastAPI:
                 filename=filename,
                 report=None,
                 groups=(),
+                cover=read_coverage(),
+                source_label=source_label,
             )
         if not body:
             return page(
@@ -341,6 +368,8 @@ def create_app(db: Path, port: int) -> FastAPI:
                 filename=filename,
                 report=None,
                 groups=(),
+                cover=read_coverage(),
+                source_label=source_label,
             )
         db.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=db.parent, prefix=".upload-") as tmp:
@@ -357,10 +386,20 @@ def create_app(db: Path, port: int) -> FastAPI:
                     filename=filename,
                     report=None,
                     groups=(),
+                    cover=read_coverage(),
+                    source_label=source_label,
                 )
         with LedgerWriter.open(db) as writer:
             report: ImportReport = writer.ingest(st)
             groups = _groups(writer.book(), report.holdings)
-        return page("import.html", error=None, filename=filename, report=report, groups=groups)
+        return page(
+            "import.html",
+            error=None,
+            filename=filename,
+            report=report,
+            groups=groups,
+            cover=read_coverage(),
+            source_label=source_label,
+        )
 
     return app

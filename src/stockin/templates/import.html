@@ -1,17 +1,47 @@
 {% extends "base.html" %}{% set active = "import" %}
 {% block body %}
-<h1>Import: {{ filename }}</h1>
-{% if error %}
+<h1>Import{% if filename %}: {{ filename }}{% endif %}</h1>
+
+{% if filename and error %}
 <div class="notice bad" role="alert">{{ error }}<br><span class="muted">Nothing was imported.</span></div>
-{% else %}
-<div class="notice ok">
-  {{ report.source }}, {{ report.period_start }} to {{ report.period_end }}.
-  {% if report.seen_before %}<b>Already imported; nothing changed.</b>{% endif %}
-  {{ report.facts_added }} new facts, {{ report.facts_already_present }} already in your ledger.
+{% elif report %}
+<section class="tile tile-solo import-result" aria-label="What this import added">
+  <div class="tile-h"><h2>{{ source_label(report.source) }}</h2>{{ ui.status("ok", "imported") }}</div>
+  <p class="muted">{{ report.source }}, {{ report.period_start }} to {{ report.period_end }}.</p>
+  {% if report.seen_before %}<p><b>Already imported; nothing changed.</b></p>{% endif %}
+  <div class="stats">
+    {{ ui.stat("New facts", report.facts_added | string) }}
+    {{ ui.stat("Already in your ledger", report.facts_already_present | string) }}
+  </div>
+  <p class="small">{{ report.facts_added }} new facts, {{ report.facts_already_present }} already in your ledger.</p>
+  {% for w in report.warnings %}<p class="muted">Note: {{ w }}</p>{% endfor %}
+  <p class="small"><a href="/">See your portfolio</a> · <a href="/reconcile">Check reconcile</a></p>
+</section>
+{% endif %}
+
+<div class="cockpit import-grid">
+  {% include "_upload.html" %}
+  <section class="tile" aria-label="Which months your statements cover">
+    <div class="tile-h"><h2>Your statements</h2><span class="muted small">one square = one month</span></div>
+    {% if cover %}
+    <p class="tile-head">{{ cover.headline }}</p>
+    <div class="cover" role="img" aria-label="{{ cover.headline }}{% for g in cover.gap_lines %} {{ g }}{% endfor %}">
+      {% for lane in cover.lanes %}
+      <div class="cover-lane"><span class="cover-name">{{ lane.label }}</span>
+        <span class="cover-months">{% for c in lane.covered %}<i class="cover-m{{ ' on' if c else '' }}" title="{{ cover.months[loop.index0] }}: {{ 'covered' if c else 'no statement' }}"></i>{% endfor %}</span>
+      </div>
+      {% endfor %}
+      <div class="cover-lane cover-axis"><span class="cover-name"></span><span class="cover-months"><span>{{ cover.months[0] }}</span><span>{{ cover.months[-1] }}</span></span></div>
+    </div>
+    {% for g in cover.gap_lines %}<p class="small">{{ ui.status("warn", "gap") }} {{ g }}</p>{% endfor %}
+    {{ ui.why("A month counts as covered when a statement from that source includes at least one of its days. Mutual fund statements list every trade; demat statements list balances only, so a missing month hides nothing it would have shown, but import every statement you have to keep reconcile honest.") }}
+    {% else %}
+    <p class="muted">No statements yet. Import your CAMS or KFintech CAS for mutual funds and your NSDL or CDSL CAS for demat holdings.</p>
+    {% endif %}
+  </section>
 </div>
-{% for w in report.warnings %}<p class="muted">Note: {{ w }}</p>{% endfor %}
+
+{% if report and not error %}
 <section class="panel"><h2>Holdings in this statement's accounts</h2>{% include "_holdings.html" %}</section>
 {% endif %}
-<p><a href="/">Back to holdings</a></p>
-{% include "_upload.html" %}
 {% endblock %}
