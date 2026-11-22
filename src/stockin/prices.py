@@ -31,10 +31,12 @@ from pydantic import model_validator
 from .facts import Isin
 from .money import Money, Price, Qty, Value
 
-Source = Literal["bhavcopy", "amfi"]
-_RANK: dict[str, int] = {"bhavcopy": 0, "amfi": 1}
-"""Tie-break on the same day: the exchange close (what you could sell at)
-beats the AMFI NAV. Only an ETF has both."""
+Source = Literal["live", "bhavcopy", "amfi"]
+_RANK: dict[str, int] = {"live": -1, "bhavcopy": 0, "amfi": 1}
+"""Tie-break on the same day: a live trade beats that day's close (it is
+newer), and the exchange close (what you could sell at) beats the AMFI NAV.
+Only an ETF has both. Live quotes are never stored: prices.db holds files."""
+_STORED: tuple[Source, ...] = ("bhavcopy", "amfi")
 
 
 MAX_PRICE_RUPEES = 10**7
@@ -361,6 +363,8 @@ class PriceStore:
     def replace(self, file: PriceFile) -> int:
         """Make prices.db say, for this file's source and day, exactly what
         `file` says. Returns the rows added, changed or removed."""
+        if file.source not in _STORED:
+            raise ValueError(f"{file.source} prices are not kept in prices.db")
         new = {q.isin: q for q in file.quotes}
         day = file.day.isoformat()
         with _guard(self._path), self._conn:
@@ -401,7 +405,7 @@ class PriceStore:
         quotes: list[Quote] = []
         with _guard(self._path):
             for isin in sorted(set(isins)):
-                for source in _RANK:
+                for source in _STORED:
                     for on, micros in self._conn.execute(sql, (isin, source, *tail)):
                         quotes.append(_quote(isin, on, source, micros))
         return PriceBook.best(quotes)

@@ -190,6 +190,17 @@ def test_a_damaged_row_is_said_not_raised(tmp_path: Path, sql: str) -> None:
         AlertStore.open(path)
 
 
+def test_an_alert_row_of_the_wrong_shape_is_said_in_one_line(tmp_path: Path) -> None:
+    """#32 verifier survivor C5: a row that is JSON but not an alert."""
+    path = tmp_path / "alerts.db"
+    AlertStore.open(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO outbox(made, body) VALUES ('2026-11-20T10:00:00+00:00', '{}')")
+    with pytest.raises(AlertsDamaged, match="holds an alert Stockin cannot read") as e:
+        AlertStore.open(path)
+    assert "\n" not in str(e.value)
+
+
 def test_a_dangling_link_is_said_not_raised(tmp_path: Path) -> None:
     """#28 verifier C1."""
     (tmp_path / "alerts.db").symlink_to(tmp_path / "gone" / "x.db")

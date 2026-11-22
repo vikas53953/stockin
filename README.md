@@ -101,6 +101,7 @@ Each holding gets one verdict, with the reason beside it:
 ### 8. Get alerts and ask questions
 
 - `stockin alerts check` keeps one alert each time a holding's verdict turns into add, trim or exit, worded exactly as the verdict. The same numbers never alert twice; `stockin alerts list` shows them all.
+- `stockin prices live` shows today's last traded price for your shares and ETFs (public quotes, a few minutes behind, no login); `stockin watch --send` re-prices them every 5 minutes while NSE is open and sends an alert the moment a verdict turns. Funds stay end-of-day.
 - Telegram sends those alerts to your phone: make a bot with @BotFather, run `stockin alerts connect` once, then `stockin alerts check --send`. The bot only sends; Stockin never listens for commands and never places orders.
 - The dashboard at `http://stockin:8000` on your tailnet shows the same data in a browser.
 - Claude can query your ledger through the read-only MCP server. Every number it quotes comes from a tool, not from the model.

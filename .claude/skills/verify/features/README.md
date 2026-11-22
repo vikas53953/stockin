@@ -24,5 +24,6 @@ Each feature file has an H1 and one paragraph, followed by four H2s: `Sub-featur
 | Net worth (`stockin networth`) | Not built yet |
 | Thesis and review (`stockin thesis add`, `stockin review`) | Not built yet |
 | [Alerts](./alerts.md) (`stockin alerts check/list/connect/send/test`) | Working |
+| [Live prices and watch](./live.md) (`stockin prices live`, `stockin watch`) | Working |
 
 Each "not built" row gets its own file in the PR that builds it.

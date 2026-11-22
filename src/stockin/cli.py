@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import http.client
 import io
+import json
 import os
 import shlex
 import sys
+import time
 from collections.abc import Generator
-from contextlib import contextmanager
-from datetime import date
+from contextlib import contextmanager, suppress
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -24,7 +26,7 @@ from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights
-from .money import Bps, Money, Value
+from .money import Bps, Money, Price, Value
 from .prices import (
     Jump,
     PriceBook,
@@ -37,7 +39,7 @@ from .prices import (
     india_today,
     left_out,
 )
-from .sources import cas, eod
+from .sources import cas, eod, live
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
 from .thesis import MAX_TEXT, ThesesDamaged, Thesis, ThesisStore, Verdict, for_book, parse_percent
 
@@ -125,6 +127,14 @@ def _telegram_check(root: Path) -> DoctorCheck:
     if bot is None:
         hint = "optional: stockin alerts connect"
         return DoctorCheck(name="telegram", status="warn", detail="not connected", hint=hint)
+    if notify.others_can_read(root):
+        path = notify.config_path(root)
+        return DoctorCheck(
+            name="telegram",
+            status="warn",
+            detail=f"connected: {bot}, but {path} can be read by other users",
+            hint=f"chmod 600 {shlex.quote(str(path))}",
+        )
     return DoctorCheck(name="telegram", status="ok", detail=f"connected: {bot}")
 
 
@@ -847,6 +857,183 @@ def alerts_test() -> None:
     except notify.TelegramError as exc:
         raise _fail(str(exc)) from None
     typer.echo(f"sent a test message ({bot})")
+
+
+# ------------------------------------------------------------------ live
+
+LIVE_KINDS = ("stock", "etf")
+"""What trades on NSE through the day. Mutual funds have one NAV a day."""
+
+
+class Fallback(Value):
+    isin: str
+    reason: str
+
+
+class LiveView(Value):
+    at: datetime
+    market_open: bool
+    live: tuple[live.LiveQuote, ...]
+    end_of_day: tuple[Fallback, ...]
+
+
+def symbols_path() -> Path:
+    return data_dir() / "nse-symbols.json"
+
+
+def _symbols(today: date) -> dict[Isin, str]:
+    """NSE's ISIN-to-symbol list, downloaded at most once a day (public
+    data, kept beside prices.db)."""
+    path = symbols_path()
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        if cached["day"] == today.isoformat():
+            return {Isin(k): str(v) for k, v in dict(cached["symbols"]).items()}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    found = live.fetch_symbols()
+    try:
+        body = {"day": today.isoformat(), "symbols": dict(sorted(found.items()))}
+        path.write_text(json.dumps(body), encoding="utf-8")
+    except OSError:
+        pass  # a cache only
+    return found
+
+
+def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
+    """End-of-day prices with today's live trades laid over them. A holding
+    whose live quote is missing, late or odd keeps its close, and says why."""
+    now = india_now()
+    held = frozenset(h.isin for h in book.holdings())
+    eod_book = _price_book(held) or PriceBook(quotes={})
+    wanted = sorted(
+        i for i in held if (inst := book.instrument(i)) is not None and inst.kind in LIVE_KINDS
+    )
+    got: list[live.LiveQuote] = []
+    fallbacks: list[Fallback] = []
+    symbols: dict[Isin, str] = {}
+    if wanted:
+        try:
+            symbols = _symbols(now.date())
+        except live.LiveRejected as exc:
+            fallbacks = [Fallback(isin=i, reason=str(exc)) for i in wanted]
+            wanted = []
+    quotes = list(eod_book.quotes.values())
+    for isin in wanted:
+        symbol = symbols.get(isin)
+        if symbol is None:
+            fallbacks.append(Fallback(isin=isin, reason="not listed on NSE under this ISIN"))
+            continue
+        try:
+            q = live.fetch_quote(isin, symbol)
+        except live.LiveRejected as exc:
+            fallbacks.append(Fallback(isin=isin, reason=str(exc)))
+            continue
+        as_price = live.as_quote(q, now)
+        if as_price is None:
+            fallbacks.append(
+                Fallback(
+                    isin=isin, reason=f"{symbol}: last trade {q.at:%Y-%m-%d %H:%M} is not live"
+                )
+            )
+            continue
+        got.append(q)
+        quotes.append(as_price)
+    view = LiveView(
+        at=now, market_open=live.market_open(now), live=tuple(got), end_of_day=tuple(fallbacks)
+    )
+    return PriceBook.best(quotes), view
+
+
+def _print_live(view: LiveView, book: Book) -> None:
+    state = "open" if view.market_open else "closed"
+    typer.echo(f"{view.at:%Y-%m-%d %H:%M} IST, market {state}")
+    for q in view.live:
+        inst = book.instrument(q.isin)
+        name = inst.name if inst else q.isin
+        typer.echo(f"  LIVE  {q.symbol:<12} \u20b9{_rupees(q.price)}  at {q.at:%H:%M}  {name}")
+    for f in view.end_of_day:
+        typer.echo(f"  CLOSE {f.isin}  kept the end-of-day price: {f.reason}")
+
+
+def _rupees(p: Price) -> str:
+    whole, frac = divmod(p.micro_rupees, 1_000_000)
+    return f"{whole:,}.{frac // 10_000:02d}"
+
+
+@prices_app.command("live")
+def prices_live(as_json: JsonFlag = False) -> None:
+    """Today's last traded price for each share and ETF you hold (public quotes,
+    a few minutes behind, no login). Nothing is stored."""
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    _, view = _live_pass(book)
+    if as_json:
+        typer.echo(view.model_dump_json(indent=2))
+    else:
+        _print_live(view, book)
+
+
+@app.command()
+def watch(
+    every: Annotated[
+        int, typer.Option(help="Seconds between checks while the market is open.", min=60)
+    ] = 300,
+    once: Annotated[bool, typer.Option("--once", help="Check once and stop.")] = False,
+    send: Annotated[bool, typer.Option("--send", help="Send new alerts to Telegram.")] = False,
+) -> None:
+    """While NSE is open, re-price your shares from live quotes, work out the
+    verdicts and keep (and with --send, send) an alert when one turns into add,
+    trim or exit. Read-only: it never places an order. Ctrl+C stops it."""
+    try:
+        while True:
+            now = india_now()
+            if once:
+                _watch_pass(send)
+                return
+            if live.market_open(now):
+                with suppress(typer.Exit):  # said on stderr; tried again next pass
+                    _watch_pass(send)
+            wait = every if live.market_open(now) else _until_open(now)
+            if not live.market_open(now):
+                typer.echo(
+                    f"market closed; next check {now + timedelta(seconds=wait):%a %H:%M} IST"
+                )
+            _sleep(wait)
+    except KeyboardInterrupt:
+        typer.echo("stopped")
+
+
+def _until_open(now: datetime) -> int:
+    """Seconds to the next 09:15 IST on a weekday, at most an hour (so a
+    sleeping laptop catches up soon after it wakes)."""
+    t = now.astimezone(live.IST)
+    nxt = t.replace(hour=9, minute=15, second=0, microsecond=0)
+    while nxt <= t or nxt.weekday() >= 5:
+        nxt = (nxt + timedelta(days=1)).replace(hour=9, minute=15)
+    return max(60, min(3600, int((nxt - t).total_seconds())))
+
+
+def _sleep(seconds: int) -> None:
+    time.sleep(seconds)
+
+
+def _watch_pass(send: bool) -> None:
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    prices, view = _live_pass(book)
+    with _open_theses() as theses:
+        found = for_book(book, prices, theses.all())
+    with _open_alerts() as store:
+        added = store.record(found, made=view.at)
+    typer.echo(
+        f"{view.at:%H:%M} IST: {len(view.live)} live, {len(view.end_of_day)} at close, "
+        f"{len(added)} new alert{'' if len(added) == 1 else 's'}"
+    )
+    _alert_lines(added)
+    if send:
+        with suppress(typer.Exit):  # said already; pending ones go out next pass
+            _send_pending()
 
 
 def _utf8_output() -> None:
