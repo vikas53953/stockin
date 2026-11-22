@@ -130,6 +130,16 @@ jobs:
           stockin doctor
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "net worth adds up: total = owned - owed, mix = 100%"
+          $web = Start-Process -FilePath stockin -ArgumentList "web", "--port", "8766" -PassThru -NoNewWindow
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            try { $nw_page = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8766/networth; $ok = $true; break } catch { }
+          }
+          Stop-Process -Id $web.Id
+          if (-not $ok) { Write-Error "stockin web did not serve /networth"; exit 1 }
+          if ($nw_page.StatusCode -ne 200 -or $nw_page.Content -notmatch "Against your target" -or $nw_page.Content -notmatch "HDFC FD") { Write-Error "net worth page"; exit 1 }
+          "net worth page: 200, target gauges and typed entries shown"
       - name: Sprint 3 on Windows (alerts)
         run: |
           $env:PATH = "$(uv tool dir --bin);$env:PATH"

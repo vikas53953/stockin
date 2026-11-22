@@ -1,0 +1,136 @@
+{% extends "base.html" %}{% set active = "networth" %}
+{% import "_ui.html" as ui %}
+{% block title %}Net worth · Stockin{% endblock %}
+{% block body %}
+<style>
+.nw-hero{display:grid;grid-template-columns:auto 1fr;gap:var(--sp-5);align-items:center}
+.donut{width:148px;aspect-ratio:1;border-radius:50%;position:relative}
+.donut::after{content:"";position:absolute;inset:24%;border-radius:50%;background:var(--panel)}
+.donut.none{background:var(--chip)}
+.nw-total{font:600 34px/1.1 var(--display);letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin:0}
+.nw-total.neg{color:var(--bad)}
+.split{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--chip)}
+.split span{display:block;height:100%}
+.own{background:var(--ok)}.owe{background:var(--bad)}
+.nw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:var(--sp-4)}
+.gauges{display:grid;gap:var(--sp-3)}
+.gauge-row{display:grid;gap:2px}
+.gauge-name{display:flex;justify-content:space-between;gap:8px;font-size:13.5px;font-weight:500}
+.gauge-name .drift{font:12.5px var(--mono)}.drift.warn{color:var(--warn)}.drift.good{color:var(--ok)}
+.htiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,190px),1fr));gap:var(--sp-3)}
+.htile{border:1px solid var(--line);border-left-width:4px;border-radius:var(--r);padding:10px 12px;display:grid;gap:4px;background:var(--panel-2);min-width:0}
+.htile .k{font:11.5px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.htile .lbl{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.htile .amt{font:600 19px var(--display);font-variant-numeric:tabular-nums}
+.htile form{display:block}
+.bl-s0{border-left-color:var(--s0)}.bl-s1{border-left-color:var(--s1)}.bl-s2{border-left-color:var(--s2)}.bl-s3{border-left-color:var(--s3)}.bl-s4{border-left-color:var(--s4)}.bl-s5{border-left-color:var(--s5)}.bl-loan{border-left-color:var(--bad)}
+.linkbtn{background:none;color:var(--muted);padding:0;font-weight:500;font-size:12.5px;text-decoration:underline;border:0;cursor:pointer}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,150px),1fr));gap:10px}
+.fields label{display:grid;gap:4px;font-weight:500;font-size:13.5px}
+.fields input,.fields select{font:inherit;padding:8px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg);color:var(--fg);width:100%;min-width:0}
+.hint{font-size:12.5px;color:var(--muted);font-weight:400}
+@media (max-width:560px){.nw-hero{grid-template-columns:1fr}.donut{width:120px}}
+</style>
+
+{% if error %}<div class="notice bad" role="alert" id="error">{{ ui.status("bad", "Not saved") }} {{ error }}</div>{% endif %}
+{% if assets_damaged %}<div class="notice bad" role="alert"><b>Your entries could not be read.</b> {{ assets_damaged }}<br>Copy assets.db somewhere safe first: it is the only copy of what you typed.</div>{% endif %}
+{% if damaged %}<div class="notice bad" role="alert"><b>Prices could not be read,</b> so market holdings are left out. {{ damaged }}<br>{{ prices_hint }}</div>{% endif %}
+
+<section class="panel nw-hero" aria-label="Net worth">
+  <div class="donut{% if p.donut == 'none' %} none{% endif %}" role="img" aria-label="Mix of what you own: {% for s in p.segments %}{{ s.name }} {{ s.share }}{{ ', ' if not loop.last }}{% endfor %}"{% if p.donut != 'none' %} style="background:{{ p.donut }}"{% endif %}></div>
+  <div style="display:grid;gap:var(--sp-2);min-width:0">
+    <span class="stat-label">Net worth · {{ p.on }}</span>
+    <h1 class="nw-total{% if p.negative %} neg{% endif %}">{{ p.total }}</h1>
+    <div class="split" role="img" aria-label="You own {{ p.owned }} and owe {{ p.owed }}"><span class="own" style="width:{{ p.own_width }}%"></span><span class="owe" style="width:{{ p.owe_width }}%"></span></div>
+    <div class="legend"><span><i class="sw own"></i>own {{ p.owned }}</span><span><i class="sw owe"></i>owe {{ p.owed }}{% if p.owed_share %} ({{ p.owed_share }} of what you own){% endif %}</span></div>
+  </div>
+</section>
+
+{% if p.empty %}
+{{ ui.empty("Start your net worth", ("Nothing can be added here until assets.db can be read again." if assets_damaged else "Add a bank balance, an FD, your EPF or PPF, gold or a loan with the form below.") ~ ("" if has_ledger else " Import a CAS to add your market holdings too."), none if has_ledger else "/#import", none if has_ledger else "Import a CAS") }}
+{% endif %}
+
+{% if p.cards %}
+<section class="cards" aria-label="What your net worth says">
+  {% for c in p.cards[:4] %}{% call ui.insight(c.tone, c.text) %}{% endcall %}{% endfor %}
+</section>
+{% if p.cards|length > 4 %}
+<details class="panel"><summary>{{ p.cards|length - 4 }} more note{{ 's' if p.cards|length > 5 else '' }}</summary>
+  <section class="cards" style="margin-top:var(--sp-3)">{% for c in p.cards[4:] %}{% call ui.insight(c.tone, c.text) %}{% endcall %}{% endfor %}</section>
+</details>
+{% endif %}
+{% endif %}
+
+{% if p.segments %}
+<div class="nw-grid">
+<section class="panel" aria-label="Your mix">
+  <h2>Your mix</h2>
+  {{ ui.seg(p.mix_parts, "Your mix") }}
+  <table><tbody>{% for s in p.segments %}<tr><td><i class="sw {{ s.slot }}"></i> {{ s.name }}</td><td class="num">{{ s.value }}</td><td class="num"><b>{{ s.share }}</b></td></tr>{% endfor %}</tbody></table>
+</section>
+<section class="panel" aria-label="Against your target">
+  <h2>Against your target {% if assets_damaged %}<span class="hint">your target mix could not be read</span>{% elif not p.has_targets %}<span class="hint">no target mix yet: set one below</span>{% endif %}</h2>
+  <div class="gauges">
+  {% for b in p.bars %}
+    <div class="gauge-row">
+      <div class="gauge-name"><span>{{ b.name }}</span>{% if b.drift_text %}<span class="drift {{ b.tone }}">{{ b.drift_text }}</span>{% endif %}</div>
+      {{ ui.gauge(b.tenths / 10, b.name, b.series, (b.target_tenths / 10) if b.target_tenths is not none else none, 5, none, b.share, b.target_text) }}
+    </div>
+  {% endfor %}
+  </div>
+</section>
+</div>
+{% endif %}
+
+{% if p.groups %}
+<section class="panel" aria-label="What you hold">
+  <h2>What you hold</h2>
+  <div class="htiles">
+  {% for g in p.groups %}{% for t in g.tiles %}
+    <div class="htile bl-{{ g.slot }}">
+      <span class="k">{{ g.name }}{% if t.kind_name != g.name %} · {{ t.kind_name }}{% endif %}</span>
+      <span class="lbl" title="{{ t.label }}">{{ t.label }}</span>
+      <span class="amt" title="{{ t.value }}">{{ t.short }}</span>
+      {% if t.pill %}{{ ui.status("warn", t.pill) }}{% elif t.as_of %}<span class="muted" style="font-size:12.5px">as of {{ t.as_of }}</span>{% else %}<span class="muted" style="font-size:12.5px">from your CAS</span>{% endif %}
+      {% if t.closable and not assets_damaged %}<form method="post" action="/networth/close"><input type="hidden" name="kind" value="{{ t.kind }}"><input type="hidden" name="label" value="{{ t.label }}"><button class="linkbtn" type="submit">I no longer hold this</button></form>{% endif %}
+    </div>
+  {% endfor %}{% endfor %}
+  </div>
+  <div class="legend">{% for g in p.groups %}<span><i class="sw {{ 'owe' if g.slot == 'loan' else g.slot }}"></i>{{ g.name }} {{ g.total }}</span>{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if not assets_damaged %}
+<div class="nw-grid">
+<section class="panel" aria-label="Add or update">
+  <h2>Add or update <span class="hint">same name and day corrects it; a later day keeps history</span></h2>
+  <form method="post" action="/networth/entry">
+    <div class="fields">
+      <label>Kind<select name="kind">{% for k, n in p.kinds %}<option value="{{ k }}"{% if typed.kind == k %} selected{% endif %}>{{ n }}</option>{% endfor %}</select></label>
+      <label>Name<input type="text" name="label" maxlength="60" value="{{ typed.label or '' }}" placeholder="SBI savings"></label>
+      <label>Value ₹<input type="text" name="value" inputmode="decimal" value="{{ typed.value or '' }}" placeholder="bank, EPF, PPF, loan…"></label>
+      <label>As of<input type="date" name="as_of" value="{{ typed.as_of or '' }}"></label>
+    </div>
+    <details{% if typed.kind in ('fd', 'gold') %} open{% endif %}><summary>FD or gold</summary>
+    <div class="fields" style="margin-top:10px">
+      <label>FD principal ₹<input type="text" name="principal" inputmode="decimal" value="{{ typed.principal or '' }}"></label>
+      <label>FD rate %<input type="text" name="rate" inputmode="decimal" value="{{ typed.rate or '' }}"></label>
+      <label>FD opened on<input type="date" name="start" value="{{ typed.start or '' }}"></label>
+      <label>FD months<input type="text" name="months" inputmode="numeric" value="{{ typed.months or '' }}"></label>
+      <label>Gold grams<input type="text" name="grams" inputmode="decimal" value="{{ typed.grams or '' }}"></label>
+      <label>Gold ₹ a gram<input type="text" name="rate_per_gram" inputmode="decimal" value="{{ typed.rate_per_gram or '' }}"></label>
+    </div></details>
+    <button type="submit">Save</button>
+  </form>
+</section>
+<section class="panel" aria-label="Target mix">
+  <h2>Target mix <span class="hint">percent, adding to 100; blank means no target for that class</span></h2>
+  <form method="post" action="/networth/targets">
+    <div class="fields">{% for b, n, v in p.target_inputs %}<label>{{ n }}<input type="text" name="t_{{ b }}" inputmode="decimal" value="{{ typed_targets[b] if typed_targets is not none else v }}"></label>{% endfor %}</div>
+    <button type="submit">Save target mix</button>
+  </form>
+</section>
+</div>
+{% endif %}
+<p class="muted">Add, trim and exit verdicts are measured against your market holdings only. Your entries live in assets.db on this computer; nothing here can place an order.</p>
+{% endblock %}

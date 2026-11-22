@@ -23,18 +23,18 @@ insights are.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, StrictInt, TypeAdapter, field_validator
+from pydantic import Field, StrictInt, TypeAdapter, ValidationError, field_validator
 
 from .book import Book
 from .insights import pct, tenths_of, weights
-from .money import Bps, Money, Price, Qty, Value, div_half_even
+from .money import Bps, Money, Price, Qty, Value, div_half_even, percent
 from .prices import PriceBook
 
 # ------------------------------------------------------------------ kinds
@@ -584,6 +584,132 @@ def notes(nw: NetWorth) -> tuple[Note, ...]:
         )
     order = {"warn": 0, "unknown": 1, "good": 2, "info": 3}
     return tuple(sorted(out, key=lambda n: order[n.tone]))
+
+
+# ------------------------------------------------------------ typed input
+
+_APPLIES: Mapping[str, tuple[Kind, ...]] = {
+    "value": ("bank", "epf", "ppf", "nps", "property", "other", "loan"),
+    "principal": ("fd",),
+    "rate": ("fd",),
+    "start": ("fd",),
+    "months": ("fd",),
+    "grams": ("gold",),
+    "rate_per_gram": ("gold",),
+}
+
+
+def parse_kind(text: str) -> Kind:
+    k = text.strip().lower()
+    for kind in KINDS:
+        if k == kind:
+            return kind
+    raise ValueError(f"{text!r} is not a kind; kinds: {', '.join(KINDS)}")
+
+
+def build_entry(
+    kind: str,
+    fields: Mapping[str, str | None],
+    today: date,
+    name: Callable[[str], str] = lambda n: "--" + n.replace("_", "-"),
+) -> Entry:
+    """One entry from what the owner typed, for the CLI and the web form
+    alike. `fields` holds label, value, as_of, principal, rate, start,
+    months, grams and rate_per_gram as typed (None or blank = not given).
+    `name` says a field the way the surface shows it. Raises ValueError
+    with one sentence; nothing is half-built."""
+    k = parse_kind(kind)
+    given = {n: v.strip() for n, v in fields.items() if v is not None and v.strip()}
+    wrong = [n for n in _APPLIES if n in given and k not in _APPLIES[n]]
+    if wrong:
+        verb = "does" if len(wrong) == 1 else "do"
+        raise ValueError(f"{', '.join(name(n) for n in wrong)} {verb} not apply to {k}")
+
+    def day(field: str) -> date:
+        if field not in given:
+            return today
+        try:
+            d = date.fromisoformat(given[field])
+        except ValueError:
+            raise ValueError(
+                f"{name(field)} {given[field]!r} is not a date like 2026-10-31"
+            ) from None
+        if d > today:
+            raise ValueError(f"{name(field)} {d} is in the future")
+        return d
+
+    def need(*fields_: str) -> None:
+        missing = [f for f in fields_ if f not in given]
+        if missing:
+            what = {"fd": "an FD", "gold": "gold"}.get(k, k)
+            raise ValueError(
+                f"{what} needs {', '.join(name(f) for f in fields_)}"
+                if len(fields_) > 1
+                else f"{name(missing[0])} is required for this kind"
+            )
+
+    def money(field: str) -> Money:
+        try:
+            return Money.rupees(given[field])
+        except ValueError as exc:
+            raise ValueError(f"{name(field)}: {exc}") from None
+
+    label = given.get("label") or KIND_NAME[k]
+    as_of = day("as_of")
+    try:
+        if k == "fd":
+            need("principal", "rate", "start", "months")
+            if not given["months"].isdigit():
+                raise ValueError(f"{name('months')} must be a whole number of months")
+            opened = day("start")
+            return Fd(
+                label=label,
+                # an FD exists from the day it opened, so it can be closed at
+                # maturity without the entry being dated later than that
+                as_of=as_of if "as_of" in given else opened,
+                principal=money("principal"),
+                rate=percent(given["rate"]),
+                start=opened,
+                months=int(given["months"]),
+            )
+        if k == "gold":
+            need("grams", "rate_per_gram")
+            return Gold(
+                label=label,
+                as_of=as_of,
+                grams=Qty.parse(given["grams"]),
+                rate=Price.rupees(given["rate_per_gram"]),
+            )
+        need("value")
+        return Stated(kind=k, label=label, as_of=as_of, amount=money("value"))  # type: ignore[arg-type]
+    except ValidationError as exc:
+        err = exc.errors()[0]
+        where = ".".join(str(p) for p in err["loc"])
+        msg = str(err["msg"]).removeprefix("Value error, ")
+        raise ValueError(f"{where}: {msg}" if where else msg) from None
+
+
+class CloseTooEarly(ValueError):
+    def __init__(self, message: str, latest: date) -> None:
+        super().__init__(message)
+        self.latest = latest
+
+
+def close_entry(entries: Iterable[Entry], kind: Kind, label: str, on: date) -> Closed:
+    """The close to store for `label`, or ValueError with one sentence: no
+    such entry, or a close dated before its latest entry (which would change
+    nothing and say it had)."""
+    mine = [e for e in entries if e.kind == kind and label_key(e.label) == label_key(label)]
+    if not mine:
+        raise ValueError(f"no {kind} called '{label}'")
+    latest = max(e.as_of for e in mine)
+    if on < latest:
+        raise CloseTooEarly(
+            f"{KIND_NAME[kind]} '{label}' has an entry dated {latest}, after {on}; "
+            f"close it on or after {latest}",
+            latest,
+        )
+    return Closed(kind=kind, label=label, as_of=on)
 
 
 # ------------------------------------------------------------------- store

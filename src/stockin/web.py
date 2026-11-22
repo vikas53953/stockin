@@ -5,6 +5,8 @@ Pages, all drawn from the same objects the CLI prints:
   /thesis/ISIN write why you hold a holding, its target weight, or mark it broken
   /import      POST a CAS (PDF + password, or casparser JSON); shows the report
   /reconcile   every check, mismatches first
+  /networth    what you own minus loans: the mix, drift from your target,
+               your typed entries, and forms to add, close and set the mix
   /static      the shared design tokens and components (tokens.css, ui.css)
 
 Nothing here can place an order. The writes are importing a statement,
@@ -35,6 +37,19 @@ from .facts import Isin
 from .holding import holding_page
 from .importview import Coverage, coverage, source_label, tally, twin
 from .insights import all_insights, short_name, weights
+from .money import Bps
+from .networth import (
+    AssetsDamaged,
+    AssetStore,
+    Bucket,
+    Entry,
+    build_entry,
+    close_entry,
+    networth,
+    parse_kind,
+    parse_targets,
+)
+from .networth_page import page as networth_page
 from .prices import PriceBook, PricesDamaged, PricesMissing, PriceStore, india_today
 from .sources import cas
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerOutdated, LedgerWriter
@@ -310,6 +325,160 @@ def create_app(db: Path, port: int) -> FastAPI:
         except ThesesDamaged as exc:
             return thesis_form(isin, str(exc), **typed)
         return RedirectResponse(f"/holding/{isin}", status_code=303)
+
+    assets_db = db.parent / "assets.db"
+    _FIELD = {
+        "label": "Name",
+        "value": "Value",
+        "as_of": "As of",
+        "principal": "Principal",
+        "rate": "Interest rate",
+        "start": "Opened on",
+        "months": "Months",
+        "grams": "Grams",
+        "rate_per_gram": "Rate per gram",
+    }
+
+    def read_assets() -> tuple[tuple[Entry, ...], dict[Bucket, Bps]]:
+        """Read-only: looking at the page never creates or changes assets.db.
+
+        One case needs more. A write that died mid-commit leaves
+        `assets.db-journal` beside the file, and SQLite must roll it back
+        before anyone can read; a read-only connection is not allowed to. So
+        when the read-only open fails and that journal is there, open once the
+        way every CLI command does, which rolls back to the last saved state.
+        A missing or zero-byte assets.db never gets this far."""
+        try:
+            with AssetStore.open(assets_db, readonly=True) as store:
+                return store.entries(), store.targets()
+        except AssetsDamaged:
+            journal = assets_db.with_name(assets_db.name + "-journal")
+            if not (journal.is_file() and journal.stat().st_size > 0):
+                raise
+        with AssetStore.open(assets_db) as store:
+            return store.entries(), store.targets()
+
+    def networth_view(
+        error: str | None = None,
+        typed: dict[str, str] | None = None,
+        status: int = 200,
+        typed_targets: dict[str, str] | None = None,
+    ) -> Response:
+        book = read_book()
+        held = frozenset(h.isin for h in book.holdings()) if book else frozenset[Isin]()
+        prices, damaged = read_prices(held) if held else (None, None)
+        priced = prices or PriceBook(quotes={})
+        assets_damaged = None
+        entries, targets = (), {}
+        try:
+            entries, targets = read_assets()
+        except FileNotFoundError:
+            pass  # nothing typed yet
+        except AssetsDamaged as exc:
+            assets_damaged = str(exc)
+        nw = networth(book, priced, entries, targets, india_today())
+        days = sorted(q.on for q in priced.quotes.values())
+        html = _env.get_template("networth.html").render(
+            p=networth_page(nw, days[-1].isoformat() if days else None),
+            error=error,
+            typed=typed or {},
+            typed_targets=typed_targets,
+            damaged=damaged,
+            prices_hint=PRICES_HINT,
+            assets_damaged=assets_damaged,
+            has_ledger=book is not None,
+        )
+        return HTMLResponse(html, status_code=status)
+
+    @app.get("/networth", response_class=HTMLResponse)
+    def networth_get() -> Response:
+        return networth_view()
+
+    def write_assets(
+        change: Callable[[AssetStore], None],
+        typed: dict[str, str],
+        typed_targets: dict[str, str] | None = None,
+    ) -> Response:
+        try:
+            with AssetStore.open(assets_db) as store:
+                change(store)
+        except AssetsDamaged as exc:
+            return networth_view(str(exc), typed, 409, typed_targets)
+        except ValueError as exc:
+            return networth_view(str(exc), typed, 400, typed_targets)
+        return RedirectResponse("/networth", status_code=303)
+
+    @app.post("/networth/entry", response_class=HTMLResponse)
+    def networth_entry(
+        kind: Annotated[str, Form()] = "",
+        label: Annotated[str, Form()] = "",
+        value: Annotated[str, Form()] = "",
+        as_of: Annotated[str, Form()] = "",
+        principal: Annotated[str, Form()] = "",
+        rate: Annotated[str, Form()] = "",
+        start: Annotated[str, Form()] = "",
+        months: Annotated[str, Form()] = "",
+        grams: Annotated[str, Form()] = "",
+        rate_per_gram: Annotated[str, Form()] = "",
+    ) -> Response:
+        typed = {
+            "kind": kind,
+            "label": label,
+            "value": value,
+            "as_of": as_of,
+            "principal": principal,
+            "rate": rate,
+            "start": start,
+            "months": months,
+            "grams": grams,
+            "rate_per_gram": rate_per_gram,
+        }
+        fields = {k: v[:200] for k, v in typed.items() if k != "kind"}
+        try:
+            entry = build_entry(kind, fields, india_today(), lambda n: _FIELD.get(n, n))
+        except ValueError as exc:
+            return networth_view(str(exc), typed, 400)
+        return write_assets(lambda store: store.put(entry), typed)
+
+    @app.post("/networth/close", response_class=HTMLResponse)
+    def networth_close(
+        kind: Annotated[str, Form()] = "", label: Annotated[str, Form()] = ""
+    ) -> Response:
+        try:
+            k = parse_kind(kind)
+        except ValueError as exc:
+            return networth_view(str(exc), None, 400)
+
+        def close(store: AssetStore) -> None:
+            store.put(close_entry(store.entries(), k, label, india_today()))
+
+        return write_assets(close, {})
+
+    @app.post("/networth/targets", response_class=HTMLResponse)
+    def networth_targets(
+        t_equity: Annotated[str, Form()] = "",
+        t_debt: Annotated[str, Form()] = "",
+        t_gold: Annotated[str, Form()] = "",
+        t_cash: Annotated[str, Form()] = "",
+        t_retirement: Annotated[str, Form()] = "",
+        t_real_estate: Annotated[str, Form()] = "",
+        t_other: Annotated[str, Form()] = "",
+    ) -> Response:
+        typed = {
+            "equity": t_equity,
+            "debt": t_debt,
+            "gold": t_gold,
+            "cash": t_cash,
+            "retirement": t_retirement,
+            "real_estate": t_real_estate,
+            "other": t_other,
+        }
+        pairs = [f"{b}={v.strip()[:20]}" for b, v in typed.items() if v.strip()]
+        try:
+            targets = parse_targets(pairs)
+        except ValueError as exc:
+            return networth_view(f"Target mix: {exc}", None, 400, typed)
+        return write_assets(lambda store: store.set_targets(targets), {}, typed)
 
     @app.get("/reconcile", response_class=HTMLResponse)
     def reconcile_page() -> Response:

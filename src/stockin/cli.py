@@ -18,29 +18,32 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 from . import __version__, notify
 from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights, tenths_of
-from .money import Bps, Money, Price, Qty, Value, percent
+from .money import Bps, Money, Value
 from .networth import (
     KIND_NAME,
     KINDS,
     AssetsDamaged,
     AssetStore,
     Closed,
+    CloseTooEarly,
     Entry,
     Fd,
     Gold,
     Kind,
     Stated,
+    build_entry,
+    close_entry,
     current,
     entry_value,
-    label_key,
     networth,
+    parse_kind,
     parse_targets,
 )
 from .prices import (
@@ -726,32 +729,11 @@ def _day(text: str | None, what: str) -> date:
     return day
 
 
-def _rupees(text: str | None, what: str) -> Money:
-    if text is None:
-        raise _fail(f"{what} is required for this kind")
-    try:
-        return Money.rupees(text)
-    except ValueError as exc:
-        raise _fail(f"{what}: {exc}") from None
-
-
 def _kind(text: str) -> Kind:
-    k = text.strip().lower()
-    for kind in KINDS:
-        if k == kind:
-            return kind
-    raise _fail(f"{text!r} is not a kind", f"kinds: {', '.join(KINDS)}")
-
-
-_FOR: dict[str, tuple[str, ...]] = {
-    "value": ("bank", "epf", "ppf", "nps", "property", "other", "loan"),
-    "principal": ("fd",),
-    "rate": ("fd",),
-    "start": ("fd",),
-    "months": ("fd",),
-    "grams": ("gold",),
-    "rate_per_gram": ("gold",),
-}
+    try:
+        return parse_kind(text)
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
 
 
 @asset_app.command("add")
@@ -779,50 +761,24 @@ def asset_add(
 ) -> None:
     """Record a balance (or an FD, or gold) as of a day. Adding it again for a
     later day keeps the history; the same day again corrects it."""
-    k = _kind(kind)
-    given = {
+    typed = {
+        "label": label,
         "value": value,
+        "as_of": as_of,
         "principal": principal,
         "rate": rate,
         "start": start,
-        "months": months,
+        "months": str(months) if months is not None else None,
         "grams": grams,
         "rate_per_gram": rate_per_gram,
     }
-    wrong = [n for n, v in given.items() if v is not None and k not in _FOR[n]]
-    if wrong:
-        flags = ", ".join("--" + n.replace("_", "-") for n in wrong)
-        raise _fail(f"{flags} do{'es' if len(wrong) == 1 else ''} not apply to {k}")
-    name = (label if label is not None else KIND_NAME[k]).strip()
-    day = _day(as_of, "--as-of")
+    if label is not None and not label.strip():
+        raise _fail("--label is blank: give it a name, or leave --label out")
     try:
-        entry: Entry
-        if k == "fd":
-            if rate is None or start is None or months is None:
-                raise _fail("an FD needs --principal, --rate, --start and --months")
-            opened = _day(start, "--start")
-            entry = Fd(
-                label=name,
-                # an FD exists from the day it opened, so it can be closed at
-                # maturity without the entry being dated later than that
-                as_of=day if as_of is not None else opened,
-                principal=_rupees(principal, "--principal"),
-                rate=percent(rate),
-                start=opened,
-                months=months,
-            )
-        elif k == "gold":
-            if grams is None or rate_per_gram is None:
-                raise _fail("gold needs --grams and --rate-per-gram")
-            entry = Gold(
-                label=name, as_of=day, grams=Qty.parse(grams), rate=Price.rupees(rate_per_gram)
-            )
-        else:
-            entry = Stated(kind=k, label=name, as_of=day, amount=_rupees(value, "--value"))
-    except ValidationError as exc:
-        raise _fail(_first_error(exc)) from None
+        entry = build_entry(kind, typed, _today())
     except ValueError as exc:
         raise _fail(str(exc)) from None
+    k = entry.kind
     with _open_assets() as store:
         store.put(entry)
     if as_json:
@@ -830,12 +786,6 @@ def asset_add(
         return
     shown = entry_value(entry, _today()) if not isinstance(entry, Closed) else Money(paise=0)
     typer.echo(f"saved {KIND_NAME[k]} '{entry.label}' as of {entry.as_of}: ₹{shown} today")
-
-
-def _first_error(exc: ValidationError) -> str:
-    err = exc.errors()[0]
-    where = ".".join(str(p) for p in err["loc"])
-    return f"{where}: {err['msg']}" if where else err["msg"]
 
 
 @asset_app.command("close")
@@ -851,16 +801,13 @@ def asset_close(
     name = (label if label is not None else KIND_NAME[k]).strip()
     day = _day(on, "--on")
     with _open_assets() as store:
-        mine = [e for e in store.entries() if e.kind == k and label_key(e.label) == label_key(name)]
-        if not mine:
-            raise _fail(f"no {k} called '{name}'", "see them with: stockin asset list")
-        latest = max(e.as_of for e in mine)
-        if day < latest:
-            raise _fail(
-                f"{KIND_NAME[k]} '{name}' has an entry dated {latest}, after {day}",
-                f"close it on or after that day: --on {latest}",
-            )
-        store.put(Closed(kind=k, label=name, as_of=day))
+        try:
+            closing = close_entry(store.entries(), k, name, day)
+        except CloseTooEarly as exc:
+            raise _fail(str(exc), f"use --on {exc.latest} or later") from None
+        except ValueError as exc:
+            raise _fail(str(exc), "see them with: stockin asset list") from None
+        store.put(closing)
     typer.echo(f"closed {KIND_NAME[k]} '{name}' from {day}; its history is kept")
 
 
@@ -917,11 +864,13 @@ def _bps(bps: int) -> str:
 def _drift(bps: int, target: int) -> str:
     """Shown weight minus shown target, in the tenths the notes decide on, so
     the column never contradicts the sentence under it: 2504 against 2000 is
-    '+5.0', not '+5.04'. A gap of exactly whole points drops the '.0'."""
+    '+5.0', not '+5.04'. A gap of exactly whole points drops the '.0'; a gap that shows as zero
+    has no direction, so it is '±'."""
     gap = tenths_of(bps, 10_000) - tenths_of(target, 10_000)
     whole, frac = divmod(abs(gap), 10)
     exact = (bps - target) % 100 == 0
-    return ("+" if gap >= 0 else "-") + (str(whole) if exact else f"{whole}.{frac}")
+    sign = "+" if gap > 0 else "-" if gap < 0 else "±"
+    return sign + (str(whole) if exact else f"{whole}.{frac}")
 
 
 def _optional_book() -> Book | None:
