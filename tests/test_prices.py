@@ -1273,9 +1273,9 @@ def test_today_is_the_day_in_india() -> None:
 def test_a_jump_is_more_than_double_or_less_than_half() -> None:
     from stockin.prices import is_jump
 
-    def jump(a: str, b: str) -> bool:  # a month apart: only the 2x rule applies
-        old = _q("INE009A01021", date(2026, 10, 1), a, "bhavcopy")
-        return is_jump(old, _q("INE009A01021", date(2026, 11, 1), b, "bhavcopy"))
+    def jump(a: str, b: str) -> bool:  # across sources only the 2x rule applies
+        old = _q("INF204KB14I2", date(2026, 10, 1), a, "amfi")
+        return is_jump(old, _q("INF204KB14I2", date(2026, 11, 1), b, "bhavcopy"))
 
     assert not jump("100", "200")  # exactly double: a 1:1 bonus the other way round
     assert jump("100", "200.000001")
@@ -1294,9 +1294,10 @@ def test_a_jump_is_more_than_double_or_less_than_half() -> None:
         (1, "1800.67", True),  # +20.0007%
         (1, "1200.44", False),  # exactly -20%
         (1, "1200.43", True),  # -20.0007%
-        (7, "1800.67", True),  # a week old is still close
-        (8, "1800.67", False),  # older: only the 2x rule
-        (8, "750.30", False),
+        (7, "1800.67", True),  # a week old
+        (8, "1800.67", True),  # older still: no age limit (#39 verifier R-1)
+        (8, "750.30", True),
+        (40, "750.30", True),
         (8, "750.27", True),  # below half, whatever the age
         (0, "1800.67", True),  # the same day, same source
     ],

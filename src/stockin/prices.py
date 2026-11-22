@@ -127,14 +127,13 @@ or bonus. A real split needs a look anyway: units come from the last statement."
 
 BAND_BPS = 2_000
 BAND_DAYS = 7
-"""Closer in time, the rule is tighter: a price more than 20% away from a
-last one at most 7 calendar days older is held too. NSE's widest daily price
-band is 20%, so a share that moved further in a few trading days is rare,
-and a 1:1 split whose ex-date close sits just above half the old close
-(₹750.30 against ₹1,500.55) is caught here, not let through by the 2x rule
-(#33 verifier 3, R-1). A fund's NAV moves a few percent a week. Against a
-price more than 7 days old only the 2x rule applies: after a longer gap
-without prices, a split that closes just above half is stored."""
+"""A price more than 20% away from the last one of the same source is held
+too, however old that one is (see is_jump). NSE's widest daily price band
+is 20%, so a share that moved further between two files is rare, and a 1:1
+split whose ex-date close sits just above half the old close (₹750.30
+against ₹1,500.55) is caught here, not let through by the 2x rule (#33
+verifier 3, R-1). BAND_DAYS is how old a close may be for a live price to
+be checked against it and used (sources/live.py, MAX_CLOSE_AGE)."""
 
 
 class Jump(Value):
@@ -153,15 +152,19 @@ def beyond_band(last: Price, new: Price, band_bps: int = BAND_BPS) -> bool:
 
 def is_jump(last: Quote, new: Quote) -> bool:
     """Held for the owner: beyond 2x from any earlier price, or beyond 20%
-    from a price of the same source at most BAND_DAYS older.
+    from the last price of the same source, however old.
 
     The band compares like with like: a fund's NAV and its exchange close
-    can differ legitimately, so AMFI against bhavcopy is held only at 2x."""
+    can differ legitimately, so AMFI against bhavcopy is held only at 2x.
+    It has no age limit, because a held price is not stored: with one, a
+    split held every evening was let in once the last stored close turned
+    a week old, and the next watch sent a wrong ADD (#39 verifier R-1).
+    After a long gap a real move beyond 20% is held too, and the owner
+    accepts it once with --accept-jumps."""
     a, b = last.price.micro_rupees, new.price.micro_rupees
     if b > JUMP_FACTOR * a or JUMP_FACTOR * b < a:
         return True
-    recent = new.on - last.on <= timedelta(days=BAND_DAYS)
-    return recent and last.source == new.source and beyond_band(last.price, new.price)
+    return last.source == new.source and beyond_band(last.price, new.price)
 
 
 def hold_jumps(

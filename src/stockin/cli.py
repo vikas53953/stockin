@@ -545,8 +545,8 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
             )
         if report.held:
             typer.echo(
-                "  a price that moved more than 20% from the same source's price a week old "
-                "or less, or more than double or less than half any earlier one, is held back. "
+                "  a price that moved more than 20% from the same source's last price, "
+                "or more than double or less than half any earlier one, is held back. "
                 "If it is real (a split, a bonus), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again. An ETF's split is held "
                 "twice, once in the NAV file and once in the exchange file."
@@ -1185,11 +1185,23 @@ def _symbols(now: datetime) -> tuple[dict[Isin, str], bool]:
         cached = json.loads(path.read_text(encoding="utf-8"))
         complete = cached.get("complete", True) is True
         fresh = complete or now - datetime.fromisoformat(cached["tried"]) < SYMBOLS_RETRY
-        if cached["day"] == today.isoformat() and fresh:
+        failed = cached["day"] == today.isoformat() and fresh and cached.get("failed") is True
+        if cached["day"] == today.isoformat() and fresh and not failed:
             return {Isin(k): str(v) for k, v in dict(cached["symbols"]).items()}, complete
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        pass
-    found, complete = live.fetch_symbols()
+        failed = False
+    if failed:  # outside the try: LiveRejected is a ValueError
+        raise live.LiveRejected(
+            "could not download NSE's list of symbols; it is asked for again within the hour"
+        )
+    try:
+        found, complete = live.fetch_symbols()
+    except live.LiveRejected:
+        # nothing came back: also asked for at most hourly (#39 verifier C-2)
+        failed = {"day": today.isoformat(), "complete": False, "failed": True}
+        with suppress(OSError):
+            path.write_text(json.dumps({**failed, "tried": now.isoformat()}), encoding="utf-8")
+        raise
     try:
         body = {
             "day": today.isoformat(),

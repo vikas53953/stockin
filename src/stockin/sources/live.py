@@ -100,16 +100,16 @@ def parse_symbols(data: bytes) -> dict[Isin, str]:
     return out
 
 
-def _paise(number: Decimal) -> Price:
+def _paise(number: Decimal, symbol: str) -> Price:
     try:
         rupees = number.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
     except InvalidOperation:
-        raise LiveRejected(f"{number} is not a price") from None
+        raise LiveRejected(f"{symbol}: {number} is not a price") from None
     if not rupees.is_finite() or rupees <= 0:
-        raise LiveRejected(f"{number} is not a price")
+        raise LiveRejected(f"{symbol}: {number} is not a price")
     micros = int(rupees * 1_000_000)
     if micros > MAX_PRICE_MICROS:
-        raise LiveRejected(f"{rupees} is beyond any real price")
+        raise LiveRejected(f"{symbol}: {rupees} is beyond any real price")
     return Price(micro_rupees=micros)
 
 
@@ -139,7 +139,7 @@ def parse_chart(data: bytes, isin: Isin, symbol: str) -> LiveQuote:
         at = datetime.fromtimestamp(int(when), IST)
     except (OverflowError, OSError, ValueError):
         raise LiveRejected(f"{symbol}: the quote's time is not a time") from None
-    return LiveQuote(isin=isin, symbol=symbol, price=_paise(price), at=at)
+    return LiveQuote(isin=isin, symbol=symbol, price=_paise(price, symbol), at=at)
 
 
 Get = Callable[[str], bytes | None]

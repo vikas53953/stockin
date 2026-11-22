@@ -896,3 +896,49 @@ def test_watch_once_on_a_damaged_ledger_says_one_line(
     assert r.exit_code == 1, r.output
     assert "Traceback" not in r.output and "error: this check failed (" in r.output
     assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_no_list_at_all_is_asked_for_again_only_hourly(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#39 verifier C-2: both of NSE's lists failing is not downloaded again
+    on every pass either."""
+    asked: list[str] = []
+
+    def get(url: str) -> bytes | None:
+        asked.append(url)
+        return None
+
+    fetch = live.fetch_symbols
+    monkeypatch.setattr(live, "fetch_symbols", lambda: fetch(get))
+    symbols = cli_mod._symbols  # pyright: ignore[reportPrivateUsage]
+    for minutes in (0, 30, 59):
+        with pytest.raises(live.LiveRejected, match="could not download"):
+            symbols(MON + timedelta(minutes=minutes))
+    assert len(asked) == 2
+    with pytest.raises(live.LiveRejected):
+        symbols(MON + timedelta(minutes=61))
+    assert len(asked) == 4
+
+
+def test_a_price_that_is_not_one_names_its_symbol() -> None:
+    """#39 verifier C-4."""
+    for price in ("1e400", "0.004"):
+        data = chart("INFY.NS", price, MON)
+        with pytest.raises(live.LiveRejected, match=r"^INFY: "):
+            live.parse_chart(data, INFY, "INFY")
+
+
+def test_watch_once_strikes_the_token_from_an_unexpected_error(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#39 verifier V12 survivor."""
+    Phone(monkeypatch)
+
+    def boom(send: bool) -> None:
+        raise RuntimeError(f"could not open https://example.invalid/bot{TOKEN}/x")
+
+    monkeypatch.setattr(cli_mod, "_watch_pass", boom)
+    r = runner.invoke(cli, ["watch", "--once"])
+    assert r.exit_code == 1 and "error: this check failed (RuntimeError" in r.output
+    assert TOKEN not in r.output and "***" in r.output
