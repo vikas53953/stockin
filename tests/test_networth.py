@@ -724,3 +724,62 @@ def test_the_cli_prints_drift_with_its_sign(empty: Path) -> None:
     assert "drift +20 pts" in text and "drift -20 pts" in text
     cash = next(ln for ln in text.splitlines() if ln.strip().startswith("Cash"))
     assert "+20" in cash
+
+
+# ------------------------------------------- verifier round 2 (PR #29)
+# Committed red before the fix, per the two-FAIL rule (PIPELINE row 16).
+
+
+def test_a_value_added_on_the_day_of_a_close_counts(empty: Path) -> None:
+    """R5: an FD closed at maturity and renewed under the same name that day,
+    or a balance re-entered after a mistaken close, must count. 'saved ...
+    today' must never be printed for a value that is then left out."""
+    _ok(
+        "asset", "add", "fd", "--label", "HDFC FD", "--principal", "100000", "--rate", "7.1",
+        "--start", "2025-11-01", "--months", "12",
+    )  # fmt: skip
+    _ok("asset", "close", "fd", "--label", "HDFC FD", "--on", "2026-11-01")
+    _ok(
+        "asset", "add", "fd", "--label", "HDFC FD", "--principal", "107000", "--rate", "7.0",
+        "--start", "2026-11-01", "--months", "12",
+    )  # fmt: skip
+    nw = json.loads(_ok("networth", "--json"))
+    assert nw["owned"]["paise"] > 107000_00
+
+    _ok("asset", "add", "bank", "--value", "500")
+    _ok("asset", "close", "bank")
+    _ok("asset", "add", "bank", "--value", "500")  # the close was a mistake
+    nw = json.loads(_ok("networth", "--json"))
+    assert any(ln["kind"] == "bank" and ln["value"]["paise"] == 500_00 for ln in nw["lines"])
+
+
+def test_the_cli_drift_column_never_contradicts_the_notes(empty: Path) -> None:
+    """R6: 25.04% against 20% must not print '+5.04 pts' above a note that
+    says every class is within 5.0 points; the column shows the same tenths."""
+    _ok("asset", "add", "bank", "--value", "2504")
+    _ok("asset", "add", "other", "--value", "7496")
+    _ok("target", "set", "cash=20", "other=80")
+    text = _ok("networth")
+    assert "within 5.0 points" in text
+    cash = next(ln for ln in text.splitlines() if ln.strip().startswith("Cash"))
+    assert "drift +5.0 pts" in cash, cash
+
+
+def test_adding_an_fd_says_the_date_it_is_stored_under(empty: Path) -> None:
+    """R7: without --as-of the FD is stored as of its start; say that date."""
+    out = _ok(
+        "asset", "add", "fd", "--label", "X", "--principal", "1000", "--rate", "7",
+        "--start", "2026-01-15", "--months", "12",
+    )  # fmt: skip
+    assert "as of 2026-01-15" in out and f"as of {TODAY}" not in out
+
+
+def test_any_schema_object_beyond_the_two_tables_is_damage(tmp_path: Path) -> None:
+    """C5: a trigger (or index, or view) can change what a write does."""
+    path = tmp_path / "assets.db"
+    _seeded(path)
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TRIGGER t AFTER DELETE ON targets BEGIN DELETE FROM entries; END")
+    c.close()
+    with pytest.raises(AssetsDamaged):
+        AssetStore.open(path)
