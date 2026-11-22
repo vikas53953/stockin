@@ -45,7 +45,7 @@
       <div class="decide-top">{{ ui.pill(d.call) }}<a class="decide-name" href="/holding/{{ d.isin }}">{{ d.name }}</a><a class="edit" href="/thesis/{{ d.isin }}">Edit</a></div>
       {% if theses and theses.get(d.isin) %}<p class="muted small thesis-line">Why you hold it: {{ theses[d.isin].why }}</p>{% endif %}
       {% if d.weight is not none %}
-      {{ ui.gauge(d.weight, d.name, target=d.target, band=d.band, cap=25, weight_text=d.weight_text, target_text=d.target_text) }}
+      {{ ui.gauge(d.weight, d.name, target=d.target, band=d.band, cap=d.cap, weight_text=d.weight_text, target_text=d.target_text) }}
       {{ ui.why(d.because) }}
       {% else %}
       <p class="small">{{ d.because }}</p>

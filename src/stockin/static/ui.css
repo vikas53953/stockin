@@ -202,3 +202,14 @@ td.name a{color:inherit}
 .cockpit~.cards{grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr))}
 @media (max-width:899px){.shell{background:none}}
 .tile-h a{color:var(--accent)}
+
+/* ---------- holding: tax clock ---------- */
+.clock{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.clock-row{display:grid;grid-template-columns:7.5em 1fr 6em;gap:10px;align-items:center;font-size:13px}
+.clock-track{position:relative;height:10px;border-radius:5px;background:var(--chip);overflow:hidden;display:flex}
+.clock-fill{position:absolute;left:0;top:0;bottom:0;background:var(--s1);border-radius:5px;min-width:2px}
+.clock-fill.done{background:var(--ok)}
+.clock-left{font:12.5px var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+.unknown-row .kbar-unknown{height:100%}
+.cockpit .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+.cockpit .stat{background:var(--panel-2)}
