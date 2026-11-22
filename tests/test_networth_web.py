@@ -4,11 +4,14 @@ prices.db is said on the page, never a 500."""
 
 from __future__ import annotations
 
+import html
 import itertools
 import random
 import re
 import sqlite3
-from datetime import date
+import subprocess
+import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -20,9 +23,23 @@ from typer.testing import CliRunner
 from stockin.cli import app as cli
 from stockin.insights import pct, tenths_of
 from stockin.money import Bps, Money, Price, Qty
-from stockin.networth import KINDS, AssetStore, Bucket, Fd, Gold, Stated, networth
+from stockin.networth import (
+    KINDS,
+    STALE_DAYS,
+    AssetsDamaged,
+    AssetStore,
+    Bucket,
+    Fd,
+    Gold,
+    NetWorth,
+    Stated,
+    close_entry,
+    networth,
+    parse_kind,
+)
 from stockin.networth_page import page, short_rupees, width
-from stockin.prices import PriceBook
+from stockin.prices import PriceBook, PriceStore
+from stockin.store import Ledger
 from stockin.web import create_app
 
 FIX = Path(__file__).parent / "fixtures"
@@ -446,3 +463,299 @@ def test_looking_at_the_page_never_writes_assets(web: TestClient, data: Path) ->
     (data / "assets.db").write_bytes(b"")
     assert web.get("/networth").status_code == 200
     assert (data / "assets.db").read_bytes() == b""
+
+
+# ------------------------------------------------ verifier round 2 (PR #35)
+
+
+@pytest.fixture
+def bare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """A data folder with no ledger and no prices: only what the owner typed."""
+    monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
+    monkeypatch.setattr("stockin.web.india_today", lambda: TODAY)
+    return TestClient(create_app(tmp_path / "ledger.db", PORT), base_url=HOST)
+
+
+def _engine(folder: Path) -> NetWorth:
+    """The net worth the engine works out from the files in `folder`, read
+    without going through the page."""
+    book, prices = None, PriceBook(quotes={})
+    if (folder / "ledger.db").exists():
+        with Ledger.open(folder / "ledger.db") as ledger:
+            book = ledger.book()
+        with PriceStore.open(folder / "prices.db") as ps:
+            prices = ps.book(frozenset(h.isin for h in book.holdings()))
+    with AssetStore.open(folder / "assets.db") as store:
+        entries, targets = store.entries(), store.targets()
+    return networth(book, prices, entries, targets, TODAY)
+
+
+def _hero(page_: str) -> str:
+    got = re.findall(r'<h1 class="nw-total[^"]*">([^<]*)</h1>', page_)
+    assert len(got) == 1, got
+    return html.unescape(got[0])
+
+
+def _notice(page_: str) -> str:
+    """The whole refusal notice as the owner reads it: tags out, spaces folded."""
+    got = re.findall(r'<div class="notice bad" role="alert" id="error">(.*?)</div>', page_, re.S)
+    assert len(got) == 1, got
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", "", got[0])).split())
+
+
+def test_the_hero_number_on_the_page_is_the_engines_net_worth(web: TestClient, data: Path) -> None:
+    _seed(data)  # market holdings, own entries and a loan
+    page_ = web.get("/networth").text
+    nw = _engine(data)
+    assert nw.owed.paise > 0 and nw.total != nw.owned  # a loan: the two numbers differ
+    assert _hero(page_) == f"₹{nw.total}"
+    assert f"</i>own ₹{nw.owned}</span>" in page_
+    assert f"</i>owe ₹{nw.owed} (" in page_
+
+
+def test_the_page_names_the_latest_price_day(web: TestClient, data: Path, tmp_path: Path) -> None:
+    older = tmp_path / "NAVAll-older.txt"
+    older.write_text(
+        "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;"
+        "Net Asset Value;Date\n \nOpen Ended Schemes(Equity Scheme - Flexi Cap Fund)\n \n"
+        "HDFC Mutual Fund\n \n"
+        "118955;INF179K01BE2;-;HDFC Flexi Cap Fund;Direct Plan;Growth Option;2100.1234;"
+        "10-Nov-2026\n"
+    )
+    r = runner.invoke(cli, ["prices", "import", str(older)])
+    assert r.exit_code == 0, r.output
+    with Ledger.open(data / "ledger.db") as ledger:
+        held = frozenset(h.isin for h in ledger.book().holdings())
+    with PriceStore.open(data / "prices.db") as ps:
+        days = sorted({q.on for q in ps.book(held).quotes.values()})
+    assert len(days) == 2, days  # the fund is priced on an older day than the share
+    label = re.findall(
+        r'<span class="stat-label">Net worth · ([^<]+)</span>', web.get("/networth").text
+    )
+    assert label == [f"{TODAY.isoformat()} · prices {days[-1].isoformat()}"]
+
+
+@pytest.mark.parametrize(
+    ("cash", "other", "target", "drift"),
+    [
+        ("2004", "7996", 1996, "±0.0 pts"),  # 20.0% against 20.0%; the raw gap rounds to +0.1
+        ("3338", "6662", 3333, "+0.1 pts"),  # 33.4% against 33.3%; the raw gap rounds to 0.0
+    ],
+)
+def test_a_drift_label_follows_the_shown_numbers_when_the_raw_gap_says_otherwise(
+    bare: TestClient, tmp_path: Path, cash: str, other: str, target: int, drift: str
+) -> None:
+    targets: dict[Bucket, Bps] = {"cash": Bps(target), "other": Bps(10_000 - target)}
+    with AssetStore.open(tmp_path / "assets.db") as store:
+        for e in _two(cash, other):
+            store.put(e)
+        store.set_targets(targets)
+    nw = _engine(tmp_path)
+    s = {x.bucket: x for x in nw.slices}["cash"]
+    assert s.target == target and s.drift is not None
+    shown = tenths_of(s.bps, 10_000) - tenths_of(target, 10_000)
+    assert tenths_of(s.drift, 10_000) != shown  # this case tells the two apart
+    sign = "+" if shown > 0 else ("-" if shown < 0 else "±")
+    assert drift == f"{sign}{abs(shown) // 10}.{abs(shown) % 10} pts"
+    bar = {b.name: b for b in page(nw).bars}["Cash"]
+    assert bar.drift_text == drift
+    assert (bar.share, bar.target_text) == (
+        pct(tenths_of(s.bps, 10_000)),
+        pct(tenths_of(target, 10_000)),
+    )
+    drawn = re.findall(
+        r'<span>Cash</span><span class="drift \w+">([^<]+)</span>', bare.get("/networth").text
+    )
+    assert [html.unescape(d) for d in drawn] == [drift]
+
+
+@pytest.mark.parametrize("kind", ["bank", "boat"])
+def test_a_refused_close_notice_is_the_badge_and_then_only_the_reason(
+    web: TestClient, kind: str
+) -> None:
+    with pytest.raises(ValueError) as why:
+        close_entry((), parse_kind(kind), "nope", TODAY)
+    r = web.post("/networth/close", data={"kind": kind, "label": "nope"})
+    assert r.status_code == 400
+    assert _notice(r.text) == f"✕ Not saved {why.value}"
+
+
+def test_a_refused_target_mix_notice_is_the_badge_and_then_only_the_reason(
+    web: TestClient,
+) -> None:
+    r = web.post("/networth/targets", data={"t_equity": "60", "t_debt": "39"})
+    assert r.status_code == 400
+    assert _notice(r.text) == "✕ Not saved Target mix: the targets add to 99.0%, not 100%"
+
+
+def test_the_stale_flag_starts_the_day_after_ninety_days(bare: TestClient, tmp_path: Path) -> None:
+    at, past = STALE_DAYS, STALE_DAYS + 1
+    with AssetStore.open(tmp_path / "assets.db") as store:
+        for label, days in (("At the line", at), ("Past the line", past)):
+            store.put(
+                Stated(
+                    kind="bank",
+                    label=label,
+                    as_of=TODAY - timedelta(days=days),
+                    amount=rs("1000"),
+                )
+            )
+    nw = _engine(tmp_path)
+    tiles = {t.label: t for g in page(nw).groups for t in g.tiles}
+    assert tiles["At the line"].pill is None
+    assert tiles["Past the line"].pill == f"{past} days old"
+    page_ = bare.get("/networth").text
+    assert f"{past} days old" in page_ and f"{at} days old" not in page_
+    # the engine's own note draws the line at the same day
+    notes = " ".join(n.text for n in nw.notes)
+    assert f"Past the line was last updated {past} days ago" in notes
+    assert "At the line was last updated" not in notes
+
+
+def test_a_group_total_adds_every_line_in_the_group(bare: TestClient, tmp_path: Path) -> None:
+    with AssetStore.open(tmp_path / "assets.db") as store:
+        for label, amount in (("SBI savings", "250000"), ("HDFC salary", "40000.50")):
+            store.put(Stated(kind="bank", label=label, as_of=TODAY, amount=rs(amount)))
+        for label, amount in (("Home loan", "300000"), ("Car loan", "125000.25")):
+            store.put(Stated(kind="loan", label=label, as_of=TODAY, amount=rs(amount)))
+    nw = _engine(tmp_path)
+    cash = {s.bucket: s for s in nw.slices}["cash"].value
+    assert cash == rs("290000.50") and nw.owed == rs("425000.25")
+    assert {g.name: g.total for g in page(nw).groups} == {
+        "Cash": f"₹{cash}",
+        "Loans": f"₹{nw.owed}",
+    }
+    hold = bare.get("/networth").text.split('aria-label="What you hold"')[1].split("</section>")[0]
+    drawn = re.findall(r"</i>([A-Za-z ]+) (₹[\d,.]+)</span>", hold)
+    assert drawn == [("Cash", f"₹{cash}"), ("Loans", f"₹{nw.owed}")]
+
+
+def test_a_saved_target_with_hundredths_comes_back_whole_in_the_form(
+    bare: TestClient, tmp_path: Path
+) -> None:
+    saved: dict[Bucket, Bps] = {"equity": Bps(3333), "debt": Bps(3333), "cash": Bps(3334)}
+    with AssetStore.open(tmp_path / "assets.db") as store:
+        store.set_targets(saved)
+    page_ = bare.get("/networth").text
+    boxes = dict(re.findall(r'name="(t_\w+)" inputmode="decimal" value="([^"]*)"', page_))
+    assert boxes == {
+        "t_equity": "33.33",
+        "t_debt": "33.33",
+        "t_gold": "",
+        "t_cash": "33.34",
+        "t_retirement": "",
+        "t_real_estate": "",
+        "t_other": "",
+    }
+    # saving the form as it was filled in changes nothing
+    r = bare.post("/networth/targets", data=boxes, follow_redirects=False)
+    assert r.status_code == 303, r.text[:300]
+    with AssetStore.open(tmp_path / "assets.db") as store:
+        assert store.targets() == saved
+
+
+_KILLED_MID_WRITE = """
+import os, sys
+from pathlib import Path
+from stockin.networth import AssetStore
+conn = AssetStore.open(Path(sys.argv[1]))._conn
+conn.isolation_level = None
+conn.execute("PRAGMA cache_size=1")
+conn.execute("BEGIN")
+conn.execute("DELETE FROM targets")
+for i in range(200):  # more than the cache holds, so changed pages reach the file
+    conn.execute(
+        "INSERT INTO entries VALUES ('other', ?, '2026-11-20', 0, ?)", (f"junk{i}", "x" * 900)
+    )
+os._exit(9)  # killed: no commit, no rollback
+"""
+
+
+def test_a_write_killed_mid_commit_is_rolled_back_by_opening_the_page(
+    web: TestClient, data: Path
+) -> None:
+    """A real hot journal: a child process starts a big write through the
+    real store and dies before it commits. A read-only open cannot roll that
+    back; the page must, the way any CLI command does."""
+    _seed(data)
+    db, journal = data / "assets.db", data / "assets.db-journal"
+    saved = db.read_bytes()
+    before = _engine(data)
+    r = subprocess.run([sys.executable, "-c", _KILLED_MID_WRITE, str(db)], check=False)
+    assert r.returncode == 9
+    assert journal.stat().st_size > 0 and db.read_bytes() != saved  # half a write is in the file
+    with pytest.raises(AssetsDamaged, match="readonly"):
+        AssetStore.open(db, readonly=True)
+    assert journal.exists() and db.read_bytes() != saved  # still as the crash left it
+
+    r = web.get("/networth")
+    assert r.status_code == 200 and "could not be read" not in r.text
+    assert _hero(r.text) == f"₹{before.total}" and before.owned.paise > 0
+    for e in ENTRIES:
+        assert e.label in r.text
+    assert "junk" not in r.text
+    assert 'action="/networth/entry"' in r.text and 'action="/networth/targets"' in r.text
+    assert r.text.count('action="/networth/close"') == len(ENTRIES)
+    assert db.read_bytes() == saved and not journal.exists()  # back to the last saved state
+    assert _engine(data) == before
+
+
+def test_a_leftover_journal_does_not_hide_real_damage(web: TestClient, data: Path) -> None:
+    _seed(data)
+    with sqlite3.connect(data / "assets.db") as c:
+        c.execute("UPDATE entries SET body = 'junk' WHERE kind = 'bank'")
+    c.close()
+    (data / "assets.db-journal").write_bytes(b"left behind, and not a journal at all")
+    r = web.get("/networth")
+    assert r.status_code == 200 and "Your entries could not be read" in r.text
+    assert "/networth/close" not in r.text and 'action="/networth/entry"' not in r.text
+
+
+def test_viewing_opens_assets_for_writing_only_to_roll_back_a_journal(
+    web: TestClient, data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(data)
+    opened: list[bool] = []
+    real = AssetStore.open
+
+    def spy(path: Path, *, readonly: bool = False) -> AssetStore:
+        opened.append(readonly)
+        return real(path, readonly=readonly)
+
+    monkeypatch.setattr(AssetStore, "open", staticmethod(spy))
+    assert "SBI savings" in web.get("/networth").text
+    assert opened == [True]  # a healthy file: read-only, once
+    with sqlite3.connect(data / "assets.db") as c:
+        c.execute("UPDATE entries SET body = 'junk' WHERE kind = 'bank'")
+    c.close()
+    opened.clear()
+    assert "Your entries could not be read" in web.get("/networth").text
+    assert opened == [True]  # damage with no journal beside it: still read-only, once
+
+
+def test_a_damaged_empty_page_does_not_point_at_a_form_it_hides(
+    bare: TestClient, tmp_path: Path
+) -> None:
+    healthy = bare.get("/networth").text
+    assert "with the form below" in healthy and 'action="/networth/entry"' in healthy
+    junk = b"not a database, just some words long enough"
+    (tmp_path / "assets.db").write_bytes(junk)
+    empty = bare.get("/networth").text  # nothing readable, no market holdings: the empty card
+    assert "Your entries could not be read" in empty and "Start your net worth" in empty
+    assert "<form" not in empty and "below" not in empty
+    assert "Nothing can be added here until assets.db can be read again." in empty
+    assert "Import a CAS" in empty  # still true: importing does not need assets.db
+    assert (tmp_path / "assets.db").read_bytes() == junk
+
+
+def test_a_damaged_page_with_market_holdings_does_not_say_set_a_target_below(
+    web: TestClient, data: Path
+) -> None:
+    healthy = web.get("/networth").text  # market holdings, no target mix yet
+    assert "no target mix yet: set one below" in healthy
+    assert 'action="/networth/targets"' in healthy
+    (data / "assets.db").write_bytes(b"not a database, just some words long enough")
+    damaged = web.get("/networth").text
+    assert "Your entries could not be read" in damaged and "Against your target" in damaged
+    assert "<form" not in damaged and "below" not in damaged
+    assert "your target mix could not be read" in damaged

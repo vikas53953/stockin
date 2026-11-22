@@ -801,3 +801,10 @@ def test_a_gap_that_shows_as_zero_has_no_sign() -> None:
     assert _drift(2004, 2000) == "±0.0"
     assert _drift(2050, 2000) == "+0.5"
     assert _drift(1950, 2000) == "-0.5"
+
+
+def test_the_cli_drift_column_is_the_shown_weight_minus_the_shown_target() -> None:
+    """#29 round 3 V3: with hundredths in a target the raw gap rounds another
+    way than the two numbers printed beside it."""
+    assert _drift(2004, 1996) == "±0.0"  # 20.0% against 20.0%; the raw gap rounds to +0.1
+    assert _drift(3338, 3333) == "+0.1"  # 33.4% against 33.3%; the raw gap rounds to 0.0

@@ -36,9 +36,12 @@ from .cockpit import cockpit
 from .facts import Isin
 from .holding import holding_page
 from .insights import all_insights, short_name, weights
+from .money import Bps
 from .networth import (
     AssetsDamaged,
     AssetStore,
+    Bucket,
+    Entry,
     build_entry,
     close_entry,
     networth,
@@ -330,6 +333,25 @@ def create_app(db: Path, port: int) -> FastAPI:
         "rate_per_gram": "Rate per gram",
     }
 
+    def read_assets() -> tuple[tuple[Entry, ...], dict[Bucket, Bps]]:
+        """Read-only: looking at the page never creates or changes assets.db.
+
+        One case needs more. A write that died mid-commit leaves
+        `assets.db-journal` beside the file, and SQLite must roll it back
+        before anyone can read; a read-only connection is not allowed to. So
+        when the read-only open fails and that journal is there, open once the
+        way every CLI command does, which rolls back to the last saved state.
+        A missing or zero-byte assets.db never gets this far."""
+        try:
+            with AssetStore.open(assets_db, readonly=True) as store:
+                return store.entries(), store.targets()
+        except AssetsDamaged:
+            journal = assets_db.with_name(assets_db.name + "-journal")
+            if not (journal.is_file() and journal.stat().st_size > 0):
+                raise
+        with AssetStore.open(assets_db) as store:
+            return store.entries(), store.targets()
+
     def networth_view(
         error: str | None = None,
         typed: dict[str, str] | None = None,
@@ -342,9 +364,8 @@ def create_app(db: Path, port: int) -> FastAPI:
         priced = prices or PriceBook(quotes={})
         assets_damaged = None
         entries, targets = (), {}
-        try:  # read-only: looking at the page never creates or changes assets.db
-            with AssetStore.open(assets_db, readonly=True) as store:
-                entries, targets = store.entries(), store.targets()
+        try:
+            entries, targets = read_assets()
         except FileNotFoundError:
             pass  # nothing typed yet
         except AssetsDamaged as exc:

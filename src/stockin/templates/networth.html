@@ -47,7 +47,7 @@
 </section>
 
 {% if p.empty %}
-{{ ui.empty("Start your net worth", "Add a bank balance, an FD, your EPF or PPF, gold or a loan with the form below." ~ ("" if has_ledger else " Import a CAS to add your market holdings too."), none if has_ledger else "/#import", none if has_ledger else "Import a CAS") }}
+{{ ui.empty("Start your net worth", ("Nothing can be added here until assets.db can be read again." if assets_damaged else "Add a bank balance, an FD, your EPF or PPF, gold or a loan with the form below.") ~ ("" if has_ledger else " Import a CAS to add your market holdings too."), none if has_ledger else "/#import", none if has_ledger else "Import a CAS") }}
 {% endif %}
 
 {% if p.cards %}
@@ -69,7 +69,7 @@
   <table><tbody>{% for s in p.segments %}<tr><td><i class="sw {{ s.slot }}"></i> {{ s.name }}</td><td class="num">{{ s.value }}</td><td class="num"><b>{{ s.share }}</b></td></tr>{% endfor %}</tbody></table>
 </section>
 <section class="panel" aria-label="Against your target">
-  <h2>Against your target {% if not p.has_targets %}<span class="hint">no target mix yet: set one below</span>{% endif %}</h2>
+  <h2>Against your target {% if assets_damaged %}<span class="hint">your target mix could not be read</span>{% elif not p.has_targets %}<span class="hint">no target mix yet: set one below</span>{% endif %}</h2>
   <div class="gauges">
   {% for b in p.bars %}
     <div class="gauge-row">
