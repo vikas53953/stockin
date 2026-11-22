@@ -1,0 +1,120 @@
+{#- Stockin's shared UI pieces. Import with {% import "_ui.html" as ui %}.
+
+    Every number a macro draws arrives already computed and already formatted
+    (money as text from money.py, shares as percent floats). A macro only
+    places it: it never adds, rounds or invents a figure, so the sentence
+    beside a chart and the chart itself always read the same object.
+    Widths are clamped to 0..100 so a bad input can never push a mark off its
+    track. Styles live in static/ui.css; colours come from static/tokens.css. -#}
+
+{%- macro clamp(x) -%}{{ '%.2f'|format([[x, 0]|max, 100]|min + 0.0) }}{%- endmacro -%}
+
+{%- set CALLS = {"exit": "✕ exit", "trim": "▼ trim", "add": "▲ add", "review": "? review", "hold": "• hold"} -%}
+
+{#- A verdict call (exit, trim, add, review, hold) as a coloured pill with its icon. -#}
+{%- macro pill(call) -%}
+<span class="pill pill-{{ call }}">{{ CALLS[call] }}</span>
+{%- endmacro -%}
+
+{#- A status pill with an icon and a word, never colour alone. tone: ok, warn, bad, info. -#}
+{%- macro status(tone, text) -%}
+<span class="pill pill-{{ tone }}">{{ {"ok": "✓", "warn": "!", "bad": "✕", "info": "•"}[tone] }} {{ text }}</span>
+{%- endmacro -%}
+
+{#- How fresh a price is. state: live, delayed, eod, stale. as_of is text, e.g. "20 Nov 2026" or "14:32 IST". -#}
+{%- macro fresh(state, as_of) -%}
+<span class="fresh fresh-{{ state }}" title="Prices {{ {'live': 'live', 'delayed': 'delayed', 'eod': 'end of day', 'stale': 'out of date'}[state] }}, as of {{ as_of }}">{{ {"live": "live", "delayed": "delayed", "eod": "end of day", "stale": "stale"}[state] }} · {{ as_of }}</span>
+{%- endmacro -%}
+
+{#- A share of your money against your own target.
+    weight, target, band and cap are percents. The band is target ± band;
+    cap is the rule-of-thumb line (25% by default); slot is the series colour. -#}
+{%- macro gauge(weight, label, slot=1, target=none, band=5, cap=25) -%}
+<div class="gauge">
+  <div class="gauge-track" role="img" aria-label="{{ label }}: {{ '%.1f'|format(weight) }}%{% if target is not none %}, your target {{ '%.1f'|format(target) }}%{% endif %}">
+    <span class="gauge-fill s{{ slot }}" style="width:{{ clamp(weight) }}%"></span>
+    {% if target is not none %}<span class="gauge-band" style="left:{{ clamp(target - band) }}%;width:{{ clamp([target + band, 100]|min - [target - band, 0]|max) }}%"></span>{% endif %}
+    {% if cap is not none %}<span class="gauge-cap" style="left:{{ clamp(cap) }}%"></span>{% endif %}
+  </div>
+  <div class="gauge-key"><span><b>{{ '%.1f'|format(weight) }}%</b> of your money</span>{% if target is not none %}<span>target {{ '%.1f'|format(target) }}%</span>{% endif %}{% if cap is not none %}<span>dashed line {{ '%.0f'|format(cap) }}%</span>{% endif %}</div>
+</div>
+{%- endmacro -%}
+
+{#- Parts of a whole on one bar, with a legend. parts: list of (label, percent, slot). -#}
+{%- macro seg(parts, label) -%}
+<div class="seg" role="img" aria-label="{{ label }}: {% for name, pct, slot in parts %}{{ name }} {{ '%.1f'|format(pct) }}%{{ ', ' if not loop.last }}{% endfor %}">
+  {% for name, pct, slot in parts %}<span class="seg-part s{{ slot }}" style="width:{{ clamp(pct) }}%" title="{{ name }} {{ '%.1f'|format(pct) }}%"></span>{% endfor %}
+</div>
+<div class="legend">{% for name, pct, slot in parts %}<span><i class="sw s{{ slot }}"></i>{{ name }} {{ '%.1f'|format(pct) }}%</span>{% endfor %}</div>
+{%- endmacro -%}
+
+{#- How much of your money has a known cost: known in green, unknown hatched. -#}
+{%- macro known_bar(known) -%}
+<div class="kbar" role="img" aria-label="Cost known for {{ '%.1f'|format(known) }}% of your money, unknown for {{ '%.1f'|format(100 - known) }}%">
+  <span class="kbar-known" style="width:{{ clamp(known) }}%"></span><span class="kbar-unknown"></span>
+</div>
+<div class="legend"><span><i class="sw kbar-known"></i>known {{ '%.1f'|format(known) }}%</span><span><i class="sw sw-unknown"></i>unknown {{ '%.1f'|format(100 - known) }}%</span></div>
+{%- endmacro -%}
+
+{#- Money in and out. rows: list of (label, amount text, width percent, "in" or "out"). -#}
+{%- macro flow(rows) -%}
+<div class="flow">
+  {% for label, amount, width, way in rows %}
+  <div class="flow-row"><span>{{ label }}</span><span class="flow-bar flow-{{ way }}" style="width:{{ clamp(width) }}%"></span><span class="flow-value">{{ amount }}</span></div>
+  {% endfor %}
+</div>
+{%- endmacro -%}
+
+{#- The longer explanation, closed until asked for. No script needed. -#}
+{%- macro why(text) -%}
+<details class="why"><summary>Why?</summary><p>{{ text }}</p></details>
+{%- endmacro -%}
+
+{#- A designed empty state: what will appear here, and how to get it. -#}
+{%- macro empty(title, body, href=none, action=none) -%}
+<section class="empty"><h2>{{ title }}</h2><p class="muted">{{ body }}</p>{% if href %}<a class="button-link" href="{{ href }}">{{ action }}</a>{% endif %}</section>
+{%- endmacro -%}
+
+{#- One number with its label and an optional note under it (text, already formatted). -#}
+{%- macro stat(label, value, note=none) -%}
+<div class="stat"><span class="stat-label">{{ label }}</span><span class="stat-num">{% if value %}{{ value }}{% else %}<span class="unknown">unknown</span>{% endif %}</span>{% if note %}<span class="muted">{{ note }}</span>{% endif %}</div>
+{%- endmacro -%}
+
+{#- Sorted bars, one per row, with an optional reference line (a target or a rule of thumb).
+    rows: list of (label, value text, width percent, slot, href or none). line is a percent. -#}
+{%- macro bar_list(rows, label, line=none, line_label=none) -%}
+<div class="bars" role="img" aria-label="{{ label }}">
+  {% for name, value, width, slot, href in rows %}
+  <{{ 'a' if href else 'div' }} class="bar-row"{% if href %} href="{{ href }}"{% endif %} title="{{ name }}: {{ value }}">
+    <span class="bar-label">{{ name }}</span>
+    <span class="bar-track"><span class="bar s{{ slot }}" style="width:{{ clamp(width) }}%"></span>{% if line is not none %}<span class="bar-line" style="left:{{ clamp(line) }}%"></span>{% endif %}</span>
+    <span class="bar-value">{{ value }}</span>
+  </{{ 'a' if href else 'div' }}>
+  {% endfor %}
+  {% if line is not none and line_label %}<p class="line-key"><span class="line-swatch"></span>{{ line_label }}</p>{% endif %}
+</div>
+{%- endmacro -%}
+
+{#- An insight: a tone pill, a short computed headline, the chart (the caller's block), and Why?.
+    tone: warn, good, unknown, info. Call it as {% call ui.insight("warn", headline, why) %}chart{% endcall %}. -#}
+{%- macro insight(tone, headline, why_text=none) -%}
+<article class="card tone-{{ tone }}">
+  {{ status({"warn": "warn", "good": "ok", "unknown": "info", "info": "info"}[tone], {"warn": "look at this", "good": "on track", "unknown": "unknown", "info": "for your information"}[tone]) }}
+  <h2>{{ headline }}</h2>
+  {{ caller() if caller else "" }}
+  {% if why_text %}{{ why(why_text) }}{% endif %}
+</article>
+{%- endmacro -%}
+
+{#- Line icons for the menu, drawn in currentColor. -#}
+{%- macro icon(name) -%}
+<svg class="nav-ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == "home" %}<path d="M2 7.5 8 2.5l6 5V14H2z"/>
+{%- elif name == "list" %}<path d="M5.5 4h8.5M5.5 8h8.5M5.5 12h8.5M2 4h.5M2 8h.5M2 12h.5"/>
+{%- elif name == "check" %}<path d="M2.5 8.5 6 12l7.5-8"/>
+{%- elif name == "pie" %}<circle cx="8" cy="8" r="6"/><path d="M8 2v6l4.2 4.2"/>
+{%- elif name == "bell" %}<path d="M4 11V7a4 4 0 0 1 8 0v4l1.2 1.2H2.8zM6.8 14h2.4"/>
+{%- elif name == "upload" %}<path d="M8 11V2.5M4.5 6 8 2.5 11.5 6M2.5 13.5h11"/>
+{%- elif name == "scale" %}<path d="M8 2v12M4 14h8M3 5h10M3 5 1.5 9h3zM13 5l-1.5 4h3z"/>
+{%- endif %}</svg>
+{%- endmacro -%}

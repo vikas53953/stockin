@@ -92,7 +92,9 @@ def test_other_hosts_and_cross_site_posts_are_refused(client: TestClient, tmp_pa
 
 def test_no_order_routes_exist(client: TestClient) -> None:
     routes = {getattr(r, "path", "") for r in client.app.routes}  # type: ignore[attr-defined]
-    assert routes <= {"/", "/reconcile", "/import", "/thesis/{isin}", "/holding/{isin}"}
+    assert routes <= {"/", "/reconcile", "/import", "/thesis/{isin}", "/holding/{isin}", "/static"}
+    # The static mount only reads files: it refuses every write.
+    assert client.post("/static/ui.css").status_code == 405
 
 
 def test_an_outdated_ledger_says_how_to_rebuild(tmp_path: Path, client: TestClient) -> None:

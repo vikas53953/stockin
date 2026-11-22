@@ -165,3 +165,9 @@ The owner installed drop 2 on Windows, ran the test checklist, and said every st
 | A lint failure reached a pushed commit (CI run 44605949760, `ruff check` on feat/verdicts 318daa6); by the author's own account, the local gate output had been piped through `tail`, which hid the failure | No automatic check: a working rule that gate output is never piped through `tail` inside an `&&` chain |
 | Install commands pasted as one line (lesson 23) | One command per code block (PIPELINE #18) |
 | No real CAS has been through the app (lesson 16) | Not caught yet: still an open risk |
+
+### 24. A screen that explains everything in words teaches less, not more
+- **What happened:** after accepting Sprint 1, the owner asked for the whole app to be redesigned as "a visual experience rather than a wall of text". Measured on the synthetic sample, the home page was about 4,000 px tall on a laptop and about 6,000 px on a phone; six of nine verdict rows repeated "No thesis yet", and each insight card carried a 60–90 word paragraph under a small chart.
+- **Lesson:** the insight engine was right and the presentation buried it. Words were the main act and the charts were decoration.
+- **Rule:** every block leads with a chart and a headline of at most 12 words; the longer explanation sits behind a "Why?" disclosure. Pages are built from one shared kit (`static/tokens.css`, `static/ui.css`, `templates/_ui.html`) so later sprints look the same. The owner picked direction A (Cockpit: side menu and tile grid) from three clickable options on 2026-11-22.
+- **Caught since:** nothing yet; the redesign PRs are in progress.
