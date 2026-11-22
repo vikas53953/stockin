@@ -1370,6 +1370,22 @@ def test_a_hold_says_when_it_was_compared_with_the_other_source() -> None:
     assert _other_source(Jump(quote=new, last=nav)) == ""
 
 
+def test_a_held_split_stays_held_however_many_evenings_pass(tmp_path: Path) -> None:
+    """#39 verifier R-1: a 1:1 split closing just above half is held every
+    evening; once the last stored close was more than 7 days old, the band
+    let it in and the next watch sent a wrong ADD. Against its own source
+    the band has no age limit: what is held stays held until accepted."""
+    infy = "INE009A01021"
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.replace(_file(_q(infy, date(2026, 10, 2), "1500.55", "bhavcopy")))
+        for day in (5, 6, 7, 8, 9, 12, 13, 30):
+            _, held = store.take(_file(_q(infy, date(2026, 10, day), "750.30", "bhavcopy")))
+            assert held, day
+        assert store.book([parse_isin(infy)]).get(parse_isin(infy)).price == Price.rupees(  # type: ignore[union-attr]
+            "1500.55"
+        )
+
+
 def test_hold_jumps_holds_only_new_jumps_and_does_not_ask_twice() -> None:
     from stockin.prices import Jump, hold_jumps
 
