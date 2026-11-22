@@ -1328,6 +1328,30 @@ def test_the_20_percent_band_compares_like_with_like(
     assert is_jump(last, nxt) is held
 
 
+@pytest.mark.parametrize(
+    ("stored", "new", "held"),
+    [
+        # #38 verifier R-1: the NAV split is checked against the last NAV,
+        # not the (preferred) bhavcopy close of the same day
+        ([("bhavcopy", 16, "288.00"), ("amfi", 16, "288.20")], ("amfi", 17, "144.15"), True),
+        # the reverse: a missed bhavcopy day leaves a newer NAV in front
+        ([("bhavcopy", 16, "288.00"), ("amfi", 17, "288.20")], ("bhavcopy", 18, "200.00"), True),
+        # a real move inside the band against its own source is stored
+        ([("bhavcopy", 16, "288.00"), ("amfi", 16, "288.20")], ("amfi", 17, "300.00"), False),
+    ],
+)
+def test_the_band_finds_the_same_source_price_behind_the_other_one(
+    tmp_path: Path, stored: list[tuple[str, int, str]], new: tuple[str, int, str], held: bool
+) -> None:
+    etf = "INF204KB14I2"
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        for source, day, price in stored:
+            store.replace(_file(_q(etf, date(2026, 11, day), price, source)))
+        source, day, price = new
+        _, jumps = store.take(_file(_q(etf, date(2026, 11, day), price, source)))
+        assert bool(jumps) is held
+
+
 def test_hold_jumps_holds_only_new_jumps_and_does_not_ask_twice() -> None:
     from stockin.prices import Jump, hold_jumps
 
