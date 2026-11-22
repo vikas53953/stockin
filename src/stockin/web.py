@@ -366,9 +366,9 @@ def create_app(db: Path, port: int) -> FastAPI:
             with AssetStore.open(assets_db) as store:
                 change(store)
         except AssetsDamaged as exc:
-            return networth_view(f"Not saved: {exc}", typed, 409)
+            return networth_view(str(exc), typed, 409)
         except ValueError as exc:
-            return networth_view(f"Not saved: {exc}", typed, 400)
+            return networth_view(str(exc), typed, 400)
         return RedirectResponse("/networth", status_code=303)
 
     @app.post("/networth/entry", response_class=HTMLResponse)
@@ -400,7 +400,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         try:
             entry = build_entry(kind, fields, india_today(), lambda n: _FIELD.get(n, n))
         except ValueError as exc:
-            return networth_view(f"Not saved: {exc}", typed, 400)
+            return networth_view(str(exc), typed, 400)
         return write_assets(lambda store: store.put(entry), typed)
 
     @app.post("/networth/close", response_class=HTMLResponse)

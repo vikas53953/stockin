@@ -214,6 +214,7 @@ def test_a_refused_entry_says_why_and_keeps_what_you_typed(
     r = web.post("/networth/entry", data=form)
     assert r.status_code == 400 and said in r.text, r.text[:400]
     assert 'id="error"' in r.text
+    assert r.text.count("Not saved") == 1  # the badge says it; the sentence says why
     for v in form.values():
         if v and "\x07" not in v and form.get("kind") != "crypto":
             assert f'value="{v}"' in r.text or "selected" in r.text
