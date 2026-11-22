@@ -1350,6 +1350,8 @@ def test_the_band_finds_the_same_source_price_behind_the_other_one(
         source, day, price = new
         _, jumps = store.take(_file(_q(etf, date(2026, 11, day), price, source)))
         assert bool(jumps) is held
+        if jumps:  # the price shown is the one it jumped from: its own source's
+            assert jumps[0].last.source == source  # (#38 verify-2 V1)
 
 
 def test_hold_jumps_holds_only_new_jumps_and_does_not_ask_twice() -> None:

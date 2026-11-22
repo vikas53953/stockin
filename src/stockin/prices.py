@@ -426,7 +426,7 @@ class PriceStore:
         self,
         isins: Iterable[Isin],
         on_or_before: date | None = None,
-        sources: Iterable[Source] | None = None,
+        sources: tuple[Source, ...] | None = None,
     ) -> PriceBook:
         """The best quote per ISIN: each source's newest file that prices it
         (file day on or before `on_or_before`; default any), then
