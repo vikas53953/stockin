@@ -37,7 +37,6 @@ from .prices import (
     Quote,
     india_now,
     india_today,
-    is_jump,
     left_out,
 )
 from .sources import cas, eod, live
@@ -188,11 +187,19 @@ def ledger_path() -> Path:
     return data_dir() / "ledger.db"
 
 
-def _fail(message: str, hint: str | None = None) -> typer.Exit:
+class Failed(typer.Exit):
+    """Exit 2 after an error was said; `said` keeps it for a watch's notice."""
+
+    def __init__(self, said: str) -> None:
+        super().__init__(2)
+        self.said = said
+
+
+def _fail(message: str, hint: str | None = None) -> Failed:
     typer.echo(f"error: {message}", err=True)
     if hint:
         typer.echo(f"  {hint}", err=True)
-    return typer.Exit(2)
+    return Failed(message)
 
 
 def _open_ledger() -> Ledger:
@@ -882,64 +889,100 @@ def symbols_path() -> Path:
     return data_dir() / "nse-symbols.json"
 
 
-def _symbols(today: date) -> dict[Isin, str]:
+def _symbols(today: date) -> tuple[dict[Isin, str], bool]:
     """NSE's ISIN-to-symbol list, downloaded at most once a day (public
-    data, kept beside prices.db)."""
+    data, kept beside prices.db), and whether it is complete: both of NSE's
+    lists. An incomplete one is used for this pass and not kept, so the next
+    pass downloads again."""
     path = symbols_path()
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
         if cached["day"] == today.isoformat():
-            return {Isin(k): str(v) for k, v in dict(cached["symbols"]).items()}
+            return {Isin(k): str(v) for k, v in dict(cached["symbols"]).items()}, True
     except (OSError, ValueError, KeyError, TypeError):
         pass
     found, complete = live.fetch_symbols()
     if not complete:
-        return found  # used for this pass, not kept: the next pass tries again
+        return found, False
     try:
         body = {"day": today.isoformat(), "symbols": dict(sorted(found.items()))}
         path.write_text(json.dumps(body), encoding="utf-8")
     except OSError:
         pass  # a cache only
-    return found
+    return found, True
+
+
+def _unchecked(symbol: str, q: live.LiveQuote, close: Quote | None, today: date) -> str | None:
+    """Why a live price cannot stand in for the close, or None when it can:
+    it is used only next to a close from the last week that it is within
+    NSE's widest daily band of (see live.BAND_PERCENT, live.MAX_CLOSE_AGE)."""
+    if close is None:
+        return (
+            f"{symbol}: no end-of-day price yet to check a live price against; "
+            "run `stockin prices fetch`"
+        )
+    if today - close.on > live.MAX_CLOSE_AGE:
+        return (
+            f"{symbol}: the last close is from {close.on}, too old to check a live "
+            "price against; run `stockin prices fetch`"
+        )
+    if live.beyond_band(close.price, q.price):
+        return (
+            f"{symbol}: live \u20b9{_rupees(q.price)} is more than {live.BAND_PERCENT}% from "
+            f"the close of \u20b9{_rupees(close.price)} on {close.on} (a split, a bonus "
+            "or a bad quote?); the close stands"
+        )
+    return None
 
 
 def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
     """End-of-day prices with today's live trades laid over them. A holding
     whose live quote is missing, late or odd keeps its close, and says why."""
     now = india_now()
+    today = now.astimezone(live.IST).date()
     held = frozenset(h.isin for h in book.holdings())
     eod_book = _price_book(held) or PriceBook(quotes={})
-    wanted = sorted(
-        i for i in held if (inst := book.instrument(i)) is not None and inst.kind in LIVE_KINDS
-    )
-    got: list[live.LiveQuote] = []
+    wanted: list[Isin] = []
     fallbacks: list[Fallback] = []
+    for isin in sorted(held):
+        inst = book.instrument(isin)
+        if inst is None or inst.kind not in LIVE_KINDS:
+            continue
+        close = eod_book.get(isin)
+        if close is not None and close.source == "bhavcopy" and close.on == today:
+            # the exchange's own close beats the day's last live trade
+            # (prices._RANK), so no quote is asked for: this is the price in use
+            settled = (
+                f"today's official close of \u20b9{_rupees(close.price)} is in; verdicts use it"
+            )
+            fallbacks.append(Fallback(isin=isin, reason=settled))
+            continue
+        wanted.append(isin)
+    got: list[live.LiveQuote] = []
     symbols: dict[Isin, str] = {}
+    complete = True
     if wanted:
         try:
-            symbols = _symbols(now.date())
+            symbols, complete = _symbols(today)
         except live.LiveRejected as exc:
-            fallbacks = [Fallback(isin=i, reason=str(exc)) for i in wanted]
+            fallbacks += [Fallback(isin=i, reason=str(exc)) for i in wanted]
             wanted = []
     quotes = list(eod_book.quotes.values())
     for isin in wanted:
         symbol = symbols.get(isin)
         if symbol is None:
-            fallbacks.append(Fallback(isin=isin, reason="not listed on NSE under this ISIN"))
+            missing = (
+                "not listed on NSE under this ISIN"
+                if complete
+                else "NSE's list of symbols was incomplete (one of its two lists did "
+                "not download); the next check downloads it again"
+            )
+            fallbacks.append(Fallback(isin=isin, reason=missing))
             continue
         try:
             q = live.fetch_quote(isin, symbol)
         except live.LiveRejected as exc:
             fallbacks.append(Fallback(isin=isin, reason=str(exc)))
-            continue
-        close = eod_book.get(isin)
-        if close is not None and is_jump(close.price, q.price):
-            jump = (
-                f"{symbol}: ₹{_rupees(q.price)} is more than double or less than half "
-                f"the close of ₹{_rupees(close.price)} (a split or bonus?); the close "
-                "stands, as it does for a jump in a price file"
-            )
-            fallbacks.append(Fallback(isin=isin, reason=jump))
             continue
         as_price = live.as_quote(q, now)
         if as_price is None:
@@ -949,8 +992,13 @@ def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
                 )
             )
             continue
+        unchecked = _unchecked(symbol, q, eod_book.get(isin), today)
+        if unchecked is not None:
+            fallbacks.append(Fallback(isin=isin, reason=unchecked))
+            continue
         got.append(q)
         quotes.append(as_price)
+    fallbacks.sort(key=lambda f: f.isin)
     view = LiveView(
         at=now, market_open=live.market_open(now), live=tuple(got), end_of_day=tuple(fallbacks)
     )
@@ -997,6 +1045,7 @@ def watch(
     """While NSE is open, re-price your shares from live quotes, work out the
     verdicts and keep (and with --send, send) an alert when one turns into add,
     trim or exit. Read-only: it never places an order. Ctrl+C stops it."""
+    streak = _Streak()
     try:
         while True:
             now = india_now()
@@ -1004,7 +1053,7 @@ def watch(
                 _watch_pass(send)
                 return
             if live.market_open(now):
-                _guarded_pass(send)
+                _guarded_pass(send, streak)
             wait = every if live.market_open(now) else _until_open(now)
             if not live.market_open(now):
                 typer.echo(
@@ -1015,15 +1064,79 @@ def watch(
         typer.echo("stopped")
 
 
-def _guarded_pass(send: bool) -> None:
+NOTICE_AFTER = 3
+"""Failed checks in a row before a watch says it cannot run. One or two can
+be a blip (another stockin holding alerts.db for a moment); three at the
+default pace is a quarter of an hour of nothing."""
+
+
+class _Streak:
+    """Failed checks in a row, and whether this run of them has been told."""
+
+    def __init__(self) -> None:
+        self.failed = 0
+        self.told = False
+
+
+def _guarded_pass(send: bool, streak: _Streak) -> None:
     """One pass of a long watch. Whatever goes wrong is said in one line and
-    tried again next pass; only Ctrl+C ends the watch (#33 verifier R-1)."""
+    tried again next pass; only Ctrl+C ends the watch (#33 verifier R-1).
+    A watch that keeps failing must not do so in silence, since nobody reads
+    the stderr of something left running: after NOTICE_AFTER failed checks
+    in a row it says so once, on stderr and (with --send) to Telegram, and
+    not again until a check has worked (#33 verifier, round 2, C-1)."""
     try:
         _watch_pass(send)
+    except Failed as exc:
+        reason = exc.said  # already said on stderr
     except typer.Exit:
-        pass  # already said on stderr
+        reason = "see the error above"
     except Exception as exc:
-        typer.echo(f"error: this pass failed ({type(exc).__name__}: {exc}); trying again", err=True)
+        reason = _no_token(f"{type(exc).__name__}: {exc}")
+        typer.echo(f"error: this pass failed ({reason}); trying again", err=True)
+    else:
+        streak.failed, streak.told = 0, False
+        return
+    streak.failed += 1
+    if streak.failed >= NOTICE_AFTER and not streak.told:
+        streak.told = _tell_failure(reason, streak.failed, send)
+
+
+def _no_token(text: str) -> str:
+    """`text` with the bot token struck out. Nothing in Stockin puts the
+    token in an error, but an unexpected one is printed as it comes."""
+    try:
+        bot = notify.load(data_dir())
+    except ValueError:
+        return text
+    return text if bot is None else text.replace(bot.token, "***")
+
+
+def _tell_failure(reason: str, failed: int, send: bool) -> bool:
+    """Say that the watch cannot run. True once nothing more is to be done
+    for this streak; False when Telegram did not take the notice, so the
+    next failed check tries again. The token is loaded and used only through
+    notify, and never printed or sent."""
+    said = f"error: watch has failed {failed} checks in a row"
+    if not send:
+        typer.echo(said, err=True)
+        return True
+    line = " ".join(_no_token(reason).split())[:300]
+    try:
+        bot = notify.load(data_dir())
+        if bot is None:
+            typer.echo(f"{said}; Telegram is not connected, so no notice was sent", err=True)
+            return True
+        notice = (
+            f"Stockin watch cannot run: {line}. "
+            f"It has failed {failed} checks in a row and keeps trying."
+        )
+        notify.send_one(notify.http_transport(bot.token), bot.chat, notice)
+    except (ValueError, notify.TelegramError) as exc:
+        typer.echo(f"{said}; the notice did not reach Telegram ({exc})", err=True)
+        return False
+    typer.echo(f"{said}; told Telegram", err=True)
+    return True
 
 
 def _until_open(now: datetime) -> int:

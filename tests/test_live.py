@@ -5,6 +5,7 @@ live quote ranks against closes, and `prices live` / `watch --once`."""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -591,6 +592,17 @@ def test_todays_official_close_is_shown_as_what_verdicts_use(data: Path, net: Ne
     assert "LIVE" not in human and f"CLOSE {INFY}" in human
 
 
+def test_only_todays_exchange_close_stands_in_for_a_live_price(
+    data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A NAV dated today (an ETF has one) ranks below a live trade, so the
+    live price is still asked for and used."""
+    nav = Quote(isin=INFY, on=MON.date(), price=Price.rupees("1500"), source="amfi")
+    monkeypatch.setattr(cli_mod, "_price_book", lambda held: PriceBook(quotes={INFY: nav}))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    view = json.loads(runner.invoke(cli, ["prices", "live", "--json"]).output)
+    assert view["live"][0]["isin"] == INFY and view["end_of_day"] == []
+
+
 def test_ctrl_c_during_a_pass_ends_watch(
     data: Path, net: Net, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -633,7 +645,7 @@ class Phone:
 
 
 def _run_watch(
-    monkeypatch: pytest.MonkeyPatch, outcomes: list[BaseException | None], *args: str
+    monkeypatch: pytest.MonkeyPatch, outcomes: Sequence[BaseException | None], *args: str
 ) -> str:
     """`watch` with one pass per outcome (None is a good pass), then Ctrl+C."""
     left = list(outcomes)

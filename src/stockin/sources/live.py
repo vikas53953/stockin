@@ -152,11 +152,13 @@ can hold (#33 verifier R-1). Each is a fallback to the close, never a crash."""
 
 
 def fetch_symbols(get: Get = eod._get) -> tuple[dict[Isin, str], bool]:  # pyright: ignore[reportPrivateUsage]
-    """The ISIN-to-symbol pairs from both NSE lists, and whether the equity
-    list (the long one) was among them. A partial list is used but not
-    kept, so the next pass tries again (#33 verifier R-3)."""
+    """The ISIN-to-symbol pairs from both NSE lists, and whether both came
+    back. One list that fails, or cannot be read, does not drop the other:
+    what came back is used for this pass. It is complete, and so kept for
+    the day, only when both did; otherwise the next pass tries again (#33
+    verifier R-3, and round 2's R-2 for the ETF list)."""
     out: dict[Isin, str] = {}
-    complete = False
+    lists = 0
     for url in (EQUITY_LIST_URL, ETF_LIST_URL):
         try:
             data = get(url)
@@ -164,10 +166,10 @@ def fetch_symbols(get: Get = eod._get) -> tuple[dict[Isin, str], bool]:  # pyrig
         except (*_FETCH_ERRORS, LiveRejected):
             continue
         out |= found
-        complete = complete or (url == EQUITY_LIST_URL and bool(found))
+        lists += bool(found)
     if not out:
         raise LiveRejected("could not download NSE's list of symbols")
-    return out, complete
+    return out, lists == 2
 
 
 QUOTE_TIMEOUT = 10
@@ -196,6 +198,35 @@ def fetch_quote(isin: Isin, symbol: str, get: Get = _get_once) -> LiveQuote:
     if data is None:
         raise LiveRejected(f"{symbol}: no quote found")
     return parse_chart(data, isin, symbol)
+
+
+BAND_PERCENT = 20
+"""NSE's widest daily price band. A live price further than this from the
+last close is not one ordinary day's trading in most shares: it is a split
+or bonus day (the units held still come from the last statement, so the
+value would be wrong by the split's ratio), or a bad quote. The 2x rule that
+price files use is too loose here, because a live price sends an alert with
+no one looking: a 1:1 split that opens a paisa up is just inside 2x (#33
+verifier, round 2). Shares in futures and options have no fixed band and
+can, rarely, really move more than this in a day; such a day keeps the close
+too, and says so, until the evening's official close is fetched.
+
+What no band can see: a bonus of 1:4 or smaller moves the price by 20% or
+less, like an ordinary day. That needs the exchange's list of corporate
+actions, which Stockin does not read yet."""
+
+MAX_CLOSE_AGE = timedelta(days=7)
+"""The band is about one trading day, so a live price is checked only
+against a close from the last week: long enough for any run of holidays and
+a missed evening or two of `prices fetch`. Against an older close a large
+move proves nothing (a share can really double in months), so the live price
+is not checked and not used, and the reason says to fetch prices."""
+
+
+def beyond_band(close: Price, new: Price) -> bool:
+    """More than BAND_PERCENT away from `close`, up or down. Exactly on the
+    band is a real day (a share locked at its limit). Whole micro-rupees."""
+    return 100 * abs(new.micro_rupees - close.micro_rupees) > BAND_PERCENT * close.micro_rupees
 
 
 def as_quote(q: LiveQuote, now: datetime) -> Quote | None:

@@ -31,8 +31,11 @@ With network, during market hours, `live` has INFY with a time within 20 minutes
 - Prices are rounded half-even to the paise from the JSON text, never through a float.
 - On an NSE holiday the newest trade is from an earlier day, so nothing is live.
 - During the day a live trade beats yesterday's close (it is newer). On the same day NSE's official close, once `stockin prices fetch` has it, beats the day's last live trade. Live prices are never written to `prices.db`.
-- A live price more than double or less than half the last close is not used (a split or bonus day, or a bad quote), the same 2x rule as price files; the close stands and the reason says so.
+- A live price is used only next to a close it can be checked against: a close from the last 7 days, and the live price within 20% of it (NSE's widest daily band; exactly 20% is used). Further away is a split or bonus day, or a bad quote: the close stands and the reason names both prices. With an older close, or none, the reason says to run `stockin prices fetch`. This is tighter than the 2x rule for price files, because a 1:1 split that opens up is just inside 2x.
+- What the band cannot see: a bonus of 1:4 or smaller moves the price by 20% or less, like an ordinary day. And a share in futures and options that really moves more than 20% in a day keeps its close until the evening's `prices fetch`.
+- Once today's bhavcopy is in, `prices live` shows `CLOSE … today's official close of ₹… is in; verdicts use it` for each share it prices, and asks for no quote.
 - One quote is asked for once, with a 10-second timeout; a cut-off or garbled answer falls back to the close.
-- A partial symbol list (the equity list failed, the ETF list worked) is used for that pass but not kept, so the next pass downloads again.
-- `watch` never stops on an error in a pass: it prints `error: this pass failed (...)` and tries again next pass. Only Ctrl+C ends it.
+- A symbol list with only one of NSE's two files (either one failed or could not be read) is used for that pass but not kept, so the next pass downloads again. A holding missing from such a list is reported as "the list was incomplete", not as "not listed".
+- `watch` never stops on an error in a pass: it prints `error: this pass failed (...)` and tries again next pass. Only Ctrl+C ends it, also in the middle of a pass.
+- After 3 failed checks in a row, `watch` prints `error: watch has failed 3 checks in a row` once, and with `--send` sends one Telegram message, `Stockin watch cannot run: <reason>. …`. Nothing more is said for that run of failures until a check has worked. If Telegram does not take the message, the next failed check tries again. `--once` only exits with its error.
 - `watch` does not download end-of-day files. Schedule `stockin prices fetch` once each evening (after about 19:00 IST) next to it.
