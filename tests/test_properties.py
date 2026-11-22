@@ -617,10 +617,11 @@ def test_price_store_is_restored_by_the_right_file_after_any_damaged_copies(
         assert a.digest() == b.digest()
         assert a.take(right) == (0, a.take(right)[1])  # and again changes nothing
         before = _model_book(others, day - timedelta(days=1))
+        own = _model_book([f for f in others if f.source == source], day - timedelta(days=1))
         stored = a.stored(source, day)  # type: ignore[arg-type]
         for q in right.quotes:
-            last = before.get(q.isin)
-            held = last is not None and is_jump(last.price, q.price)
+            lasts = [p for p in (before.get(q.isin), own.get(q.isin)) if p is not None]
+            held = any(is_jump(p, q) for p in lasts)
             assert (q.isin in stored) == (not held), q
         # accepting them stores the whole file, as it is
         a.take(right, accept_jumps=True)
