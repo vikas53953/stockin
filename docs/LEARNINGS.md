@@ -169,6 +169,12 @@ The owner ran the whole drop 1 checklist on Windows with the synthetic sample PD
 - **Rule:** every new store read on a page catches the store's damage errors (`ValueError`, `sqlite3.DatabaseError`, the outdated-ledger error) where it is read and shows a notice. Its tests cover row damage, a non-database file and random byte damage, and assert that the page's main result still shows.
 - **Caught since:** nothing yet; the fix is in verification.
 
+### 27. A guard added on one path that writes a price must hold on every path
+- **What happened:** PR #33 (live prices and `stockin watch`) FAILed verification three times: twice from its author, once more after the escalated fix (pipeline row 16). The escalated fix held a live price that moved more than 20% from a recent close, which stopped a 1:1 split closing at ₹750.30 against ₹1,500.55 (just above half, so the 2x rule let it through). The third verifier then imported the same split through the end-of-day file: `prices import` still used only the 2x rule, stored ₹750.30 as the close, and the next live price matched that close, passed the band, and sent a wrong ADD alert.
+- **Lesson:** the band was a property of a price, not of the live path. Adding it to one writer only moved the hole to the other writer.
+- **Rule:** a check on what a price may be lives in `prices.py` and is used by every path that stores or alerts on a price. A new path's tests include the case where the bad value arrives through the older path first. The band compares a price with one from the same source (an ETF's NAV and its exchange close may differ), and the 2x rule still compares across sources.
+- **Caught since:** nothing yet; #33 was closed and re-scoped into PR A (this band on the end-of-day import, in verification) and PR B (live prices and watch on top of it).
+
 ## Sprint 1, drop 2 retro (2026-11-22)
 
 The owner installed drop 2 on Windows, ran the test checklist, and said every step went well. Sprint 1 (both drops) is accepted. v0.1 is to be tagged on `fa8e76b`, the main commit the owner tested; this session cannot push tags, so the owner creates it (not yet on GitHub when this was written).

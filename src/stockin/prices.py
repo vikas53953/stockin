@@ -116,10 +116,19 @@ def _better(a: Quote, b: Quote) -> bool:
 
 JUMP_FACTOR = 2
 """A price more than double, or less than half, the last one from an earlier
-day is held for the owner to confirm. NSE's widest daily band is 20% and a
-fund's NAV moves a few percent, so no ordinary day crosses 2x; a split or a
-1:1 bonus does, and so does a lost decimal point or a damaged leading digit.
-A real split needs a look anyway: units come from the last statement."""
+day is held for the owner to confirm, however old that last one is. A lost
+decimal point or a damaged leading digit crosses 2x, and so does a 1:1 split
+or bonus. A real split needs a look anyway: units come from the last statement."""
+
+BAND_BPS = 2_000
+BAND_DAYS = 7
+"""Closer in time, the rule is tighter: a price more than 20% away from a
+last one at most 7 calendar days older is held too. NSE's widest daily price
+band is 20%, so a share that moved further in a few trading days is rare,
+and a 1:1 split whose ex-date close sits just above half the old close
+(₹750.30 against ₹1,500.55) is caught here, not let through by the 2x rule
+(#33 verifier 3, R-1). A fund's NAV moves a few percent a week. The same
+band guards live prices (sources/live.py)."""
 
 
 class Jump(Value):
@@ -130,9 +139,23 @@ class Jump(Value):
     last: Quote
 
 
-def is_jump(last: Price, new: Price) -> bool:
+def beyond_band(last: Price, new: Price, band_bps: int = BAND_BPS) -> bool:
+    """`new` more than `band_bps` away from `last`, exactly in integers."""
     a, b = last.micro_rupees, new.micro_rupees
-    return b > JUMP_FACTOR * a or JUMP_FACTOR * b < a
+    return abs(b - a) * 10_000 > band_bps * a
+
+
+def is_jump(last: Quote, new: Quote) -> bool:
+    """Held for the owner: beyond 2x from any earlier price, or beyond 20%
+    from a price of the same source at most BAND_DAYS older.
+
+    The band compares like with like: a fund's NAV and its exchange close
+    can differ legitimately, so AMFI against bhavcopy is held only at 2x."""
+    a, b = last.price.micro_rupees, new.price.micro_rupees
+    if b > JUMP_FACTOR * a or JUMP_FACTOR * b < a:
+        return True
+    recent = new.on - last.on <= timedelta(days=BAND_DAYS)
+    return recent and last.source == new.source and beyond_band(last.price, new.price)
 
 
 def hold_jumps(
@@ -148,7 +171,7 @@ def hold_jumps(
     held: list[Jump] = []
     for q in file.quotes:
         prev = last.get(q.isin)
-        if prev is None or q == stored.get(q.isin) or not is_jump(prev.price, q.price):
+        if prev is None or q == stored.get(q.isin) or not is_jump(prev, q):
             keep.append(q)
         else:
             held.append(Jump(quote=q, last=prev))

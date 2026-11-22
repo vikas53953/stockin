@@ -620,7 +620,7 @@ def test_price_store_is_restored_by_the_right_file_after_any_damaged_copies(
         stored = a.stored(source, day)  # type: ignore[arg-type]
         for q in right.quotes:
             last = before.get(q.isin)
-            held = last is not None and is_jump(last.price, q.price)
+            held = last is not None and is_jump(last, q)
             assert (q.isin in stored) == (not held), q
         # accepting them stores the whole file, as it is
         a.take(right, accept_jumps=True)

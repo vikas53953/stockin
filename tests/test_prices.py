@@ -1273,8 +1273,9 @@ def test_today_is_the_day_in_india() -> None:
 def test_a_jump_is_more_than_double_or_less_than_half() -> None:
     from stockin.prices import is_jump
 
-    def jump(a: str, b: str) -> bool:
-        return is_jump(Price.rupees(a), Price.rupees(b))
+    def jump(a: str, b: str) -> bool:  # a month apart: only the 2x rule applies
+        old = _q("INE009A01021", date(2026, 10, 1), a, "bhavcopy")
+        return is_jump(old, _q("INE009A01021", date(2026, 11, 1), b, "bhavcopy"))
 
     assert not jump("100", "200")  # exactly double: a 1:1 bonus the other way round
     assert jump("100", "200.000001")
@@ -1283,6 +1284,48 @@ def test_a_jump_is_more_than_double_or_less_than_half() -> None:
     assert not jump("1367", "1367")
     assert jump("1108.60", "1108260")  # verifier 5: the decimal point became a digit
     assert jump("1367", "9367")  # and a damaged leading digit
+
+
+@pytest.mark.parametrize(
+    ("days", "new", "held"),
+    [
+        (1, "750.30", True),  # #33 verifier 3: a 1:1 split closing just above half
+        (1, "1800.66", False),  # +19.9997%: inside the band
+        (1, "1800.67", True),  # +20.0003%
+        (1, "1200.44", False),  # -19.9997%
+        (1, "1200.43", True),
+        (7, "1800.67", True),  # a week old is still close
+        (8, "1800.67", False),  # older: only the 2x rule
+        (8, "750.30", False),
+        (8, "750.27", True),  # below half, whatever the age
+        (0, "1800.67", True),  # the same day, same source
+    ],
+)
+def test_a_close_last_price_holds_a_move_beyond_20_percent(days: int, new: str, held: bool) -> None:
+    from stockin.prices import is_jump
+
+    last = _q("INE009A01021", date(2026, 11, 14), "1500.55", "bhavcopy")
+    nxt = _q("INE009A01021", date(2026, 11, 14) + timedelta(days=days), new, "bhavcopy")
+    assert is_jump(last, nxt) is held
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "new", "held"),
+    [
+        ("amfi", "bhavcopy", "1800.67", False),  # a fund's NAV vs its close: 2x only
+        ("bhavcopy", "amfi", "1200.43", False),
+        ("amfi", "bhavcopy", "3001.11", True),  # beyond 2x across sources still held
+        ("amfi", "amfi", "1800.67", True),  # NAV vs NAV: the band applies
+    ],
+)
+def test_the_20_percent_band_compares_like_with_like(
+    before: str, after: str, new: str, held: bool
+) -> None:
+    from stockin.prices import is_jump
+
+    last = _q("INF179K01BE2", date(2026, 11, 11), "1500.55", before)
+    nxt = _q("INF179K01BE2", date(2026, 11, 14), new, after)
+    assert is_jump(last, nxt) is held
 
 
 def test_hold_jumps_holds_only_new_jumps_and_does_not_ask_twice() -> None:

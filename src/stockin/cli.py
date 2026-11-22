@@ -455,7 +455,8 @@ def _store_files(
 ) -> PricesReport:
     """Each file replaces what prices.db holds for its source and day, always:
     that is what lets the right file undo a damaged copy. A price more than
-    JUMP_FACTOR away from the last earlier one is held back unless
+    JUMP_FACTOR away from the last earlier one, or more than 20% from one of the same
+    source at most a week older, is held back unless
     `accept_jumps`. A held fund's price that was stored for that day and is
     not in the file is removed like the rest and reported (`left_out`)."""
     kept = changed = 0
@@ -510,7 +511,8 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
             )
         if report.held:
             typer.echo(
-                "  a price more than double or less than half the last one is held back. "
+                "  a price that moved more than 20% from the same source's price a week old "
+                "or less, or more than double or less than half any earlier one, is held back. "
                 "If it is real (a split, a bonus), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again."
             )
@@ -535,7 +537,7 @@ AcceptJumps = Annotated[
     bool,
     typer.Option(
         "--accept-jumps",
-        help="Store prices even when more than double or less than half the last one.",
+        help="Store prices even when they moved more than 20% in a week, or 2x at any time.",
     ),
 ]
 
