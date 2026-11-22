@@ -250,6 +250,24 @@ def test_ledger_is_the_same_for_any_order_and_any_repeats(
         )
 
 
+@given(histories(), windows, st.randoms(use_true_random=False))
+def test_the_import_page_lists_each_statement_window_once_in_any_order(
+    history: dict[str, list[Trade]], ws: list[tuple[int, int]], rnd: random.Random
+) -> None:
+    statements = [_statement(history, a, b) for a, b in ws]
+    shuffled = statements + rnd.sample(statements, k=rnd.randint(0, len(statements)))
+    rnd.shuffle(shuffled)
+    with tempfile.TemporaryDirectory() as tmp:
+        _ingest_all(Path(tmp) / "a.db", statements)
+        _ingest_all(Path(tmp) / "b.db", shuffled)
+        with Ledger.open(Path(tmp) / "a.db") as a, Ledger.open(Path(tmp) / "b.db") as b:
+            pa, pb = a.periods(), b.periods()
+    assert pa == pb
+    want = sorted({(a, b) for a, b in ws})
+    assert [(p.start.month, p.end.month) for p in pa] == want
+    assert all(p.source == "cams_kfin_cas" and p.start.day == 1 for p in pa)
+
+
 @given(histories(), windows)
 def test_statements_cut_from_one_true_history_never_mismatch(
     history: dict[str, list[Trade]], ws: list[tuple[int, int]]

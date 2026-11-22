@@ -55,9 +55,10 @@
 
 <div class="cockpit">
 <section class="tile" aria-label="Purchases and tax dates">
-  <div class="tile-h"><h2>When each purchase turns long-term</h2><span class="muted small">bar = time held of the year</span></div>
   {% set dated = h.lots | selectattr("held", "ne", none) | list %}
   {% set undated = h.lots | selectattr("bought", "none") | list %}
+  {% set other = h.lots | rejectattr("bought", "none") | selectattr("held", "none") | list %}
+  <div class="tile-h"><h2>When each purchase turns long-term</h2>{% if dated %}<span class="muted small">bar = time held of the year</span>{% endif %}</div>
   {% if dated %}
   <ul class="clock">
     {% for l in dated %}
@@ -68,9 +69,9 @@
     </li>
     {% endfor %}
   </ul>
-  {% elif not undated %}
-  <p class="muted">{% if h.lots %}{{ h.lots[0].long_term | capitalize }}.{% else %}No purchases in your statements.{% endif %}</p>
   {% endif %}
+  {% if other %}<p class="muted not-equity">{{ other[0].long_term | capitalize }}, so no long-term date is shown for {{ other | length }} {{ "purchase" if other | length == 1 else "purchases" }}.</p>{% endif %}
+  {% if not h.lots %}<p class="muted">No purchases in your statements.</p>{% endif %}
   {% for l in undated %}
   <div class="clock-row unknown-row"><span class="clock-when"><span class="unknown">before your statements</span></span><span class="clock-track"><span class="kbar-unknown"></span></span><span class="clock-left">{{ l.units }} units</span></div>
   {% endfor %}

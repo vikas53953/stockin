@@ -60,9 +60,13 @@ def test_the_menu_links_land_on_real_anchors(client: TestClient) -> None:
     html = client.get("/").text
     side, tabs = html.split('aria-label="Main (phone)"')
     anchors = re.findall(r'href="/#([\w-]+)"', side)
-    assert set(anchors) == {"holdings", "verdicts", "import"}
+    assert set(anchors) == {"holdings", "verdicts"}
     for a in anchors:
         assert f'id="{a}"' in html
+    pages = set(re.findall(r'class="nav-item" href="(/[a-z]*)"', side))
+    assert pages == {"/", "/import", "/reconcile"}
+    for href in pages:
+        assert client.get(href).status_code == 200, href
     # the phone tabs carry every live link and no "soon" entry
     assert re.findall(r'href="(/[^"]*)"', tabs) == re.findall(
         r'class="nav-item" href="(/[^"]*)"', side
