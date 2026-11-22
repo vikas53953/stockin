@@ -84,8 +84,6 @@ class ClassBar:
     tenths: int  # weight, tenths of a percent, as the sentence prints it
     target_tenths: int | None
     share: str
-    width: str  # of the bar track, scaled so the largest weight or target fills it
-    target: str | None  # position of the target line on the same scale
     target_text: str | None
     drift_text: str | None
     tone: str  # warn | good | info
@@ -198,7 +196,6 @@ def page(nw: NetWorth, priced_on: str | None = None) -> Page:
             stops.append(f"var(--s{SERIES[s.bucket]}) {width(at)}% {width(at + s.bps)}%")
             at += s.bps
     donut = f"conic-gradient({', '.join(stops)})" if stops else "none"
-    scale = max([s.bps for s in nw.slices] + [s.target or 0 for s in nw.slices] + [1])
     bars: list[ClassBar] = []
     drift_buckets = {n.bucket for n in nw.notes if n.kind == "drift"}
     for s in nw.slices:
@@ -216,10 +213,6 @@ def page(nw: NetWorth, priced_on: str | None = None) -> Page:
                 tenths=tenths_of(s.bps, 10_000),
                 target_tenths=tenths_of(s.target, 10_000) if s.target is not None else None,
                 share=pct(tenths_of(s.bps, 10_000)),
-                width=width(div_half_even(s.bps * 10_000, scale)),
-                target=width(div_half_even(s.target * 10_000, scale))
-                if s.target is not None
-                else None,
                 target_text=pct(tenths_of(s.target, 10_000)) if s.target is not None else None,
                 drift_text=drift_text,
                 tone="warn"

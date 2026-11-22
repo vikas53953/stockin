@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 from stockin.cli import app as cli
 from stockin.insights import pct, tenths_of
 from stockin.money import Bps, Money, Price, Qty
-from stockin.networth import AssetStore, Bucket, Fd, Gold, Stated, networth
+from stockin.networth import KINDS, AssetStore, Bucket, Fd, Gold, Stated, networth
 from stockin.networth_page import page, short_rupees, width
 from stockin.prices import PriceBook
 from stockin.web import create_app
@@ -149,7 +149,7 @@ def test_an_empty_net_worth_page_says_how_to_start(tmp_path: Path) -> None:
     web = TestClient(create_app(tmp_path / "ledger.db", PORT), base_url=HOST)
     r = web.get("/networth")
     assert r.status_code == 200 and "Start your net worth" in r.text and "Import a CAS" in r.text
-    assert not (tmp_path / "assets.db").exists() or True
+    assert not (tmp_path / "assets.db").exists()  # looking never creates the file
 
 
 def test_the_forms_save_through_the_same_rules_as_the_cli(web: TestClient, data: Path) -> None:
@@ -343,3 +343,106 @@ def test_the_mix_legend_prints_the_same_share_as_the_sentences(web: TestClient, 
             assert f"{s.name} {pct(tenths_of(s.bps, 10_000))}" in legend
     for n in nw.notes:
         assert n.text in html
+
+
+# ------------------------------------------------ verifier round 1 (PR #35)
+
+
+def _two(cash: str, other: str) -> list[Stated]:
+    return [
+        Stated(kind="bank", label="SBI", as_of=TODAY, amount=rs(cash)),
+        Stated(kind="other", label="Art", as_of=TODAY, amount=rs(other)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cash", "other", "drift"),
+    [("2504", "7496", "+5.0 pts"), ("1996", "8004", "±0.0 pts"), ("2004", "7996", "±0.0 pts")],
+)
+def test_a_drift_label_is_the_shown_share_minus_the_shown_target(
+    cash: str, other: str, drift: str
+) -> None:
+    targets: dict[Bucket, Bps] = {"cash": Bps(2000), "other": Bps(8000)}
+    p = page(networth(None, PriceBook(quotes={}), _two(cash, other), targets, TODAY))
+    assert {b.name: b.drift_text for b in p.bars}["Cash"] == drift
+
+
+def test_the_big_number_is_net_worth_and_the_owed_share_is_of_what_you_own() -> None:
+    nw = networth(None, PriceBook(quotes={}), ENTRIES, {}, TODAY)
+    p = page(nw)
+    assert nw.owed.paise > 0
+    assert p.total == f"₹{Money(paise=nw.owned.paise - nw.owed.paise)}"
+    assert p.owed_share == pct(tenths_of(nw.owed.paise, nw.owned.paise))
+
+
+def test_an_old_epf_balance_is_flagged_on_its_tile() -> None:
+    p = page(networth(None, PriceBook(quotes={}), ENTRIES, {}, TODAY))
+    tiles = {t.label: t for g in p.groups for t in g.tiles}
+    assert tiles["EPF"].pill == f"{(TODAY - date(2026, 7, 31)).days} days old"
+    assert tiles["SBI savings"].pill is None
+
+
+def test_the_mix_bar_draws_each_share_at_its_width(web: TestClient, data: Path) -> None:
+    _seed(data)
+    html = web.get("/networth").text
+    drawn = re.findall(r'class="seg-part s\d" style="width:([\d.]+)%" title="([^"]+)"', html)
+    assert drawn
+    for w, title in drawn:
+        name, share = title.rsplit(" ", 1)
+        assert f"{float(w):.1f}%" == share, (name, w, share)
+
+
+def test_every_close_button_on_the_page_closes_its_entry(web: TestClient, data: Path) -> None:
+    _seed(data)
+    html = web.get("/networth").text
+    forms = re.findall(
+        r'action="/networth/close"><input type="hidden" name="kind" value="([^"]+)">'
+        r'<input type="hidden" name="label" value="([^"]+)">',
+        html,
+    )
+    assert len(forms) == len(ENTRIES)
+    assert {k for k, _ in forms} <= set(KINDS)  # the stored kind, never its display name
+    for kind, label in forms:
+        r = web.post("/networth/close", data={"kind": kind, "label": label}, follow_redirects=False)
+        assert r.status_code == 303, (kind, label, r.text[:300])
+    assert "I no longer hold this" not in web.get("/networth").text
+
+
+def test_a_refused_target_mix_keeps_what_you_typed(web: TestClient, data: Path) -> None:
+    _seed(data)  # a saved mix exists: equity 60, debt 40
+    typed = {"t_equity": "60", "t_debt": "20", "t_gold": "10", "t_cash": "9"}
+    r = web.post("/networth/targets", data=typed)
+    assert r.status_code == 400 and "add to 99.0%" in r.text
+    for name, v in typed.items():
+        assert f'name="{name}" inputmode="decimal" value="{v}"' in r.text, name
+    assert 'name="t_other" inputmode="decimal" value=""' in r.text
+    assert r.text.count("Not saved") == 1
+    assert AssetStore.open(data / "assets.db").targets() == {"equity": 6000, "debt": 4000}
+
+
+@pytest.mark.parametrize("kind", ["bank", "boat"])
+def test_a_refused_close_says_not_saved_once(web: TestClient, kind: str) -> None:
+    r = web.post("/networth/close", data={"kind": kind, "label": "nope"})
+    assert r.status_code == 400 and r.text.count("Not saved") == 1
+
+
+def test_a_refused_fd_keeps_its_kind(web: TestClient) -> None:
+    r = web.post("/networth/entry", data={"kind": "fd", "label": "HDFC FD", "principal": "x"})
+    assert r.status_code == 400 and '<option value="fd" selected>' in r.text
+
+
+def test_damage_hides_every_close_button(web: TestClient, data: Path) -> None:
+    _seed(data)
+    with sqlite3.connect(data / "assets.db") as c:
+        c.execute("UPDATE entries SET body = 'junk' WHERE kind = 'bank'")
+    c.close()
+    html = web.get("/networth").text
+    assert "Your entries could not be read" in html and "/networth/close" not in html
+
+
+def test_looking_at_the_page_never_writes_assets(web: TestClient, data: Path) -> None:
+    assert web.get("/networth").status_code == 200
+    assert not (data / "assets.db").exists()
+    (data / "assets.db").write_bytes(b"")
+    assert web.get("/networth").status_code == 200
+    assert (data / "assets.db").read_bytes() == b""

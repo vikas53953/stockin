@@ -124,9 +124,9 @@
   </form>
 </section>
 <section class="panel" aria-label="Target mix">
-  <h2>Target mix <span class="hint">percent, adding to 100; blank is 0</span></h2>
+  <h2>Target mix <span class="hint">percent, adding to 100; blank means no target for that class</span></h2>
   <form method="post" action="/networth/targets">
-    <div class="fields">{% for b, n, v in p.target_inputs %}<label>{{ n }}<input type="text" name="t_{{ b }}" inputmode="decimal" value="{{ v }}"></label>{% endfor %}</div>
+    <div class="fields">{% for b, n, v in p.target_inputs %}<label>{{ n }}<input type="text" name="t_{{ b }}" inputmode="decimal" value="{{ typed_targets[b] if typed_targets is not none else v }}"></label>{% endfor %}</div>
     <button type="submit">Save target mix</button>
   </form>
 </section>

@@ -331,7 +331,10 @@ def create_app(db: Path, port: int) -> FastAPI:
     }
 
     def networth_view(
-        error: str | None = None, typed: dict[str, str] | None = None, status: int = 200
+        error: str | None = None,
+        typed: dict[str, str] | None = None,
+        status: int = 200,
+        typed_targets: dict[str, str] | None = None,
     ) -> Response:
         book = read_book()
         held = frozenset(h.isin for h in book.holdings()) if book else frozenset[Isin]()
@@ -339,9 +342,11 @@ def create_app(db: Path, port: int) -> FastAPI:
         priced = prices or PriceBook(quotes={})
         assets_damaged = None
         entries, targets = (), {}
-        try:
-            with AssetStore.open(assets_db) as store:
+        try:  # read-only: looking at the page never creates or changes assets.db
+            with AssetStore.open(assets_db, readonly=True) as store:
                 entries, targets = store.entries(), store.targets()
+        except FileNotFoundError:
+            pass  # nothing typed yet
         except AssetsDamaged as exc:
             assets_damaged = str(exc)
         nw = networth(book, priced, entries, targets, india_today())
@@ -350,6 +355,7 @@ def create_app(db: Path, port: int) -> FastAPI:
             p=networth_page(nw, days[-1].isoformat() if days else None),
             error=error,
             typed=typed or {},
+            typed_targets=typed_targets,
             damaged=damaged,
             prices_hint=PRICES_HINT,
             assets_damaged=assets_damaged,
@@ -361,14 +367,18 @@ def create_app(db: Path, port: int) -> FastAPI:
     def networth_get() -> Response:
         return networth_view()
 
-    def write_assets(change: Callable[[AssetStore], None], typed: dict[str, str]) -> Response:
+    def write_assets(
+        change: Callable[[AssetStore], None],
+        typed: dict[str, str],
+        typed_targets: dict[str, str] | None = None,
+    ) -> Response:
         try:
             with AssetStore.open(assets_db) as store:
                 change(store)
         except AssetsDamaged as exc:
-            return networth_view(str(exc), typed, 409)
+            return networth_view(str(exc), typed, 409, typed_targets)
         except ValueError as exc:
-            return networth_view(str(exc), typed, 400)
+            return networth_view(str(exc), typed, 400, typed_targets)
         return RedirectResponse("/networth", status_code=303)
 
     @app.post("/networth/entry", response_class=HTMLResponse)
@@ -410,7 +420,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         try:
             k = parse_kind(kind)
         except ValueError as exc:
-            return networth_view(f"Not closed: {exc}", None, 400)
+            return networth_view(str(exc), None, 400)
 
         def close(store: AssetStore) -> None:
             store.put(close_entry(store.entries(), k, label, india_today()))
@@ -440,8 +450,8 @@ def create_app(db: Path, port: int) -> FastAPI:
         try:
             targets = parse_targets(pairs)
         except ValueError as exc:
-            return networth_view(f"Target mix not saved: {exc}", None, 400)
-        return write_assets(lambda store: store.set_targets(targets), {})
+            return networth_view(f"Target mix: {exc}", None, 400, typed)
+        return write_assets(lambda store: store.set_targets(targets), {}, typed)
 
     @app.get("/reconcile", response_class=HTMLResponse)
     def reconcile_page() -> Response:
