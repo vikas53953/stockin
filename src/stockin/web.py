@@ -221,7 +221,7 @@ def create_app(db: Path, port: int) -> FastAPI:
             ok=report.ok,
             empty=False,
             story=story(insights, ws, total.paise, len(holdings)),
-            cockpit=cockpit(insights, ws, verdicts),
+            cockpit=cockpit(insights, ws, verdicts, frozenset(theses or {})),
             priced_on=days[-1].isoformat() if days else None,
             damaged=damaged,
             prices_hint=PRICES_HINT,

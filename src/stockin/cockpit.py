@@ -18,8 +18,10 @@ from .story import GROUP_SLOT
 from .thesis import BAND, Verdict
 
 DECIDE_ORDER = ("exit", "trim", "add", "hold")
-"""Calls shown as gauges on the Decide tile, most urgent first. `review`
-(no thesis yet) is listed once as a count, not as a row each."""
+"""Calls shown as rows on the Decide tile, most urgent first. An exit is
+shown even when the holding has no price (as its sentence, with no gauge).
+`review` is listed by name instead: holdings with no thesis yet, and
+holdings whose thesis waits for a price, in two separate lists."""
 
 MAX_DECIDE = 4
 MAX_TOP = 6
@@ -47,7 +49,7 @@ class Decide:
     name: str
     call: str
     because: str  # the verdict's own sentence
-    weight: float  # percent
+    weight: float | None  # percent; None when the holding has no price
     target: float | None  # percent
     band: float  # percent either side of the target
     weight_text: str
@@ -62,7 +64,7 @@ class TopRow:
     slot: int
     share: float
     text: str
-    call: str
+    call: str | None  # None when the theses could not be read
 
 
 @dataclass(frozen=True)
@@ -70,11 +72,12 @@ class Cockpit:
     flows: tuple[FlowRow, ...]
     mix: tuple[MixPart, ...]
     decide: tuple[Decide, ...]
-    more_decide: int  # actionable calls beyond MAX_DECIDE
+    more_decide: tuple[tuple[str, str, str], ...]  # (isin, name, call) beyond MAX_DECIDE
     review: tuple[tuple[str, str], ...]  # (isin, name) with no thesis yet
+    unpriced: tuple[tuple[str, str], ...]  # (isin, name) with a thesis but no price
     top: tuple[TopRow, ...]
     known: float | None  # percent of priced value whose cost is known
-    known_text: str
+    known_text: str  # e.g. "2.3% · ₹69,192.57", the headline's own numbers
     unknown_text: str
 
 
@@ -120,8 +123,12 @@ def mix(weights: tuple[Weight, ...]) -> tuple[MixPart, ...]:
     )
 
 
-def decide(verdicts: tuple[Verdict, ...]) -> tuple[tuple[Decide, ...], int]:
-    rows = [v for v in verdicts if v.call in DECIDE_ORDER and v.weight is not None]
+def decide(
+    verdicts: tuple[Verdict, ...],
+) -> tuple[tuple[Decide, ...], tuple[tuple[str, str, str], ...]]:
+    rows = [
+        v for v in verdicts if v.call == "exit" or (v.call in DECIDE_ORDER and v.weight is not None)
+    ]
     rows.sort(key=lambda v: (DECIDE_ORDER.index(v.call), -(v.weight or 0), v.isin))
     shown = tuple(
         Decide(
@@ -129,17 +136,18 @@ def decide(verdicts: tuple[Verdict, ...]) -> tuple[tuple[Decide, ...], int]:
             name=v.name,
             call=v.call,
             because=v.because,
-            weight=_bps_pct(v.weight or 0),
+            weight=_bps_pct(v.weight) if v.weight is not None else None,
             target=_bps_pct(v.target) if v.target is not None else None,
             band=_bps_pct(BAND),
             # the sentence's own text; an exit sentence prints no weight
-            weight_text=v.weight_text or pct(tenths_of(v.weight or 0, 10_000)),
+            weight_text=v.weight_text
+            or (pct(tenths_of(v.weight, 10_000)) if v.weight is not None else ""),
             target_text=v.target_text
             or (pct(tenths_of(v.target, 10_000)) if v.target is not None else ""),
         )
         for v in rows[:MAX_DECIDE]
     )
-    return shown, max(len(rows) - MAX_DECIDE, 0)
+    return shown, tuple((v.isin, v.name, v.call) for v in rows[MAX_DECIDE:])
 
 
 def known(cost: Insight | None) -> tuple[float | None, str, str]:
@@ -148,18 +156,30 @@ def known(cost: Insight | None) -> tuple[float | None, str, str]:
     if cost is None:
         return None, "", ""
     unknown_t = cost.numbers.get("unknown_tenths")
-    if not isinstance(unknown_t, int):
+    known_p = cost.numbers.get("known_value_paise")
+    unknown_p = cost.numbers.get("unknown_value_paise")
+    if not (isinstance(unknown_t, int) and isinstance(known_p, int) and isinstance(unknown_p, int)):
         return None, "", ""
-    return (1000 - unknown_t) / 10, pct(1000 - unknown_t), pct(unknown_t)
+    return (
+        (1000 - unknown_t) / 10,
+        f"{pct(1000 - unknown_t)} · {rupees(Money(paise=known_p))}",
+        f"{pct(unknown_t)} · {rupees(Money(paise=unknown_p))}",
+    )
 
 
 def cockpit(
     insights: tuple[Insight, ...],
     weights: tuple[Weight, ...],
     verdicts: tuple[Verdict, ...],
+    with_thesis: frozenset[str] = frozenset(),
 ) -> Cockpit:
+    """`verdicts` is empty when the theses could not be read; then no tile
+    shows a call at all, rather than a review the owner never earned.
+    `with_thesis` holds the ISINs that have a thesis, so a review caused by a
+    missing price is not shown as a missing thesis."""
     by_kind = {i.kind: i for i in insights}
     calls = {v.isin: v.call for v in verdicts}
+    reviews = [v for v in verdicts if v.call == "review"]
     shown, more = decide(verdicts)
     k, k_text, u_text = known(by_kind.get("cost_coverage"))
     return Cockpit(
@@ -167,7 +187,8 @@ def cockpit(
         mix=mix(weights),
         decide=shown,
         more_decide=more,
-        review=tuple((v.isin, v.name) for v in verdicts if v.call == "review"),
+        review=tuple((v.isin, v.name) for v in reviews if v.isin not in with_thesis),
+        unpriced=tuple((v.isin, v.name) for v in reviews if v.isin in with_thesis),
         top=tuple(
             TopRow(
                 isin=w.isin,
@@ -176,7 +197,7 @@ def cockpit(
                 slot=GROUP_SLOT.get(w.group, 0),
                 share=_bps_pct(w.bps),
                 text=pct(tenths_of(w.bps, 10_000)),
-                call=calls.get(w.isin, "review"),
+                call=calls.get(w.isin),
             )
             for w in weights[:MAX_TOP]
         ),

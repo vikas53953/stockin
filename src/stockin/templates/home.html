@@ -37,22 +37,36 @@
     <div class="tile-h"><h2>What to decide</h2><span class="muted small">your own rules</span></div>
     {% if theses_damaged %}
     <p class="muted">Verdicts need your theses, which could not be read.</p>
-    {% elif not k.decide and not k.review %}
+    {% elif not k.decide and not k.review and not k.unpriced %}
     <p class="muted">Nothing to decide yet.</p>
     {% endif %}
     {% for d in k.decide %}
     <div class="decide-row">
       <div class="decide-top">{{ ui.pill(d.call) }}<a class="decide-name" href="/holding/{{ d.isin }}">{{ d.name }}</a><a class="edit" href="/thesis/{{ d.isin }}">Edit</a></div>
       {% if theses and theses.get(d.isin) %}<p class="muted small thesis-line">Why you hold it: {{ theses[d.isin].why }}</p>{% endif %}
+      {% if d.weight is not none %}
       {{ ui.gauge(d.weight, d.name, target=d.target, band=d.band, cap=25, weight_text=d.weight_text, target_text=d.target_text) }}
       {{ ui.why(d.because) }}
+      {% else %}
+      <p class="small">{{ d.because }}</p>
+      {% endif %}
     </div>
     {% endfor %}
-    {% if k.more_decide %}<p class="muted small">and {{ k.more_decide }} more on their holding pages</p>{% endif %}
+    {% if k.more_decide %}
+    <div class="more-decide"><p class="small"><b>{{ k.more_decide | length }} more</b></p>
+      <div class="chips">{% for isin, name, call in k.more_decide %}<a class="chip-link" href="/holding/{{ isin }}">{{ ui.pill(call) }} {{ name }}</a>{% endfor %}</div>
+    </div>
+    {% endif %}
     {% if k.review %}
     <div class="review">
       <p class="small">{{ ui.pill("review") }} <b>{{ k.review | length }} need your reason</b> <span class="muted">Write thesis to get a verdict</span></p>
       <div class="chips">{% for isin, name in k.review %}<a class="chip-link" href="/thesis/{{ isin }}" title="Write thesis for {{ name }}">+ {{ name }}</a>{% endfor %}</div>
+    </div>
+    {% endif %}
+    {% if k.unpriced %}
+    <div class="review">
+      <p class="small">{{ ui.pill("review") }} <b>{{ k.unpriced | length }} wait for a price</b> <span class="muted">Your thesis is saved; the verdict needs today's weight</span></p>
+      <div class="chips">{% for isin, name in k.unpriced %}<a class="chip-link" href="/holding/{{ isin }}">{{ name }}</a>{% endfor %}</div>
     </div>
     {% endif %}
     <p class="muted small">Not advice: Stockin never suggests a trade of its own, and it cannot place one.</p>
@@ -63,7 +77,7 @@
     <div class="tile-h"><h2>Where your money is</h2><span class="muted small">tile size = value</span></div>
     <div class="map" role="group" aria-label="Map of your holdings: each tile's size is its value; select a tile to open that holding. The table below lists the same numbers.">
       {% for t in story.tiles %}
-      <a href="/holding/{{ t.isin }}" class="tile-map-cell s{{ t.slot }}{% if t.w < 12 or t.h < 14 %} small{% endif %}" style="left:{{ '%.3f'|format(t.x) }}%;top:{{ '%.3f'|format(t.y) }}%;width:{{ '%.3f'|format(t.w) }}%;height:{{ '%.3f'|format(t.h) }}%" title="{{ t.name }} · {{ t.group }} · {{ t.value }} · {{ t.share }}">
+      <a href="/holding/{{ t.isin }}" class="tile-map-cell s{{ t.slot }}{% if t.w < 12 or t.h < 14 %} tiny{% endif %}" style="left:{{ '%.3f'|format(t.x) }}%;top:{{ '%.3f'|format(t.y) }}%;width:{{ '%.3f'|format(t.w) }}%;height:{{ '%.3f'|format(t.h) }}%" title="{{ t.name }} · {{ t.group }} · {{ t.value }} · {{ t.share }}">
         <span class="tile-name">{{ t.name }}</span><span class="tile-share">{{ t.share }}</span>
       </a>
       {% endfor %}
@@ -82,7 +96,7 @@
         <span class="top-name"><i class="sw s{{ r.slot }}"></i>{{ r.name }}</span>
         <span class="top-bar"><span class="s{{ r.slot }}" style="width:{{ ui.clamp(r.share) }}%"></span></span>
         <span class="top-share">{{ r.text }}</span>
-        {{ ui.pill(r.call) }}
+        {% if r.call %}{{ ui.pill(r.call) }}{% endif %}
       </a></li>
       {% endfor %}
     </ul>
@@ -93,8 +107,7 @@
 {% if story.cards %}
 <section class="cards" aria-label="What your numbers say">
   {% for c in story.cards %}
-  {% set why_text = c.detail ~ ((" " ~ c.learn) if c.learn else "") %}
-  {% call ui.insight(c.tone, c.headline, why_text) %}
+  {% call ui.insight(c.tone, c.headline, c.detail, c.learn) %}
     {% if c.kind == "cost_coverage" and k.known is not none %}
     {{ ui.known_bar(k.known, k.known_text, k.unknown_text) }}
     {% elif c.bars %}

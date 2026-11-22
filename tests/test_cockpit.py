@@ -142,9 +142,10 @@ def test_decide_lists_the_urgent_calls_first_and_counts_the_rest() -> None:
         for n, i in enumerate(isin)
     )
     rows, more = decide(vs)
-    assert len(rows) == MAX_DECIDE and more == len(vs) - MAX_DECIDE
+    assert len(rows) == MAX_DECIDE and len(more) == len(vs) - MAX_DECIDE
+    assert {r.isin for r in rows} | {m[0] for m in more} == set(isin)
     assert [r.call for r in rows] == ["trim"] * MAX_DECIDE
-    assert [r.weight for r in rows] == sorted((r.weight for r in rows), reverse=True)
+    assert [r.weight for r in rows] == sorted((r.weight or 0 for r in rows), reverse=True)
 
 
 def test_on_a_real_book_the_cost_bar_repeats_the_cost_sentence() -> None:
@@ -155,9 +156,36 @@ def test_on_a_real_book_the_cost_bar_repeats_the_cost_sentence() -> None:
     cost = cost_coverage(book, prices)
     assert cost is not None
     k, k_text, u_text = known(cost)
-    assert k is not None and u_text in cost.headline
-    assert abs((k + float(u_text[:-1])) - 100) < 1e-9 and k_text == f"{k:.1f}%"
+    u_pct, u_money = u_text.split(" · ")
+    k_pct, k_money = k_text.split(" · ")
+    assert k is not None and u_pct in cost.headline
+    assert abs((k + float(u_pct[:-1])) - 100) < 1e-9 and k_pct == f"{k:.1f}%"
+    n = cost.numbers
+    assert k_money == rupees(Money(paise=int(n["known_value_paise"])))
+    assert u_money == rupees(Money(paise=int(n["unknown_value_paise"])))
     ws, _, _ = weights(book, prices)
-    view = cockpit(all_insights(book, prices, date(2026, 11, 22)), ws, ())
+    insights = all_insights(book, prices, date(2026, 11, 22))
+    view = cockpit(insights, ws, ())
     assert view.known == k and [t.isin for t in view.top] == [w.isin for w in ws][: len(view.top)]
+    # no verdicts (theses unreadable): no tile invents a "review" call
+    assert all(t.call is None for t in view.top)
+    vs = tuple(verdict(w.isin, w.name, w, None) for w in ws)
+    view = cockpit(insights, ws, vs)
     assert all(t.call == "review" for t in view.top)  # no theses yet
+
+
+def test_an_exit_with_no_price_still_reaches_the_decide_tile() -> None:
+    hdfc, infy = parse_isin("INE040A01034"), parse_isin("INE009A01021")
+    on = date(2026, 11, 22)
+    broken = Thesis(isin=infy, why="w", broken=True, exit_if="growth stalls", written=on)
+    waits = Thesis(isin=hdfc, why="w", target=Bps(500), written=on)
+    vs = (
+        verdict(infy, "INFOSYS", None, broken),
+        verdict(hdfc, "HDFC BANK", None, waits),
+        verdict(parse_isin("INE002A01018"), "RELIANCE", None, None),
+    )
+    view = cockpit((), (), vs, frozenset({hdfc, infy}))
+    assert [(d.isin, d.call, d.weight) for d in view.decide] == [(infy, "exit", None)]
+    assert "growth stalls" in view.decide[0].because
+    assert view.unpriced == ((hdfc, "HDFC BANK"),)
+    assert view.review == ((parse_isin("INE002A01018"), "RELIANCE"),)

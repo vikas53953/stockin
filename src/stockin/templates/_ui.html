@@ -58,7 +58,7 @@
 {%- macro known_bar(known, known_text=none, unknown_text=none) -%}
 {%- set kt = known_text or '%.1f%%'|format(known) -%}
 {%- set ut = unknown_text or '%.1f%%'|format(100 - known) -%}
-<div class="kbar" role="img" aria-label="Cost known for {{ kt }} of your money, unknown for {{ ut }}">
+<div class="kbar" role="img" aria-label="Your money with a known cost: {{ kt }}; unknown cost: {{ ut }}">
   <span class="kbar-known" style="width:{{ clamp(known) }}%"></span><span class="kbar-unknown"></span>
 </div>
 <div class="legend"><span><i class="sw kbar-known"></i>known {{ kt }}</span><span><i class="sw sw-unknown"></i>unknown {{ ut }}</span></div>
@@ -74,8 +74,8 @@
 {%- endmacro -%}
 
 {#- The longer explanation, closed until asked for. No script needed. -#}
-{%- macro why(text) -%}
-<details class="why"><summary>Why?</summary><p>{{ text }}</p></details>
+{%- macro why(text, learn=none) -%}
+<details class="why"><summary>Why?</summary><p>{{ text }}</p>{% if learn %}<p class="learn"><b>Learn:</b> {{ learn }}</p>{% endif %}</details>
 {%- endmacro -%}
 
 {#- A designed empty state: what will appear here, and how to get it. -#}
@@ -105,12 +105,12 @@
 
 {#- An insight: a tone pill, a short computed headline, the chart (the caller's block), and Why?.
     tone: warn, good, unknown, info. Call it as {% call ui.insight("warn", headline, why) %}chart{% endcall %}. -#}
-{%- macro insight(tone, headline, why_text=none) -%}
+{%- macro insight(tone, headline, why_text=none, learn=none) -%}
 <article class="card tone-{{ tone }}">
   {{ status({"warn": "warn", "good": "ok", "unknown": "info", "info": "info"}[tone], {"warn": "look at this", "good": "on track", "unknown": "unknown", "info": "for your information"}[tone]) }}
   <h2>{{ headline }}</h2>
   {{ caller() if caller else "" }}
-  {% if why_text %}{{ why(why_text) }}{% endif %}
+  {% if why_text or learn %}{{ why(why_text, learn) }}{% endif %}
 </article>
 {%- endmacro -%}
 
