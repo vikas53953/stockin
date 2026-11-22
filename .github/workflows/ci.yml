@@ -94,9 +94,9 @@ jobs:
           if (-not $ok) { Stop-Process -Id $web.Id; Write-Error "stockin web did not start"; exit 1 }
           $holding = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/holding/INE009A01021
           Stop-Process -Id $web.Id
-          if ($home_page.StatusCode -ne 200 -or $home_page.Content -notmatch "Add, trim or exit") { Write-Error "home page"; exit 1 }
+          if ($home_page.StatusCode -ne 200 -or $home_page.Content -notmatch "What to decide") { Write-Error "home page"; exit 1 }
           if ($holding.StatusCode -ne 200 -or $holding.Content -notmatch "Quality compounder") { Write-Error "holding page"; exit 1 }
-          "home and holding page: 200, verdicts and thesis shown"
+          "home and holding page: 200, decide tile and thesis shown"
       - name: Sprint 3 on Windows (alerts)
         run: |
           $env:PATH = "$(uv tool dir --bin);$env:PATH"
