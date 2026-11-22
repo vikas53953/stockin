@@ -15,7 +15,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
-from stockin.alerts import ACTIONABLE, AlertsDamaged, AlertStore, changes, text
+from stockin.alerts import ACTIONABLE, AlertsBlocked, AlertsDamaged, AlertStore, changes, text
 from stockin.cli import app as cli
 from stockin.facts import Isin, parse_isin
 from stockin.thesis import Call, Verdict
@@ -60,7 +60,10 @@ def test_an_alert_is_exactly_a_turn_into_add_trim_or_exit(
     by = {x.isin: x for x in now}
     for a in alerts:  # the alert carries the verdict's own call and sentence
         assert (a.call, a.because, a.name) == (by[a.isin].call, by[a.isin].because, by[a.isin].name)
-    assert after == {x.isin: x.call for x in now}  # sold holdings are forgotten
+    # review keeps the call before it; sold holdings are forgotten
+    assert after == {
+        x.isin: before.get(x.isin, x.call) if x.call == "review" else x.call for x in now
+    }
 
 
 @given(remembered, snapshot)
@@ -85,10 +88,9 @@ def test_verdict_order_never_changes_the_alerts(
 def test_over_any_run_of_checks_each_alert_marks_a_change_and_none_repeats(
     runs: list[list[Verdict]],
 ) -> None:
-    """Walk a history of checks. Per holding, the alerts sent equal the
+    """Walk a history of checks. Per holding, the alerts made equal the
     number of times its call became actionable and differed from the call
-    before (a missing holding has no call), and the same call never alerts
-    twice in a row."""
+    before (a missing holding has no call; review keeps the call before)."""
     state: dict[Isin, Call] = {}
     sent: dict[Isin, list[Call]] = {}
     prev: dict[Isin, Call | None] = {}
@@ -100,7 +102,10 @@ def test_over_any_run_of_checks_each_alert_marks_a_change_and_none_repeats(
             c = calls.get(isin)
             if c is not None and c in ACTIONABLE and prev.get(isin) != c:
                 want[isin] = want.get(isin, 0) + 1
-            prev[isin] = c
+            if c == "review":
+                prev[isin] = prev.get(isin) or "review"  # review keeps the call before
+            else:
+                prev[isin] = c
         for a in alerts:
             sent.setdefault(a.isin, []).append(a.call)
     for isin in ISINS:
@@ -185,6 +190,58 @@ def test_a_damaged_row_is_said_not_raised(tmp_path: Path, sql: str) -> None:
         AlertStore.open(path)
 
 
+def test_a_dangling_link_is_said_not_raised(tmp_path: Path) -> None:
+    """#28 verifier C1."""
+    (tmp_path / "alerts.db").symlink_to(tmp_path / "gone" / "x.db")
+    with pytest.raises(AlertsDamaged, match="not there"):
+        AlertStore.open(tmp_path / "alerts.db")
+
+
+def test_a_folder_that_cannot_be_written_is_said_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#28 verifier C2."""
+
+    def refuse(*_: object, **__: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "touch", refuse)
+    with pytest.raises(AlertsBlocked, match="could not be created"):
+        AlertStore.open(tmp_path / "alerts.db")
+
+
+def test_a_failure_while_writing_the_outbox_keeps_the_old_calls(tmp_path: Path) -> None:
+    """#28 verifier survivor M8: calls and outbox are one transaction, so
+    an outbox insert that fails leaves the remembered calls as they were."""
+    path = tmp_path / "alerts.db"
+    with AlertStore.open(path) as store:
+        store.record([v(INFY, "hold")], made=T0)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TRIGGER no_outbox BEFORE INSERT ON outbox"
+            " BEGIN SELECT RAISE(ABORT, 'disk'); END"
+        )
+    with AlertStore.open(path) as store:
+        with pytest.raises(AlertsDamaged):
+            store.record([v(INFY, "trim")], made=T0)
+        assert store.calls() == {INFY: "hold"} and store.outbox() == ()
+
+
+def test_an_unsent_alert_that_is_no_longer_true_is_withdrawn(tmp_path: Path) -> None:
+    """#28 verifier R3: trim, then hold before it was sent: nothing to send.
+    A sent alert stays in the history."""
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        (first,) = store.record([v(INFY, "trim")], made=T0)
+        store.mark_sent(first.id, T0)
+        store.record([v(INFY, "hold")], made=T0)
+        store.record([v(INFY, "trim")], made=T0)
+        store.record([v(INFY, "hold")], made=T0)
+        assert [s.id for s in store.outbox()] == [first.id]
+        store.record([v(INFY, "trim")], made=T0)
+        store.record([], made=T0)  # sold before it went out
+        assert [s.id for s in store.outbox()] == [first.id]
+
+
 def test_a_file_that_is_not_a_database_is_said_not_raised(tmp_path: Path) -> None:
     path = tmp_path / "alerts.db"
     path.write_bytes(b"not a database, just some words long enough to matter")
@@ -228,15 +285,57 @@ def test_cli_alerts_once_per_turn_and_lists_them(data: Path) -> None:
 
     r = runner.invoke(cli, ["alerts", "list"])
     assert r.exit_code == 0
-    lines = r.output.splitlines()
-    assert len(lines) == 2 and "TRIM" in lines[0] and "EXIT" in lines[1]
-    assert all("[pending]" in line for line in lines)
+    # the TRIM had not gone out and is no longer true, so only the EXIT is kept
+    (line,) = r.output.splitlines()
+    assert "EXIT" in line and "[pending]" in line
 
 
-def test_cli_list_before_any_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_list_before_any_check_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
     r = runner.invoke(cli, ["alerts", "list"])
     assert r.exit_code == 0 and "no alerts yet" in r.output
+    assert list(tmp_path.iterdir()) == []  # #28 verifier R2: a view never writes
+
+
+def test_cli_a_review_in_between_does_not_alert_again(data: Path) -> None:
+    """#28 verifier R1: prices.db moved aside makes every verdict review for
+    a run; putting it back must not send the same TRIM again."""
+    r = runner.invoke(cli, ["thesis", "set", INFY, "--why", "cash machine", "--target", "30"])
+    assert r.exit_code == 0
+    assert [a["call"] for a in _check()] == ["trim"]
+    (data / "prices.db").rename(data / "prices.db.aside")
+    assert _check() == []
+    (data / "prices.db.aside").rename(data / "prices.db")
+    assert _check() == []
+
+
+def test_cli_a_busy_alerts_file_is_not_called_damaged(data: Path) -> None:
+    """#28 verifier C3: a lock is not damage; moving the file aside would
+    throw history away."""
+    AlertStore.open(data / "alerts.db").close()
+    hold = sqlite3.connect(data / "alerts.db", isolation_level=None)
+    hold.execute("BEGIN EXCLUSIVE")
+    try:
+        import stockin.alerts as alerts_mod
+
+        real = sqlite3.connect
+
+        def quick(*a: object, **k: object) -> sqlite3.Connection:
+            k["timeout"] = 0.1
+            return real(*a, **k)  # type: ignore[arg-type]
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(alerts_mod.sqlite3, "connect", quick)
+        try:
+            r = runner.invoke(cli, ["alerts", "list"])
+        finally:
+            mp.undo()
+    finally:
+        hold.close()
+    assert r.exit_code == 2 and "another stockin may be running" in r.output
+    assert "move alerts.db aside" not in r.output
 
 
 def test_cli_check_without_a_ledger_says_so(
