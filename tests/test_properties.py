@@ -698,10 +698,10 @@ def entries() -> st.SearchStrategy[Entry]:
 
 
 def _unique_days(es: list[Entry]) -> list[Entry]:
-    """One entry per (kind, label, day): the store keeps one, by design."""
-    seen: dict[tuple[str, str, date], Entry] = {}
+    """One value and one close per (kind, label, day): the store keeps that, by design."""
+    seen: dict[tuple[str, str, date, bool], Entry] = {}
     for e in es:
-        seen.setdefault((e.kind, label_key(e.label), e.as_of), e)
+        seen.setdefault((e.kind, label_key(e.label), e.as_of, isinstance(e, Closed)), e)
     return list(seen.values())
 
 

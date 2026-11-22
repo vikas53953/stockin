@@ -7,11 +7,12 @@
 - `asset-add`: one snapshot per kind, label and day; the same day again replaces it; labels ignore case and extra spaces.
 - `asset-fd`: an FD is valued by formula (quarterly compounding from 6 months, simple interest under 6), capped at maturity; a matured FD gets a note.
 - `asset-gold`: grams x `--rate-per-gram`.
-- `asset-close`: a `Closed` snapshot; history stays.
+- `asset-close`: a `Closed` snapshot; history stays. A close and a value can share a day (the close wins); `--on` before the entry's latest date is refused with the date to use. An FD's entry is dated the day it opened unless `--as-of` is given, so it closes at maturity.
 - `asset-list`: current entries and their value today.
 - `target-set` / `target-clear`: CLASS=PERCENT pairs adding to exactly 100.
 - `networth`: total = owned - owed; slices add to 10,000 bps; drift = weight - target; notes (drift, on target, stale > 90 days, matured FD, loans, market share, unpriced).
-- `doctor-assets`: `warn` with no file (never creates it), `ok` with a count, `fail` on damage.
+- `doctor-assets`: `warn` with no file or a zero-byte file (opens `mode=ro`, never creates it), `ok` with a count, `fail` on damage.
+- `assets-damage`: any non-empty file must pass `PRAGMA integrity_check` and hold exactly the `entries` and `targets` tables; otherwise every command exits 2 and nothing is written (one zeroed byte at offset 104 is the classic case).
 
 ## How to get to it (user POV)
 

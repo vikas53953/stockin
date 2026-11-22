@@ -536,3 +536,191 @@ def test_doctor_reports_assets_without_creating_the_file(empty: Path) -> None:
     doctor = json.loads(runner.invoke(cli, ["doctor", "--json"]).output)
     (check,) = [c for c in doctor["checks"] if c["name"] == "assets"]
     assert check["status"] == "ok" and "1 entries" in check["detail"]
+
+
+# ------------------------------------------- verifier round 1 (PR #29)
+
+
+def test_a_matured_fd_closes_on_its_maturity_day(empty: Path) -> None:
+    """R1: the FD's entry is dated the day it opened, so closing it on the
+    day it matured (what the matured note asks for) takes it out."""
+    _ok(
+        "asset", "add", "fd", "--label", "HDFC FD", "--principal", "100000", "--rate", "7.1",
+        "--start", "2025-11-01", "--months", "12",
+    )  # fmt: skip
+    _ok("asset", "close", "fd", "--label", "HDFC FD", "--on", "2026-11-01")
+    nw = json.loads(_ok("networth", "--json"))
+    assert nw["owned"]["paise"] == 0 and not any(n["kind"] == "matured" for n in nw["notes"])
+
+
+def test_closing_before_the_latest_entry_is_refused_not_ignored(empty: Path) -> None:
+    _ok("asset", "add", "bank", "--value", "100", "--as-of", "2026-11-10")
+    r = runner.invoke(cli, ["asset", "close", "bank", "--on", "2026-11-01"])
+    assert r.exit_code == 2 and "dated 2026-11-10, after 2026-11-01" in r.output
+    assert "--on 2026-11-10" in r.output
+    assert json.loads(_ok("networth", "--json"))["owned"]["paise"] == 100_00
+
+
+def test_closing_on_the_day_of_a_balance_keeps_that_balance_as_history(empty: Path) -> None:
+    """R3: a close and a value can share a day; the close wins, the value stays."""
+    _ok("asset", "add", "loan", "--value", "5000")
+    _ok("asset", "close", "loan")
+    with AssetStore.open(empty / "assets.db") as store:
+        kinds = sorted(type(e).__name__ for e in store.entries())
+    assert kinds == ["Closed", "Stated"]
+    assert json.loads(_ok("networth", "--json"))["owed"]["paise"] == 0
+    # and a correction of that day's value still replaces only the value
+    _ok("asset", "add", "loan", "--value", "6000")
+    with AssetStore.open(empty / "assets.db") as store:
+        assert len(store.entries()) == 2
+
+
+@pytest.mark.parametrize("offset", [0, 16, 28, 40, 56, 96, 100, 104])
+def test_one_zeroed_header_byte_is_damage_never_an_empty_file(tmp_path: Path, offset: int) -> None:
+    """R2 (lesson 21): a zeroed byte at 104 made SQLite read an empty schema,
+    and a read command wrote a new one, losing every entry for good."""
+    path = tmp_path / "assets.db"
+    _seeded(path)
+    body = bytearray(path.read_bytes())
+    body[offset] = 0 if body[offset] else 1
+    path.write_bytes(bytes(body))
+    before = path.read_bytes()
+    try:
+        with AssetStore.open(path) as store:
+            assert len(store.entries()) == 3  # a harmless byte: everything still there
+    except AssetsDamaged:
+        assert path.read_bytes() == before  # refused, and nothing written
+
+
+def test_byte_104_zeroed_is_refused_by_every_command(empty: Path) -> None:
+    _seeded(empty / "assets.db")
+    body = bytearray((empty / "assets.db").read_bytes())
+    body[104] = 0
+    (empty / "assets.db").write_bytes(bytes(body))
+    before = (empty / "assets.db").read_bytes()
+    for args in (["asset", "list"], ["networth"], ["asset", "add", "bank", "--value", "1"]):
+        r = runner.invoke(cli, args)
+        assert r.exit_code == 2 and "only copy of what you typed" in r.output, (args, r.output)
+    assert (empty / "assets.db").read_bytes() == before
+    doctor = json.loads(runner.invoke(cli, ["doctor", "--json"]).output)
+    assert [c["status"] for c in doctor["checks"] if c["name"] == "assets"] == ["fail"]
+
+
+def test_a_zero_byte_file_is_new_for_doctor_and_commands_alike(empty: Path) -> None:
+    """C4: zero bytes means new, everywhere."""
+    (empty / "assets.db").write_bytes(b"")
+    doctor = json.loads(runner.invoke(cli, ["doctor", "--json"]).output)
+    assert [c["status"] for c in doctor["checks"] if c["name"] == "assets"] == ["warn"]
+    assert "nothing yet" in _ok("asset", "list")
+
+
+def test_an_extra_or_missing_table_is_damage(tmp_path: Path) -> None:
+    for sql in ("CREATE TABLE extra(x)", "DROP TABLE targets"):
+        path = tmp_path / f"{len(sql)}.db"
+        _seeded(path)
+        with sqlite3.connect(path) as c:
+            c.execute(sql)
+        c.close()
+        with pytest.raises(AssetsDamaged):
+            AssetStore.open(path)
+
+
+def test_doctor_opens_assets_read_only(empty: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V8: doctor must open with mode=ro, not merely happen not to write."""
+    _seeded(empty / "assets.db")
+    seen: list[str] = []
+    real = sqlite3.connect
+
+    def spy(target: object, *a: object, **k: object) -> sqlite3.Connection:
+        seen.append(str(target))
+        return real(target, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("stockin.networth.sqlite3.connect", spy)
+    runner.invoke(cli, ["doctor", "--json"])
+    assert seen and all(t.endswith("?mode=ro") for t in seen if "assets.db" in t)
+
+
+def test_drift_inside_the_shown_band_is_not_called_out() -> None:
+    """R4: 25.03% against 20% shows as 5.0 points, so it is on target."""
+    entries: list[Entry] = [
+        _bank("2503", TODAY),
+        Stated(kind="other", label="x", as_of=TODAY, amount=rs("7497")),
+    ]
+    nw = networth(
+        None, PriceBook(quotes={}), entries, {"cash": Bps(2000), "other": Bps(8000)}, TODAY
+    )
+    assert {s.bucket: s.drift for s in nw.slices}["cash"] == 503
+    assert not [n for n in nw.notes if n.kind == "drift"]
+    assert [n.kind for n in nw.notes if n.tone == "good"] == ["on_target"]
+
+
+def test_an_interest_rate_above_50_percent_is_refused_in_percent(empty: Path) -> None:
+    r = runner.invoke(
+        cli,
+        ["asset", "add", "fd", "--principal", "1", "--rate", "51", "--start", "2026-01-01",
+         "--months", "12"],
+    )  # fmt: skip
+    assert r.exit_code == 2 and "above 50%" in r.output and "5000" not in r.output
+
+
+def test_dates_far_outside_a_lifetime_are_refused() -> None:
+    """C1/C2: year 9999 made the month arithmetic loop forever."""
+    with pytest.raises(ValueError, match="outside 1900 to 2199"):
+        _fd("1000", 700, date(9999, 1, 1), 600)
+    with pytest.raises(ValueError, match="outside 1900 to 2199"):
+        _bank("1", date(1, 1, 1))
+    far = _fd("1000", 700, date(2199, 12, 31), 600)  # maturity in 2249: still computes
+    assert fd_value(far, date(2260, 1, 1)).paise > 1000_00
+
+
+def test_a_future_fd_start_is_refused(empty: Path) -> None:
+    r = runner.invoke(
+        cli,
+        ["asset", "add", "fd", "--principal", "1", "--rate", "7", "--start", "2026-12-01",
+         "--months", "12"],
+    )  # fmt: skip
+    assert r.exit_code == 2 and "in the future" in r.output
+
+
+def test_a_six_month_fd_compounds_and_a_five_month_one_does_not() -> None:
+    """V1: the boundary is 6 months, compounding included."""
+    six = _fd("100000", 800, date(2026, 1, 1), 6)
+    assert fd_value(six, date(2026, 7, 1)) == rs("104040")  # 1e5 x 1.02^2
+    five = _fd("100000", 800, date(2026, 1, 1), 5)
+    days = (date(2026, 6, 1) - date(2026, 1, 1)).days
+    want = (Decimal("100000") * (1 + Decimal("0.08") * days / 365)).quantize(Decimal("0.01"))
+    assert fd_value(five, date(2026, 6, 1)) == rs(str(want))
+
+
+def test_labels_fold_case_fully() -> None:
+    """V6: casefold, not lower: 'Straße' and 'STRASSE' are one entry."""
+    entries: list[Entry] = [
+        _bank("1", date(2026, 1, 1), label="Straße"),
+        _bank("2", date(2026, 2, 1), label="STRASSE"),
+    ]
+    assert len(current(entries, TODAY)) == 1
+
+
+def test_loans_are_a_warning_only_above_half_of_what_you_own() -> None:
+    """V7."""
+
+    def tone(loan: str) -> str:
+        es: list[Entry] = [
+            _bank("100", TODAY),
+            Stated(kind="loan", label="L", as_of=TODAY, amount=rs(loan)),
+        ]
+        nw = networth(None, PriceBook(quotes={}), es, {}, TODAY)
+        return next(n.tone for n in nw.notes if n.kind == "loans")
+
+    assert (tone("10"), tone("50"), tone("51")) == ("info", "info", "warn")
+
+
+def test_the_cli_prints_drift_with_its_sign(empty: Path) -> None:
+    """V3: the human output's sign follows weight minus target."""
+    _ok("asset", "add", "bank", "--value", "70")
+    _ok("asset", "add", "other", "--value", "30")
+    _ok("target", "set", "cash=50", "other=50")
+    text = _ok("networth")
+    assert "drift +20 pts" in text and "drift -20 pts" in text
+    cash = next(ln for ln in text.splitlines() if ln.strip().startswith("Cash"))
+    assert "+20" in cash

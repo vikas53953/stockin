@@ -101,6 +101,18 @@ MAX_RUPEES = 10**13
 the basis-point and compounding arithmetic."""
 
 
+FIRST_DAY = date(1900, 1, 1)
+LAST_DAY = date(2199, 12, 31)
+"""Dates outside these are typos; they also keep month arithmetic far from
+the calendar's end (year 9999), where it would fail."""
+
+
+def _in_range(d: date, what: str) -> date:
+    if not FIRST_DAY <= d <= LAST_DAY:
+        raise ValueError(f"{what} {d} is outside {FIRST_DAY.year} to {LAST_DAY.year}")
+    return d
+
+
 def label_key(label: str) -> str:
     """Identity of a label: spaces collapsed, case folded. 'SBI  FD' and
     'sbi fd' are the same entry; the label shown is the latest one typed."""
@@ -123,6 +135,11 @@ class _Entry(Value):
         if any(not ch.isprintable() for ch in cleaned):
             raise ValueError("a label cannot hold control characters")
         return cleaned
+
+    @field_validator("as_of")
+    @classmethod
+    def _as_of(cls, v: date) -> date:
+        return _in_range(v, "the date")
 
 
 def _bounded(m: Money, what: str) -> Money:
@@ -152,9 +169,21 @@ class Fd(_Entry):
     entry: Literal["fd"] = "fd"
     kind: Literal["fd"] = "fd"
     principal: Money
-    rate: Bps = Field(ge=0, le=5_000)  # 7.1% -> 710; above 50% is a typo
+    rate: Bps  # 7.1% -> 710; above 50% is a typo
     start: date
     months: StrictInt = Field(gt=0, le=600)
+
+    @field_validator("rate")
+    @classmethod
+    def _rate(cls, v: Bps) -> Bps:
+        if not 0 <= v <= 5_000:
+            raise ValueError("an interest rate above 50% is a typo; check the number")
+        return v
+
+    @field_validator("start")
+    @classmethod
+    def _start(cls, v: date) -> date:
+        return _in_range(v, "the start date")
 
     @field_validator("principal")
     @classmethod
@@ -242,9 +271,10 @@ def fd_value(fd: Fd, on: date) -> Money:
     if fd.months < 6:
         value = p * (1 + rate * (end - fd.start).days / 365)
     else:
-        quarters = 0
-        while _add_months(fd.start, 3 * (quarters + 1)) <= end:
-            quarters += 1
+        months = (end.year - fd.start.year) * 12 + end.month - fd.start.month
+        quarters = max(0, months // 3 + 1)
+        while quarters > 0 and _add_months(fd.start, 3 * quarters) > end:
+            quarters -= 1
         last = _add_months(fd.start, 3 * quarters)
         value = p * (1 + rate / 4) ** quarters * (1 + rate * (end - last).days / 365)
     return Money(paise=div_half_even(value.numerator, value.denominator))
@@ -262,15 +292,17 @@ def entry_value(e: Stated | Fd | Gold, on: date) -> Money:
 
 def current(entries: Iterable[Entry], today: date) -> tuple[Stated | Fd | Gold, ...]:
     """The latest snapshot per (kind, label key) dated on or before `today`,
-    unless that snapshot closed it. Order of `entries` never matters: on one
-    day, one entry per key exists (the store replaces same-day writes)."""
+    unless that snapshot closed it. On one day a close wins over a balance:
+    "I hold it, and it ended today" means it ended. Order of `entries` never
+    matters: the store keeps one value and one close per key and day."""
     latest: dict[tuple[str, str], Entry] = {}
     for e in entries:
         if e.as_of > today:
             continue
         key = (e.kind, label_key(e.label))
         held = latest.get(key)
-        if held is None or (e.as_of, _ENTRY.dump_json(e)) > (held.as_of, _ENTRY.dump_json(held)):
+        rank = (e.as_of, isinstance(e, Closed), _ENTRY.dump_json(e))
+        if held is None or rank > (held.as_of, isinstance(held, Closed), _ENTRY.dump_json(held)):
             latest[key] = e
     out = [e for _, e in sorted(latest.items()) if not isinstance(e, Closed)]
     return tuple(out)
@@ -454,10 +486,11 @@ def notes(nw: NetWorth) -> tuple[Note, ...]:
     for s in nw.slices:
         if s.drift is None or s.target is None:
             continue
-        if abs(s.drift) > DRIFT_BAND:
-            # the gap is the shown weight minus the shown target, so the
-            # sentence's own numbers always subtract to the points it states
-            now, aim = tenths_of(s.bps, 10_000), tenths_of(s.target, 10_000)
+        # the gap is the shown weight minus the shown target, so the sentence's
+        # own numbers always subtract to the points it states, and "outside the
+        # band" is decided on those same shown numbers
+        now, aim = tenths_of(s.bps, 10_000), tenths_of(s.target, 10_000)
+        if abs(now - aim) > DRIFT_BAND // 10:
             side = "above" if s.drift > 0 else "below"
             out.append(
                 Note(
@@ -472,7 +505,7 @@ def notes(nw: NetWorth) -> tuple[Note, ...]:
                 )
             )
     drifted = [s for s in nw.slices if s.drift is not None]
-    if drifted and all(abs(s.drift or 0) <= DRIFT_BAND for s in drifted):
+    if drifted and not any(n.kind == "drift" for n in out):
         out.append(
             Note(
                 tone="good",
@@ -568,8 +601,8 @@ def parse_targets(pairs: Iterable[str]) -> dict[Bucket, Bps]:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries(
-  kind TEXT NOT NULL, key TEXT NOT NULL, as_of TEXT NOT NULL, body TEXT NOT NULL,
-  PRIMARY KEY(kind, key, as_of)) WITHOUT ROWID;
+  kind TEXT NOT NULL, key TEXT NOT NULL, as_of TEXT NOT NULL, closed INTEGER NOT NULL,
+  body TEXT NOT NULL, PRIMARY KEY(kind, key, as_of, closed)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS targets(
   bucket TEXT PRIMARY KEY NOT NULL, bps INTEGER NOT NULL) WITHOUT ROWID;
 """
@@ -591,14 +624,20 @@ class AssetStore:
     @classmethod
     def open(cls, path: Path, *, readonly: bool = False) -> Self:
         """Creates assets.db (0600) on first write. `readonly` never creates
-        or changes anything: `stockin doctor` uses it."""
+        or changes anything: `stockin doctor` uses it.
+
+        Zero bytes is a new file. Any other file must pass SQLite's own
+        integrity check and hold exactly Stockin's two tables, or it is
+        damage (lesson 21): writing a schema into a file that lost its own
+        would read as "nothing yet" and forget every entry for good."""
+        if readonly and (not path.exists() or (path.is_file() and path.stat().st_size == 0)):
+            raise FileNotFoundError(path)
         if not path.exists():
-            if readonly:
-                raise FileNotFoundError(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch(mode=0o600)  # what you own is private
         if not path.is_file():
             raise AssetsDamaged(f"{path} is not a file")
+        fresh = path.stat().st_size == 0
         try:
             conn = (
                 sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
@@ -610,7 +649,22 @@ class AssetStore:
         store = cls(conn, path)
         try:
             with _guard(path):
-                if not readonly:
+                if not fresh:
+                    (ok,) = conn.execute("PRAGMA integrity_check(1)").fetchone()
+                    if ok != "ok":
+                        raise AssetsDamaged(f"{path} failed SQLite's integrity check ({ok})")
+                    tables = {
+                        n
+                        for (n,) in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    if tables != {"entries", "targets"}:
+                        raise AssetsDamaged(
+                            f"{path} does not hold Stockin's tables (found: "
+                            f"{', '.join(sorted(tables)) or 'none'})"
+                        )
+                elif not readonly:
                     conn.executescript(_SCHEMA)
                 store.entries()  # every row must read back
                 store.targets()
@@ -622,12 +676,14 @@ class AssetStore:
     def entries(self) -> tuple[Entry, ...]:
         with _guard(self._path):
             rows = self._conn.execute(
-                "SELECT kind, key, as_of, body FROM entries ORDER BY kind, key, as_of"
+                "SELECT kind, key, as_of, closed, body FROM entries"
+                " ORDER BY kind, key, as_of, closed"
             ).fetchall()
             out: list[Entry] = []
-            for kind, key, as_of, body in rows:
+            for kind, key, as_of, closed, body in rows:
                 e = _ENTRY.validate_json(body)
-                if (e.kind, label_key(e.label), e.as_of.isoformat()) != (kind, key, as_of):
+                mine = (e.kind, label_key(e.label), e.as_of.isoformat(), int(isinstance(e, Closed)))
+                if mine != (kind, key, as_of, closed):
                     raise ValueError(f"row {kind}/{key}/{as_of} does not match its body")
                 out.append(e)
         return tuple(out)
@@ -644,14 +700,16 @@ class AssetStore:
 
     def put(self, entry: Entry) -> None:
         """Add a snapshot. The same snapshot again changes nothing; another
-        one for the same kind, label and day replaces it."""
+        value for the same kind, label and day replaces it (a correction),
+        and so does another close. A value and a close can share a day."""
         with _guard(self._path), self._conn:
             self._conn.execute(
-                "INSERT OR REPLACE INTO entries VALUES (?,?,?,?)",
+                "INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?)",
                 (
                     entry.kind,
                     label_key(entry.label),
                     entry.as_of.isoformat(),
+                    int(isinstance(entry, Closed)),
                     _ENTRY.dump_json(entry).decode(),
                 ),
             )

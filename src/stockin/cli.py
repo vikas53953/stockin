@@ -786,12 +786,15 @@ def asset_add(
         if k == "fd":
             if rate is None or start is None or months is None:
                 raise _fail("an FD needs --principal, --rate, --start and --months")
+            opened = _day(start, "--start")
             entry = Fd(
                 label=name,
-                as_of=day,
+                # an FD exists from the day it opened, so it can be closed at
+                # maturity without the entry being dated later than that
+                as_of=day if as_of is not None else opened,
                 principal=_rupees(principal, "--principal"),
                 rate=percent(rate),
-                start=_day(start, "--start"),
+                start=opened,
                 months=months,
             )
         elif k == "gold":
@@ -834,9 +837,15 @@ def asset_close(
     name = (label if label is not None else KIND_NAME[k]).strip()
     day = _day(on, "--on")
     with _open_assets() as store:
-        known = {label_key(e.label) for e in store.entries() if e.kind == k}
-        if label_key(name) not in known:
+        mine = [e for e in store.entries() if e.kind == k and label_key(e.label) == label_key(name)]
+        if not mine:
             raise _fail(f"no {k} called '{name}'", "see them with: stockin asset list")
+        latest = max(e.as_of for e in mine)
+        if day < latest:
+            raise _fail(
+                f"{KIND_NAME[k]} '{name}' has an entry dated {latest}, after {day}",
+                f"close it on or after that day: --on {latest}",
+            )
         store.put(Closed(kind=k, label=name, as_of=day))
     typer.echo(f"closed {KIND_NAME[k]} '{name}' from {day}; its history is kept")
 
