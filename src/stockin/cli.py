@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 import typer
 
 from . import __version__
+from .alerts import AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights
@@ -32,6 +33,7 @@ from .prices import (
     PricesMissing,
     PriceStore,
     Quote,
+    india_now,
     india_today,
     left_out,
 )
@@ -673,6 +675,76 @@ def web(
             raise _fail(f"port {port} is already in use", f"try: stockin web --port {port + 1}")
     typer.echo(f"Stockin is running at http://127.0.0.1:{port}  (Ctrl+C to stop)")
     uvicorn.run(create_app(ledger_path(), port), host="127.0.0.1", port=port, log_level="warning")
+
+
+alerts_app = typer.Typer(
+    no_args_is_help=True, help="One message when a verdict turns into add, trim or exit."
+)
+app.add_typer(alerts_app, name="alerts")
+
+
+def alerts_path() -> Path:
+    return data_dir() / "alerts.db"
+
+
+@contextmanager
+def _open_alerts() -> Generator[AlertStore]:
+    try:
+        with AlertStore.open(alerts_path()) as store:
+            yield store
+    except AlertsDamaged as exc:
+        hint = "move alerts.db aside; Stockin starts a fresh one (past alerts are lost)"
+        raise _fail(str(exc), hint) from None
+
+
+class AlertsView(Value):
+    priced_on: str | None
+    alerts: tuple[Sent, ...]
+
+
+def _alert_lines(found: tuple[Sent, ...]) -> None:
+    for s in found:
+        state = "sent" if s.sent else "pending"
+        when = s.made.strftime("%Y-%m-%d %H:%M")
+        typer.echo(f"{when}  {s.alert.call.upper():<5} {s.alert.because}  [{state}]")
+
+
+@alerts_app.command("check")
+def alerts_check(as_json: JsonFlag = False) -> None:
+    """Work out today's verdicts and keep an alert for each one that newly turned
+    into add, trim or exit. Running it again on the same numbers adds nothing."""
+    with _open_ledger() as ledger:
+        book = ledger.book()
+    held = frozenset(h.isin for h in book.holdings())
+    prices = _price_book(held) or PriceBook(quotes={})
+    with _open_theses() as theses:
+        found = for_book(book, prices, theses.all())
+    days = [q.on for q in prices.quotes.values()]
+    with _open_alerts() as store:
+        added = store.record(found, made=india_now())
+    view = AlertsView(priced_on=max(days).isoformat() if days else None, alerts=added)
+    if as_json:
+        typer.echo(view.model_dump_json(indent=2))
+        return
+    if not added:
+        typer.echo("no new alerts: no verdict turned into add, trim or exit since the last check")
+        return
+    typer.echo(f"{len(added)} new alert{'s' if len(added) > 1 else ''}:")
+    _alert_lines(added)
+
+
+@alerts_app.command("list")
+def alerts_list(as_json: JsonFlag = False) -> None:
+    """Every alert kept, oldest first, and whether it was sent."""
+    with _open_alerts() as store:
+        found = store.outbox()
+    if as_json:
+        typer.echo(AlertsView(priced_on=None, alerts=found).model_dump_json(indent=2))
+        return
+    if not found:
+        typer.echo("no alerts yet: run `stockin alerts check` after prices are fetched")
+        return
+    _alert_lines(found)
 
 
 def _utf8_output() -> None:

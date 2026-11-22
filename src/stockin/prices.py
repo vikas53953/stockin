@@ -220,6 +220,11 @@ def _now() -> datetime:
     return datetime.now(_IST)
 
 
+def india_now() -> datetime:
+    """Now in India, to the second."""
+    return _now().replace(microsecond=0)
+
+
 def india_today() -> date:
     """Today in India, where both price files are dated. Nothing in
     prices.db may be dated after it."""
