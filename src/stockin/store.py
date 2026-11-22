@@ -177,10 +177,12 @@ class Ledger:
             "SELECT source, period_start, period_end, sha256 FROM statements"
             " ORDER BY period_start, period_end, source, sha256"
         )
-        return tuple(
-            Period(source=src, start=date.fromisoformat(a), end=date.fromisoformat(b))
-            for src, a, b, _ in rows
-        )
+        out: list[Period] = []
+        for src, a, b, sha in rows:
+            if not (isinstance(src, str) and isinstance(a, str) and isinstance(b, str)):
+                raise ValueError(f"statement {sha}: its source or dates are not text")
+            out.append(Period(source=src, start=date.fromisoformat(a), end=date.fromisoformat(b)))
+        return tuple(out)
 
     def statements(self) -> int:
         (n,) = self._conn.execute("SELECT count(*) FROM statements").fetchone()

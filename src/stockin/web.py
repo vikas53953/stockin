@@ -325,11 +325,19 @@ def create_app(db: Path, port: int) -> FastAPI:
             tally=tally(report.checks),
         )
 
-    def read_coverage() -> Coverage | None:
+    def read_coverage() -> Coverage | str | None:
+        """The month grid, or why it could not be read. It only decorates the
+        page, so damage here never hides an import's result or its error,
+        and never turns a finished import into a 500."""
         if not db.is_file():
             return None
-        with Ledger.open(db) as ledger:
-            return coverage(ledger.periods())
+        try:
+            with Ledger.open(db) as ledger:
+                return coverage(ledger.periods())
+        except LedgerOutdated as exc:
+            return f"{exc}. {REBUILD_HINT}"
+        except (ValueError, sqlite3.DatabaseError) as exc:
+            return f"Your statement list in {db} could not be read ({exc})."
 
     @app.get("/import", response_class=HTMLResponse)
     def import_page() -> Response:

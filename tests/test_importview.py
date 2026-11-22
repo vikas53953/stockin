@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import cas_fixtures as fx
+import pytest
 from fastapi.testclient import TestClient
 from hypothesis import given
 from hypothesis import strategies as st
@@ -210,3 +211,195 @@ def test_a_missing_month_is_said_under_the_grid(tmp_path: Path) -> None:
     said = re.findall(r'<p class="small">.*?</p>', page, re.S)
     assert sum(line in p for p in said) == 1
     assert re.findall(r'<i class="cover-m( on)?"', page) == [" on", "", " on"]
+
+
+# ---------------------------------------------- damage never hides a result
+
+ROW_DAMAGE = {
+    "bad-end": "UPDATE statements SET period_end='2026-13-45'",
+    "bad-start": "UPDATE statements SET period_start='junk'",
+    "null-ish": "UPDATE statements SET period_end=''",
+    "blob": "UPDATE statements SET period_start=x'ff00ff'",
+}
+
+
+def _jan_feb(tmp_path: Path) -> tuple[Path, Path]:
+    def month(first: str, last: str) -> fx.CASData:
+        scheme = fx.scheme(fx.HDFC_MF, "Test Fund", "5", "5", [])
+        return fx.rta(first, last, [fx.folio("1/1", "Test AMC", [scheme])])
+
+    jan = fx.write(month("01-Jan-2026", "31-Jan-2026"), tmp_path / "jan.json")
+    feb = fx.write(month("01-Feb-2026", "28-Feb-2026"), tmp_path / "feb.json")
+    return jan, feb
+
+
+@pytest.mark.parametrize("damage", sorted(ROW_DAMAGE))
+def test_a_damaged_statement_row_is_said_and_imports_still_report(
+    tmp_path: Path, damage: str
+) -> None:
+    import sqlite3
+
+    client = _client(tmp_path)
+    jan, feb = _jan_feb(tmp_path)
+    _upload(client, jan)
+    conn = sqlite3.connect(tmp_path / "data" / "ledger.db")
+    conn.execute(ROW_DAMAGE[damage])
+    conn.commit()
+    conn.close()
+    r = client.get("/import")
+    assert r.status_code == 200 and "could not be listed" in r.text and "Traceback" not in r.text
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with bad.open("rb") as fh:
+        r = client.post("/import", files={"statement": ("bad.json", fh, "application/json")})
+    assert r.status_code == 200 and "Not imported" in r.text
+    with feb.open("rb") as fh:
+        r = client.post("/import", files={"statement": ("feb.json", fh, "application/json")})
+    assert r.status_code == 200 and "new facts" in r.text and "could not be listed" in r.text
+
+
+def test_a_ledger_that_is_not_a_database_still_says_why_a_file_was_refused(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "ledger.db").write_bytes(b"not a database, just text, long enough" * 4)
+    r = client.get("/import")
+    assert r.status_code == 200 and "could not be listed" in r.text
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with bad.open("rb") as fh:
+        r = client.post("/import", files={"statement": ("bad.json", fh, "application/json")})
+    assert r.status_code == 200 and "Not imported" in r.text
+
+
+def test_an_outdated_ledger_says_how_to_rebuild_on_the_import_page(tmp_path: Path) -> None:
+    import sqlite3
+
+    from stockin.sources import cas
+    from stockin.store import LedgerWriter
+
+    db = tmp_path / "data" / "ledger.db"
+    rows = [fx.txn("2026-01-25", "DIVIDEND_REINVEST", "1", "80")]
+    data = fx.rta(
+        "01-Jan-2026",
+        "31-Jan-2026",
+        [fx.folio("1/1", "AMC", [fx.scheme(fx.HDFC_MF, "F", "0", "1", rows)])],
+    )
+    with LedgerWriter.open(db) as w:
+        w.ingest(cas.from_casparser(data, "old"))
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    client = _client(tmp_path)
+    r = client.get("/import")
+    assert r.status_code == 200 and "import your statements again" in r.text
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with bad.open("rb") as fh:
+        r = client.post("/import", files={"statement": ("bad.json", fh, "application/json")})
+    assert r.status_code == 200 and "Not imported" in r.text  # the file's own reason
+
+
+# ------------------------------------------------------ more of the picture
+
+
+def test_every_gap_gets_its_sentence_and_the_grid_keeps_the_latest_months() -> None:
+    ps = [
+        Period(source="cams_kfin_cas", start=date(2024, 1, 1), end=date(2024, 1, 31)),
+        Period(source="cams_kfin_cas", start=date(2026, 11, 1), end=date(2026, 11, 30)),
+        Period(source="nsdl_cas", start=date(2026, 6, 1), end=date(2026, 6, 30)),
+        Period(source="nsdl_cas", start=date(2026, 9, 1), end=date(2026, 9, 30)),
+    ]
+    cover = coverage(tuple(ps))
+    assert cover is not None
+    assert len(cover.months) == MAX_MONTHS and cover.months[-1] == "Nov 2026"
+    assert cover.months[0] == "Dec 2024"  # the latest two years, not the first
+    assert len(cover.gap_lines) == 2
+    assert cover.gap_lines[0] == "No Demat (NSDL) statement for Jul 2026, Aug 2026."
+    assert cover.gap_lines[1].startswith(
+        "No Mutual funds (CAMS / KFintech) statement for Dec 2024,"
+    )
+
+
+def test_the_page_says_every_gap(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    def stmt(first: str, last: str) -> fx.CASData:
+        scheme = fx.scheme(fx.HDFC_MF, "Test Fund", "5", "5", [])
+        return fx.rta(first, last, [fx.folio("1/1", "Test AMC", [scheme])])
+
+    for n, (a, b) in enumerate(
+        [
+            ("01-Jan-2026", "31-Jan-2026"),
+            ("01-Mar-2026", "31-Mar-2026"),
+            ("01-May-2026", "31-May-2026"),
+        ]
+    ):
+        _upload(client, fx.write(stmt(a, b), tmp_path / f"s{n}.json"))
+    page = client.get("/import").text
+    said = re.findall(r'<p class="small">.*?</p>', page, re.S)
+    line = "No Mutual funds (CAMS / KFintech) statement for Feb 2026, Apr 2026."
+    assert sum(line in p for p in said) == 1
+
+
+def test_all_checks_opens_only_when_something_disagrees(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    jan, feb = _jan_feb(tmp_path)
+    _upload(client, jan)
+    _upload(client, feb)
+    page = client.get("/reconcile").text
+    assert '<details class="panel all-checks">' in page  # all agree: closed
+    other = _client(tmp_path / "b")
+    jan10 = fx.rta(
+        "01-Jan-2026",
+        "31-Jan-2026",
+        [
+            fx.folio(
+                "1/1",
+                "Test AMC",
+                [
+                    fx.scheme(
+                        fx.HDFC_MF,
+                        "Test Fund",
+                        "0",
+                        "10",
+                        [fx.txn("2026-01-05", "PURCHASE", "10", "1000")],
+                    )
+                ],
+            )
+        ],
+    )
+    feb7 = fx.rta(
+        "01-Feb-2026",
+        "28-Feb-2026",
+        [fx.folio("1/1", "Test AMC", [fx.scheme(fx.HDFC_MF, "Test Fund", "7", "7", [])])],
+    )
+    (tmp_path / "b").mkdir(exist_ok=True)
+    _upload(other, fx.write(jan10, tmp_path / "b" / "jan.json"))
+    _upload(other, fx.write(feb7, tmp_path / "b" / "feb.json"))
+    page = other.get("/reconcile").text
+    assert '<details class="panel all-checks" open>' in page
+
+
+def test_random_byte_damage_to_the_ledger_never_breaks_the_import_page(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    jan, feb = _jan_feb(tmp_path)
+    _upload(client, jan)
+    _upload(client, feb)
+    db = tmp_path / "data" / "ledger.db"
+    good = db.read_bytes()
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    rnd = random.Random(36)
+    for _ in range(60):
+        data = bytearray(good)
+        for _ in range(rnd.randint(1, 4)):
+            data[rnd.randrange(len(data))] = rnd.randrange(256)
+        db.write_bytes(bytes(data))
+        r = client.get("/import")
+        assert r.status_code in (200, 409) and "Traceback" not in r.text
+        with bad.open("rb") as fh:
+            r = client.post("/import", files={"statement": ("bad.json", fh, "application/json")})
+        assert r.status_code == 200 and "Not imported" in r.text
