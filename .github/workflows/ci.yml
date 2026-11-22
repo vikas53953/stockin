@@ -107,6 +107,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           stockin alerts list
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          stockin alerts send
+          if ($LASTEXITCODE -ne 2) { Write-Error "alerts send before connect should exit 2"; exit 1 }
+          stockin doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 0
       - name: Live price download on Windows (informational; NSE may refuse CI machines)
         continue-on-error: true
         run: |

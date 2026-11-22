@@ -23,6 +23,6 @@ Each feature file has an H1 and one paragraph, followed by four H2s: `Sub-featur
 | [Local web app](./web.md) (`stockin web`) | Working |
 | Net worth (`stockin networth`) | Not built yet |
 | Thesis and review (`stockin thesis add`, `stockin review`) | Not built yet |
-| [Alerts](./alerts.md) (`stockin alerts check`, `stockin alerts list`) | Working (kept, not yet sent) |
+| [Alerts](./alerts.md) (`stockin alerts check/list/connect/send/test`) | Working |
 
 Each "not built" row gets its own file in the PR that builds it.

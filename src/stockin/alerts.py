@@ -9,11 +9,16 @@ holding and the verdicts now:
 
 - a holding whose call is add, trim or exit, and differs from the call
   remembered for it, gives one alert;
-- every other case gives none, and the call now is remembered.
+- every other case gives none, and the call now is remembered, except
+  review: review means a thesis or a price is missing for now, which says
+  nothing new about the holding, so the call before it is kept.
 
 So a verdict that stays trim alerts once, not every run; one that goes trim,
-hold, trim alerts twice (the hold re-arms it); and running twice on the same
-numbers sends nothing the second time.
+hold, trim alerts twice (the hold re-arms it); trim, review, trim alerts
+once; and running twice on the same numbers sends nothing the second time.
+
+An alert not yet sent is withdrawn when its holding's call changes again
+(trim, then hold before it went out): only what is still true is sent.
 
 alerts.db sits beside ledger.db and is private (0600) like it. It keeps the
 remembered calls and an outbox. `record` writes the new calls and the alerts
@@ -30,6 +35,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Self, get_args
+
+from pydantic import ValidationError
 
 from .facts import Isin, parse_isin
 from .money import Value
@@ -77,7 +84,7 @@ def changes(
     for v in sorted(now, key=lambda v: v.isin):
         if v.isin in after:
             raise ValueError(f"two verdicts for {v.isin}")
-        after[v.isin] = v.call
+        after[v.isin] = before.get(v.isin, v.call) if v.call == "review" else v.call
         if v.call in ACTIONABLE and before.get(v.isin) != v.call:
             alerts.append(Alert(isin=v.isin, name=v.name, call=v.call, because=v.because))
     return tuple(alerts), after
@@ -96,6 +103,11 @@ class AlertsDamaged(ValueError):
     """alerts.db exists but cannot be read as Stockin's."""
 
 
+class AlertsBlocked(AlertsDamaged):
+    """alerts.db is fine but cannot be used now: busy, read-only, or its
+    folder cannot be written. Nothing needs moving aside."""
+
+
 class AlertStore:
     def __init__(self, conn: sqlite3.Connection, path: Path) -> None:
         self._conn = conn
@@ -103,12 +115,17 @@ class AlertStore:
 
     @classmethod
     def open(cls, path: Path) -> Self:
+        if path.is_symlink() and not path.exists():
+            raise AlertsDamaged(f"{path} points at a file that is not there")
         if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(mode=0o600)  # what you hold and what you were told is private
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(mode=0o600)  # what you hold and what you were told is private
+            except OSError as exc:
+                raise AlertsBlocked(f"{path} could not be created ({exc.strerror})") from None
         if not path.is_file():
             raise AlertsDamaged(f"{path} is not a file")
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(path, timeout=10, isolation_level=None)
         store = cls(conn, path)
         try:
             with _guard(path), conn:
@@ -134,9 +151,13 @@ class AlertStore:
     def record(self, now: Iterable[Verdict], made: datetime) -> tuple[Sent, ...]:
         """Apply `changes` to the remembered calls and put its alerts in the
         outbox, in one transaction. Returns the alerts it added."""
-        alerts, after = changes(self.calls(), now)
         added: list[Sent] = []
         with _guard(self._path), self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")  # read and write as one, against a second check
+            alerts, after = changes(self.calls(), now)
+            for p in self.outbox(pending_only=True):
+                if after.get(p.alert.isin) != p.alert.call:  # no longer true: withdraw it
+                    self._conn.execute("DELETE FROM outbox WHERE id = ?", (p.id,))
             self._conn.execute("DELETE FROM calls")
             self._conn.executemany("INSERT INTO calls VALUES (?, ?)", sorted(after.items()))
             for a in alerts:
@@ -185,5 +206,17 @@ class AlertStore:
 def _guard(path: Path) -> Generator[None]:
     try:
         yield
+    except sqlite3.OperationalError as exc:
+        said = str(exc)
+        if (
+            "locked" in said
+            or "readonly" in said
+            or "read-only" in said
+            or "unable to open" in said
+        ):
+            raise AlertsBlocked(f"{path} could not be used now ({said})") from None
+        raise AlertsDamaged(f"{path} could not be read or written ({said})") from None
+    except ValidationError:
+        raise AlertsDamaged(f"{path} holds an alert Stockin cannot read") from None
     except (sqlite3.DatabaseError, ValueError, TypeError) as exc:
         raise AlertsDamaged(f"{path} could not be read or written ({exc})") from None
