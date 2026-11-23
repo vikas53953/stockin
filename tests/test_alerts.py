@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
@@ -113,11 +113,9 @@ def test_over_any_run_of_checks_each_alert_marks_a_change_and_none_repeats(
         assert len(sent.get(isin, [])) == want.get(isin, 0)
 
 
-_TRUTH = st.dictionaries(
-    st.sampled_from(ISINS), st.sampled_from(["add", "trim", "exit", "hold", "review", "doubt"])
-)
-"""What each holding's verdict is now; "doubt" is review because its price
-is in doubt (Verdict.unsure). A holding left out is no longer held."""
+_NOW = st.sampled_from(["add", "trim", "trim", "exit", "hold", "review", "doubt", "doubt", "sold"])
+"""A holding's verdict now; "doubt" is review because its price is in doubt
+(Verdict.unsure), "sold" means it is no longer held."""
 
 
 def _now_verdicts(truth: dict[Isin, str]) -> list[Verdict]:
@@ -137,9 +135,26 @@ def _now_verdicts(truth: dict[Isin, str]) -> list[Verdict]:
 
 @given(
     st.lists(
-        st.one_of(st.tuples(st.just("prices"), _TRUTH), st.just(("check",)), st.just(("send",))),
-        max_size=16,
+        st.one_of(
+            st.tuples(st.just("prices"), st.sampled_from(ISINS[:2]), _NOW),
+            st.just(("check",)),
+            st.just(("send",)),
+        ),
+        min_size=4,
+        max_size=24,
     )
+)
+# the verifier's R-1 shape: kept, then in doubt, then a send with no check
+@example([("prices", ISINS[0], "trim"), ("check",), ("prices", ISINS[0], "doubt"), ("send",)])
+# withdrawn while in doubt, then the same call again once it clears
+@example(
+    [
+        ("prices", ISINS[0], "trim"),
+        ("check",),
+        ("prices", ISINS[0], "doubt"),
+        ("check",),
+        ("prices", ISINS[0], "trim"),
+    ]
 )
 def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
     steps: list[tuple[object, ...]],
@@ -150,6 +165,7 @@ def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
 
     - no add or trim ever reaches Telegram while its holding's price is in
       doubt, whether the check that would withdraw it has run or not;
+    - a check leaves no add or trim pending for a holding in doubt;
     - nothing true is lost: after a last check and send, every holding
       whose call is add, trim or exit has that call as the last thing sent
       for it (a withdrawn add or trim is made again once the doubt clears).
@@ -175,9 +191,16 @@ def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
     with tempfile.TemporaryDirectory() as d, AlertStore.open(Path(d) / "alerts.db") as store:
         for step in steps:
             if step[0] == "prices":
-                truth = dict(step[1])  # type: ignore[call-overload]
+                isin, now = Isin(str(step[1])), str(step[2])
+                if now == "sold":
+                    truth.pop(isin, None)
+                else:
+                    truth[isin] = now
             elif step[0] == "check":
                 store.record(_now_verdicts(truth), made=T0)
+                for p in store.outbox(pending_only=True):
+                    if p.alert.call in ("add", "trim"):
+                        assert truth.get(p.alert.isin) != "doubt", p.alert
             else:
                 run_send(store)
         store.record(_now_verdicts(truth), made=T0)
