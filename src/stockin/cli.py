@@ -458,10 +458,11 @@ def _store_files(
 ) -> PricesReport:
     """Each file replaces what prices.db holds for its source and day, always:
     that is what lets the right file undo a damaged copy. A price more than
-    JUMP_FACTOR away from the last earlier one, or more than 20% from one of the same
-    source at most a week older, is held back unless
-    `accept_jumps`. A held fund's price that was stored for that day and is
-    not in the file is removed like the rest and reported (`left_out`)."""
+    JUMP_FACTOR away from the last earlier one, or more than 20% from the
+    last one of the same source, is held back unless `accept_jumps`, and
+    kept as held so verdicts know the price in use is in doubt. A held
+    fund's price that was stored for that day and is not in the file is
+    removed like the rest and reported (`left_out`)."""
     kept = changed = 0
     jumps: list[Jump] = []
     removed: list[Quote] = []
@@ -514,9 +515,11 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
             )
         if report.held:
             typer.echo(
-                "  a price that moved more than 20% from the same source's price a week old "
-                "or less, or more than double or less than half any earlier one, is held back. "
-                "If it is real (a split, a bonus), run again with --accept-jumps; "
+                "  a price that moved more than 20% from the same source's last price, "
+                "or more than double or less than half any earlier one, is held back, "
+                "and no add or trim is worked out while it is. If it is real (a split "
+                "or a bonus, a real move after a long break without prices, or a share "
+                "you sold and bought back months later), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again. An ETF's split is held "
                 "twice, once in the NAV file and once in the exchange file."
             )
@@ -541,7 +544,7 @@ AcceptJumps = Annotated[
     bool,
     typer.Option(
         "--accept-jumps",
-        help="Store prices even when they moved more than 20% in a week, or 2x at any time.",
+        help="Store prices even when they moved more than 20% from the last one, or 2x.",
     ),
 ]
 
@@ -683,7 +686,7 @@ def verdicts_cmd(as_json: JsonFlag = False) -> None:
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as store:
-        found = for_book(book, prices, store.all())
+        found = for_book(book, prices, store.all(), _today())
     days = [q.on for q in prices.quotes.values()]
     view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
     if as_json:
@@ -1001,7 +1004,7 @@ def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as theses:
-        found = for_book(book, prices, theses.all())
+        found = for_book(book, prices, theses.all(), _today())
     days = [q.on for q in prices.quotes.values()]
     with _open_alerts() as store:
         added = store.record(found, made=india_now())
