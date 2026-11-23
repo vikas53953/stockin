@@ -550,3 +550,64 @@ def test_the_review_sentence_says_what_accept_jumps_accepts() -> None:
     ).values()
     assert "stockin prices import FILE --accept-jumps" in said
     assert "every price held in today's files" in said
+
+
+def test_two_senders_at_once_send_each_alert_once(tmp_path: Path) -> None:
+    """#32 verifier R-1 (from #39): each message goes out under alerts.db's
+    write lock, so a second sender waits, then sees it is no longer pending."""
+    import time
+
+    path = tmp_path / "alerts.db"
+    with AlertStore.open(path) as store:
+        store.record([v(INFY, "trim")], made=T0)
+    got: list[str] = []
+    lock = threading.Lock()
+
+    def slow(method: str, params: dict[str, str]) -> Reply:
+        time.sleep(0.4)
+        with lock:
+            got.append(params["text"])
+        return Reply(ok=True)
+
+    def run() -> None:
+        with AlertStore.open(path) as s:
+            deliver(s, slow, 1, lambda: T0)
+
+    threads = [threading.Thread(target=run) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(got) == 1
+    with AlertStore.open(path) as store:
+        (kept,) = store.outbox()
+        assert kept.sent == T0
+
+
+def test_a_check_during_a_send_does_not_withdraw_what_went_out(tmp_path: Path) -> None:
+    """#32 verifier R-2 (from #39): a check that would withdraw the alert
+    waits for the send to finish; the sent alert stays in the history."""
+    path = tmp_path / "alerts.db"
+    with AlertStore.open(path) as store:
+        store.record([v(INFY, "trim")], made=T0)
+    checker: list[threading.Thread] = []
+
+    def during(method: str, params: dict[str, str]) -> Reply:
+        def check() -> None:
+            with AlertStore.open(path) as s:
+                s.record([v(INFY, "hold")], made=T0)
+
+        t = threading.Thread(target=check)
+        t.start()
+        checker.append(t)
+        t.join(0.5)  # the check is blocked by the send's lock
+        assert t.is_alive()
+        return Reply(ok=True)
+
+    with AlertStore.open(path) as store:
+        done, err = deliver(store, during, 1, lambda: T0)
+    checker[0].join()
+    assert err is None and len(done) == 1
+    with AlertStore.open(path) as store:
+        (kept,) = store.outbox()
+        assert kept.sent == T0 and store.calls() == {INFY: "hold"}

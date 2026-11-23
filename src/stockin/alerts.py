@@ -20,6 +20,16 @@ once; and running twice on the same numbers sends nothing the second time.
 An alert not yet sent is withdrawn when its holding's call changes again
 (trim, then hold before it went out): only what is still true is sent.
 
+An add or trim not yet sent is also withdrawn when its holding's verdict
+turns review because its price is in doubt (a newer price was held back, or
+the price is more than 7 days old: thesis.doubts). It was worked out from a
+price Stockin is no longer sure of, and the true call may be hold (#39
+verify-3 R-1). The holding's call is then remembered as review, so once the
+price is settled the true call alerts afresh. An exit is kept: a broken
+thesis does not depend on a price. A sender also holds back such an add or
+trim when it finds the price in doubt before any check has run
+(notify.deliver).
+
 alerts.db sits beside ledger.db and is private (0600) like it. It keeps the
 remembered calls and an outbox. `record` writes the new calls and the alerts
 they make in one transaction, so a crash leaves either both or neither. A
@@ -30,7 +40,7 @@ delivered stays pending and is tried again on the next run.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +56,10 @@ ACTIONABLE: frozenset[Call] = frozenset({"add", "trim", "exit"})
 """The calls that ask you to do something. Hold and review never alert:
 review means a thesis or a price is missing, which `stockin verdicts`
 already says."""
+
+FROM_PRICE: frozenset[Call] = frozenset({"add", "trim"})
+"""The calls worked out from a weight, so from prices: never sent while a
+price is in doubt. Exit comes from a broken thesis and is always sent."""
 
 
 class Alert(Value):
@@ -125,7 +139,9 @@ class AlertStore:
                 raise AlertsBlocked(f"{path} could not be created ({exc.strerror})") from None
         if not path.is_file():
             raise AlertsDamaged(f"{path} is not a file")
-        conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+        # a sender holds the write lock while one message is in flight
+        # (`sending`, up to notify's 20 s timeout): wait longer than that
+        conn = sqlite3.connect(path, timeout=30, isolation_level=None)
         store = cls(conn, path)
         try:
             with _guard(path), conn:
@@ -150,13 +166,21 @@ class AlertStore:
 
     def record(self, now: Iterable[Verdict], made: datetime) -> tuple[Sent, ...]:
         """Apply `changes` to the remembered calls and put its alerts in the
-        outbox, in one transaction. Returns the alerts it added."""
+        outbox, in one transaction. Returns the alerts it added. A pending
+        add or trim whose holding is now unsure is withdrawn, and the
+        holding's call is remembered as review (see the module's note)."""
+        now = tuple(now)
+        unsure = {v.isin for v in now if v.unsure}
         added: list[Sent] = []
         with _guard(self._path), self._conn:
             self._conn.execute("BEGIN IMMEDIATE")  # read and write as one, against a second check
             alerts, after = changes(self.calls(), now)
             for p in self.outbox(pending_only=True):
-                if after.get(p.alert.isin) != p.alert.call:  # no longer true: withdraw it
+                isin = p.alert.isin
+                if p.alert.call in FROM_PRICE and isin in unsure:  # from a price in doubt
+                    self._conn.execute("DELETE FROM outbox WHERE id = ?", (p.id,))
+                    after[isin] = "review"  # so the true call alerts once it is settled
+                elif after.get(isin) != p.alert.call:  # no longer true: withdraw it
                     self._conn.execute("DELETE FROM outbox WHERE id = ?", (p.id,))
             self._conn.execute("DELETE FROM calls")
             self._conn.executemany("INSERT INTO calls VALUES (?, ?)", sorted(after.items()))
@@ -188,9 +212,36 @@ class AlertStore:
 
     def mark_sent(self, id: int, when: datetime) -> None:
         with _guard(self._path), self._conn:
-            self._conn.execute(
-                "UPDATE outbox SET sent = ? WHERE id = ? AND sent IS NULL", (when.isoformat(), id)
-            )
+            self._mark(id, when)
+
+    def _mark(self, id: int, when: datetime) -> None:
+        self._conn.execute(
+            "UPDATE outbox SET sent = ? WHERE id = ? AND sent IS NULL", (when.isoformat(), id)
+        )
+
+    @contextmanager
+    def sending(self, id: int) -> Generator[Callable[[datetime], None] | None]:
+        """Hold alerts.db's write lock while one alert is sent. Yields a
+        function that marks it sent, or None if it is no longer pending (a
+        second sender got there first, or a check withdrew it, for example
+        because its price is now in doubt). While the lock is held no other
+        sender can send it and no check can withdraw it, so an alert is sent
+        once, a withdrawn one never, and a sent one stays in the history.
+        The lock lasts one message, not the whole outbox (#32 verifier R-1,
+        R-2)."""
+        with _guard(self._path):
+            self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            with _guard(self._path):
+                row = self._conn.execute(
+                    "SELECT 1 FROM outbox WHERE id = ? AND sent IS NULL", (id,)
+                ).fetchone()
+            yield (lambda when: self._mark(id, when)) if row else None
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        with _guard(self._path):
+            self._conn.execute("COMMIT")
 
     def close(self) -> None:
         self._conn.close()

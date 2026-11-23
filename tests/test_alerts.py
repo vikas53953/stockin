@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from stockin.alerts import ACTIONABLE, AlertsBlocked, AlertsDamaged, AlertStore, changes, text
 from stockin.cli import app as cli
 from stockin.facts import Isin, parse_isin
+from stockin.notify import Reply, deliver
 from stockin.thesis import Call, Verdict
 
 FIX = Path(__file__).parent / "fixtures"
@@ -110,6 +111,80 @@ def test_over_any_run_of_checks_each_alert_marks_a_change_and_none_repeats(
             sent.setdefault(a.isin, []).append(a.call)
     for isin in ISINS:
         assert len(sent.get(isin, [])) == want.get(isin, 0)
+
+
+_TRUTH = st.dictionaries(
+    st.sampled_from(ISINS), st.sampled_from(["add", "trim", "exit", "hold", "review", "doubt"])
+)
+"""What each holding's verdict is now; "doubt" is review because its price
+is in doubt (Verdict.unsure). A holding left out is no longer held."""
+
+
+def _now_verdicts(truth: dict[Isin, str]) -> list[Verdict]:
+    return [
+        Verdict(
+            isin=i,
+            name=str(i),
+            call="review" if c == "doubt" else c,  # type: ignore[arg-type]
+            because=f"{i} {c}",
+            weight=None,
+            target=None,
+            unsure=c == "doubt",
+        )
+        for i, c in truth.items()
+    ]
+
+
+@given(
+    st.lists(
+        st.one_of(st.tuples(st.just("prices"), _TRUTH), st.just(("check",)), st.just(("send",))),
+        max_size=16,
+    )
+)
+def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
+    steps: list[tuple[object, ...]],
+) -> None:
+    """#39 verify-3 R-1. Prices change (and with them each verdict), checks
+    and sends interleave in any order; a send knows only today's verdicts,
+    not whether a check has run since. Then:
+
+    - no add or trim ever reaches Telegram while its holding's price is in
+      doubt, whether the check that would withdraw it has run or not;
+    - nothing true is lost: after a last check and send, every holding
+      whose call is add, trim or exit has that call as the last thing sent
+      for it (a withdrawn add or trim is made again once the doubt clears).
+    """
+    import tempfile
+
+    truth: dict[Isin, str] = {}
+    last: dict[Isin, Call] = {}
+
+    def run_send(store: AlertStore) -> None:
+        doubt = frozenset(i for i, c in truth.items() if c == "doubt")
+
+        def ok(method: str, params: dict[str, str]) -> Reply:
+            call, isin = params["text"].split("\n")[0].split(" ")
+            if call.lower() in ("add", "trim"):
+                assert truth.get(Isin(isin)) != "doubt", (call, isin)
+            last[Isin(isin)] = call.lower()  # type: ignore[assignment]
+            return Reply(ok=True)
+
+        _, err = deliver(store, ok, 1, lambda: T0, doubt)
+        assert err is None
+
+    with tempfile.TemporaryDirectory() as d, AlertStore.open(Path(d) / "alerts.db") as store:
+        for step in steps:
+            if step[0] == "prices":
+                truth = dict(step[1])  # type: ignore[call-overload]
+            elif step[0] == "check":
+                store.record(_now_verdicts(truth), made=T0)
+            else:
+                run_send(store)
+        store.record(_now_verdicts(truth), made=T0)
+        run_send(store)
+    for isin, call in truth.items():
+        if call in ("add", "trim", "exit"):
+            assert last.get(isin) == call, (isin, call, last)
 
 
 def test_hold_re_arms_a_trim() -> None:

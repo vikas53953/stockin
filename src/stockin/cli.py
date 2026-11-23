@@ -21,7 +21,7 @@ import typer
 from pydantic import TypeAdapter
 
 from . import __version__, notify
-from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
+from .alerts import FROM_PRICE, AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights, tenths_of
@@ -678,15 +678,20 @@ class VerdictsView(Value):
     verdicts: tuple[Verdict, ...]
 
 
-@app.command("verdicts")
-def verdicts_cmd(as_json: JsonFlag = False) -> None:
-    """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
+def _verdicts_now() -> tuple[tuple[Verdict, ...], PriceBook]:
+    """Today's verdict for every holding, and the prices they came from."""
     with _open_ledger() as ledger:
         book = ledger.book()
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as store:
-        found = for_book(book, prices, store.all(), _today())
+        return for_book(book, prices, store.all(), _today()), prices
+
+
+@app.command("verdicts")
+def verdicts_cmd(as_json: JsonFlag = False) -> None:
+    """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
+    found, prices = _verdicts_now()
     days = [q.on for q in prices.quotes.values()]
     view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
     if as_json:
@@ -998,13 +1003,9 @@ SendFlag = Annotated[bool, typer.Option("--send", help="Also send pending alerts
 @alerts_app.command("check")
 def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
     """Work out today's verdicts and keep an alert for each one that newly turned
-    into add, trim or exit. Running it again on the same numbers adds nothing."""
-    with _open_ledger() as ledger:
-        book = ledger.book()
-    held = frozenset(h.isin for h in book.holdings())
-    prices = _price_book(held) or PriceBook(quotes={})
-    with _open_theses() as theses:
-        found = for_book(book, prices, theses.all(), _today())
+    into add, trim or exit. Running it again on the same numbers adds nothing.
+    An add or trim not yet sent is withdrawn while its price is in doubt."""
+    found, prices = _verdicts_now()
     days = [q.on for q in prices.quotes.values()]
     with _open_alerts() as store:
         added = store.record(found, made=india_now())
@@ -1017,7 +1018,7 @@ def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
         typer.echo(f"{len(added)} new alert{'s' if len(added) > 1 else ''}:")
         _alert_lines(added)
     if send:
-        _send_pending(quiet=as_json)
+        _send_pending(_unsure(found), quiet=as_json)
 
 
 @alerts_app.command("list")
@@ -1053,14 +1054,26 @@ def _transport(bot: notify.Bot) -> notify.Transport:
         raise _fail(str(exc)) from None
 
 
-def _send_pending(quiet: bool = False) -> None:
+def _unsure(found: tuple[Verdict, ...]) -> frozenset[Isin]:
+    return frozenset(v.isin for v in found if v.unsure)
+
+
+def _send_pending(unsure: frozenset[Isin], quiet: bool = False) -> None:
     bot = _bot()
     call = _transport(bot)
     with _open_alerts() as store:
-        done, error = notify.deliver(store, call, bot.chat, india_now)
-        left = len(store.outbox(pending_only=True))
+        done, error = notify.deliver(store, call, bot.chat, india_now, unsure)
+        pending = store.outbox(pending_only=True)
+    left = len(pending)
     n = len(done)
     typer.echo(f"sent {n} alert{'' if n == 1 else 's'} to Telegram", err=quiet)
+    for s in pending:
+        if error is None and s.alert.call in FROM_PRICE and s.alert.isin in unsure:
+            typer.echo(
+                f"  not sent: {s.alert.call.upper()} {s.alert.name}, its price is in doubt "
+                "(see `stockin verdicts`); the next `stockin alerts check` withdraws it",
+                err=quiet,
+            )
     if error is not None:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"  {left} still pending; they go out on the next send", err=True)
@@ -1069,8 +1082,12 @@ def _send_pending(quiet: bool = False) -> None:
 
 @alerts_app.command("send")
 def alerts_send() -> None:
-    """Send every pending alert to Telegram, oldest first. Exit 1 if any is left pending."""
-    _send_pending()
+    """Send every pending alert to Telegram, oldest first. Exit 1 if any is left pending.
+
+    An add or trim whose holding's price is in doubt now is held back."""
+    _bot()  # "connect it first" before anything else is read
+    found, _ = _verdicts_now()
+    _send_pending(_unsure(found))
 
 
 @alerts_app.command("connect")

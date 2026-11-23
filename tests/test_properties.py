@@ -732,7 +732,7 @@ _DAY0 = date(2026, 3, 1)
     st.integers(10_000_000, 10**10),
     st.integers(0, 30),
     st.integers(0, 30),
-    st.one_of(st.none(), st.tuples(st.integers(-30, 30), st.integers(10_000_000, 10**10))),
+    st.one_of(st.none(), st.tuples(st.integers(-30, 30), st.integers(1, 60_000))),
     st.one_of(st.none(), st.integers(0, 10_000)),
     st.one_of(st.none(), st.integers(0, 10_000)),
 )
@@ -745,12 +745,13 @@ def test_no_add_trim_or_hold_is_worked_out_from_a_price_that_is_not_sure(
     infy_target: int | None,
     tcs_target: int | None,
 ) -> None:
-    """A price is not sure when a newer one was held back (then every weight
-    is in doubt: each is a share of the same total) or when it is more than
-    7 days old (then its own holding is). Such a holding's verdict is
-    review, and its sentence carries the price, its day and what to run.
-    Every other verdict is exactly what the same prices give when none is
-    in doubt."""
+    """A price is not sure when a newer one was held back and is still more
+    than 20% from it (then every weight is in doubt: each is a share of the
+    same total) or when it is more than 7 days old (then its own holding
+    is). Such a holding's verdict is review, marked unsure (so no add or
+    trim kept for it is sent), and its sentence carries the price, its day
+    and what to run. Every other verdict is exactly what the same prices
+    give when none is in doubt."""
     from stockin.prices import rupee_text
 
     statement = cas.from_casparser(_TWO, "sha")
@@ -763,7 +764,10 @@ def test_no_add_trim_or_hold_is_worked_out_from_a_price_that_is_not_sure(
         return Quote(isin=isin, on=on, price=Price(micro_rupees=micros), source="bhavcopy")
 
     quotes = {a: q(a, infy, infy_age), b: q(b, tcs, tcs_age)}
-    kept = None if held is None else q(a, held[1], infy_age - held[0])
+    # the held price is drawn as basis points of the price in use, so it
+    # lands inside the band (no longer a doubt; #39 verify-3 C-1) as well
+    # as beyond it
+    kept = None if held is None else q(a, max(1, infy * held[1] // 10_000), infy_age - held[0])
     assume(kept is None or kept.on <= today)
     theses = {
         i: Thesis(isin=i, why="synthetic", target=None if t is None else Bps(t), written=_DAY0)
@@ -771,21 +775,25 @@ def test_no_add_trim_or_hold_is_worked_out_from_a_price_that_is_not_sure(
     }
     fresh = {i: x.model_copy(update={"on": today}) for i, x in quotes.items()}
     plain = {v.isin: v for v in for_book(book, PriceBook(quotes=fresh), theses, today)}
-    doubted = kept is not None and kept.on >= quotes[a].on
+    doubted = (
+        kept is not None
+        and kept.on >= quotes[a].on
+        and Fraction(abs(kept.price.micro_rupees - infy), infy) > Fraction(1, 5)
+    )
     prices = PriceBook(quotes=quotes, held={} if kept is None else {a: kept})
     for v in for_book(book, prices, theses, today):
         used = quotes[v.isin]
         if doubted:
             assert kept is not None
-            assert v.call == "review" and "INFOSYS" in v.because
+            assert v.call == "review" and v.unsure and "INFOSYS" in v.because
             assert rupee_text(kept.price) in v.because and str(kept.on) in v.because
             assert "--accept-jumps" in v.because
         elif (today - used.on).days > 7:
-            assert v.call == "review" and "stockin prices fetch" in v.because
+            assert v.call == "review" and v.unsure and "stockin prices fetch" in v.because
             assert rupee_text(used.price) in v.because and str(used.on) in v.because
         else:
             assert v == plain[v.isin]
-            assert v.call != "review"
+            assert v.call != "review" and not v.unsure
 
 
 # ---------------------------------------------------------------- net worth

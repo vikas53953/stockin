@@ -103,13 +103,18 @@ class PriceBook(Value):
 
     def doubted(self, isin: Isin) -> Quote | None:
         """The held-back price that puts this ISIN's price in doubt: one at
-        least as new as the price in use. None once a price as new has been
-        stored (--accept-jumps, or a later file back within the band). A
-        held price was not stored, so the price in use can be months old
-        and wrong by any amount; no add or trim may be worked out from it
+        least as new as the price in use and still more than the band away
+        from it. None once a price as new has been stored (--accept-jumps,
+        or a later file back within the band), or once the price in use
+        agrees with the held one (an older day's file accepted while a
+        later day's like price is still held; #39 verify-3 C-1). A held
+        price was not stored, so the price in use can be months old and
+        wrong by any amount; no add or trim may be worked out from it
         (#39 verifier round 2, R-1)."""
         held, used = self.held.get(isin), self.quotes.get(isin)
-        if held is None or (used is not None and used.on > held.on):
+        if held is None or used is None:
+            return held
+        if used.on > held.on or not beyond_band(used.price, held.price):
             return None
         return held
 

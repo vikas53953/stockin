@@ -76,6 +76,7 @@ class Verdict(Value):
     target: Bps | None
     weight_text: str = ""  # the weight exactly as `because` prints it
     target_text: str = ""  # the target exactly as `because` prints it
+    unsure: bool = False  # review because the price is in doubt (`doubts`)
 
 
 def _hundredths(bps: int) -> str:
@@ -108,7 +109,9 @@ def verdict(
     w = weight.bps if weight else None
     target = thesis.target if thesis else None
 
-    def out(call: Call, because: str, now: str = "", aim: str = "") -> Verdict:
+    def out(
+        call: Call, because: str, now: str = "", aim: str = "", unsure: bool = False
+    ) -> Verdict:
         return Verdict(
             isin=isin,
             name=name,
@@ -118,6 +121,7 @@ def verdict(
             target=target,
             weight_text=now,
             target_text=aim,
+            unsure=unsure,
         )
 
     def p(bps: int) -> str:
@@ -132,7 +136,7 @@ def verdict(
     if w is None:
         return out("review", f"{name} has no price yet, so its weight is unknown.")
     if doubt is not None:
-        return out("review", doubt)
+        return out("review", doubt, unsure=True)
     if target is not None:
         band = p(BAND)[:-1] + " points"
         gap = tenths_of(w, 10_000) - tenths_of(target, 10_000)  # as the sentence shows it
@@ -234,7 +238,15 @@ def doubts(names: Mapping[Isin, str], prices: PriceBook, today: date) -> dict[Is
 
 
 def _accept(price: Price) -> str:
-    return f"If {rupee_text(price)} is right, run `stockin prices fetch --accept-jumps`."
+    """What settles it. `prices fetch --accept-jumps` stores every price held
+    in today's files, not only this one (#39 verify-3 C-6), so it says so and
+    names the narrower way: importing the one file with the flag."""
+    return (
+        f"If {rupee_text(price)} is right, import its file with "
+        "`stockin prices import FILE --accept-jumps`, or run "
+        "`stockin prices fetch --accept-jumps`, which stores every price held "
+        "in today's files."
+    )
 
 
 def for_book(
