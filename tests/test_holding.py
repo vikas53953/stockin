@@ -264,6 +264,38 @@ def test_every_dashboard_link_opens_a_holding_page(web: TestClient, data: Path) 
     assert "Why you hold it:" in page and f'href="/thesis/{INFY}"' in page
 
 
+def test_the_pages_make_no_call_from_a_price_older_than_a_week(
+    web: TestClient, data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#39 verify-2: the home and the holding page judge a price's age
+    against today like the CLI does. The close is from 2026-11-14: on the
+    21st the 10% target gives trim everywhere, on the 22nd review, with the
+    same sentence (the price, its day, what to run) on the page and the CLI."""
+    import json
+    from datetime import UTC, datetime
+
+    with ThesisStore.open(data / "theses.db") as store:
+        store.put(_t(1000))
+
+    def said() -> tuple[str, str, dict[str, str]]:
+        v = json.loads(runner.invoke(cli, ["verdicts", "--json"]).output)["verdicts"]
+        return (
+            web.get("/").text,
+            web.get(f"/holding/{INFY}").text,
+            next(x for x in v if x["isin"] == INFY),
+        )
+
+    home, page, cli_says = said()
+    assert cli_says["call"] == "trim"
+    assert "▼ trim" in home and "call-trim" in page
+    monkeypatch.setattr("stockin.prices._now", lambda: datetime(2026, 11, 22, 12, tzinfo=UTC))
+    home, page, cli_says = said()
+    assert cli_says["call"] == "review" and "more than 7 days ago" in cli_says["because"]
+    assert "₹1,500.55" in cli_says["because"] and "2026-11-14" in cli_says["because"]
+    assert "▼ trim" not in home and "call-trim" not in page and "call-review" in page
+    assert cli_says["because"].replace("'", "&#39;") in page
+
+
 def test_a_holding_you_do_not_have_is_404_and_damage_is_said(web: TestClient, data: Path) -> None:
     assert web.get("/holding/INE000000000").status_code == 404
     (data / "prices.db").write_bytes(b"not a database at all, just text, long enough to matter")
