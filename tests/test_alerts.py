@@ -187,6 +187,25 @@ def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
             assert last.get(isin) == call, (isin, call, last)
 
 
+def test_an_exit_kept_before_a_price_was_in_doubt_is_kept_and_sent(tmp_path: Path) -> None:
+    """Author survivors M3, M5: an exit does not come from a price, so a
+    holding turning unsure neither withdraws a pending exit nor holds it
+    back at the send."""
+    unsure = v(INFY, "review").model_copy(update={"unsure": True})
+    got: list[str] = []
+
+    def ok(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        (ex,) = store.record([v(INFY, "exit")], made=T0)
+        store.record([unsure], made=T0)
+        assert [s.id for s in store.outbox(pending_only=True)] == [ex.id]
+        done, err = deliver(store, ok, 1, lambda: T0, {INFY})
+    assert err is None and [s.id for s in done] == [ex.id] and got[0].startswith("EXIT ")
+
+
 def test_hold_re_arms_a_trim() -> None:
     a1, s = changes({}, [v(INFY, "trim")])
     a2, s = changes(s, [v(INFY, "trim")])
