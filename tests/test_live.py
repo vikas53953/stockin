@@ -942,3 +942,218 @@ def test_watch_once_strikes_the_token_from_an_unexpected_error(
     r = runner.invoke(cli, ["watch", "--once"])
     assert r.exit_code == 1 and "error: this check failed (RuntimeError" in r.output
     assert TOKEN not in r.output and "***" in r.output
+
+
+# ------------------------------------------------------------ #39 verifier, round 2
+
+BEES = parse_isin("INF204KB14I2")
+
+
+def _demat(tmp: Path, start: str, end: str, shares: dict[str, tuple[str, str]]) -> str:
+    """A synthetic NSDL statement, the shape of the verifier's `demat-rebuy-*`."""
+    body = {
+        "accounts": [
+            {
+                "name": "Test Broker",
+                "type": "NSDL Demat Account",
+                "dp_id": "IN300000",
+                "client_id": "10000001",
+                "folios": 0,
+                "balance": "0",
+                "owners": [{"name": "Test Investor", "PAN": "AAAAA0000A"}],
+                "equities": [
+                    {"name": name, "isin": isin, "num_shares": n, "price": "1", "value": n}
+                    for isin, (name, n) in shares.items()
+                ],
+                "mutual_funds": [],
+                "bonds": [],
+            }
+        ],
+        "statement_period": {"from": start, "to": end},
+        "investor_info": {
+            "name": "Test Investor",
+            "email": "test@example.invalid",
+            "address": "-",
+            "mobile": "-",
+        },
+        "file_type": "NSDL",
+        "nps": None,
+        "parse_warnings": [],
+    }
+    path = tmp / f"demat-{end}.json"
+    path.write_text(json.dumps(body))
+    return str(path)
+
+
+def _bhav(tmp: Path, day: str, closes: dict[str, tuple[str, str]]) -> str:
+    header = (FIX / "eod" / "bhavcopy-sample.csv").read_text().splitlines()[0]
+    rows = [
+        f"{day},{day},CM,NSE,STK,1,{isin},{symbol},EQ,,,,,{symbol} LTD,1,1,1,"
+        f"{close},{close},1,,{close},,,1,1,1,F1,1,,,,,"
+        for isin, (symbol, close) in closes.items()
+    ]
+    path = tmp / f"bhavcopy-{day}.csv"
+    path.write_text("\n".join([header, *rows]) + "\n")
+    return str(path)
+
+
+class Rebuy:
+    """The verifier's flowK, value for value: Infosys held in February at a
+    close of ₹1,900.00, sold in March, bought back in October; the statement
+    is imported on Monday 2026-11-16 after the close, and that evening's
+    price file says the true close, ₹1,500.55."""
+
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.tmp, self.now = tmp, datetime(2026, 3, 2, 19, 0, tzinfo=IST)
+        self.live = {"INFY": "1502.00", "NIFTYBEES": "288.00"}
+        monkeypatch.setenv("STOCKIN_DATA", str(tmp / "data"))
+        monkeypatch.setattr(prices_mod, "_now", lambda: self.now)
+        monkeypatch.setattr(
+            live, "fetch_symbols", lambda: ({INFY: "INFY", BEES: "NIFTYBEES"}, True)
+        )
+        monkeypatch.setattr(live, "fetch_quote", self.quote)
+        self.phone = Phone(monkeypatch)
+        infy, bees = ("INFOSYS LIMITED", "12"), ("NIPPON INDIA ETF NIFTY 50 BEES", "40")
+        both = {str(INFY): infy, str(BEES): bees}
+        self.run("import", "cas", _demat(tmp, "01-Feb-2026", "28-Feb-2026", both))
+        self.run("prices", "import", self.file("2026-02-27", "1900.00"))
+        self.at(2026, 4, 3, 19)
+        self.run("import", "cas", _demat(tmp, "01-Mar-2026", "31-Mar-2026", {str(BEES): bees}))
+        self.at(2026, 11, 16, 19)
+        self.run("import", "cas", _demat(tmp, "01-Oct-2026", "31-Oct-2026", both))
+        self.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "58")
+
+    def at(self, *when: int) -> None:
+        self.now = datetime(*when, tzinfo=IST)  # type: ignore[misc]
+
+    def file(self, day: str, infy: str, bees: str = "287.61") -> str:
+        closes = {str(INFY): ("INFY", infy), str(BEES): ("NIFTYBEES", bees)}
+        return _bhav(self.tmp, day, closes)
+
+    def quote(self, isin: Isin, symbol: str) -> LiveQuote:
+        at = self.now - timedelta(minutes=1)
+        return live.parse_chart(chart(f"{symbol}.NS", self.live[symbol], at), isin, symbol)
+
+    def run(self, *args: str, code: int = 0) -> str:
+        r = runner.invoke(cli, list(args))
+        assert r.exit_code == code, r.output
+        return r.output
+
+
+def test_a_share_bought_back_after_months_sends_no_trim_on_its_old_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#39 verifier round 2, R-1. The evening file's true close is held
+    against February's, so verdicts were worked out from ₹1,900.00 (66.5%,
+    TRIM; the true weight is 61.0%, HOLD) and the next morning's
+    `watch --once --send` sent that TRIM to Telegram."""
+    flow = Rebuy(tmp_path, monkeypatch)
+    flow.at(2026, 11, 16, 20)
+    evening = flow.file("2026-11-16", "1500.55")
+    out = flow.run("prices", "import", evening, code=1)
+    assert "NOT stored: INE009A01021 was 1,900.00 on 2026-02-27" in out
+    assert "this file says 1,500.55 on 2026-11-16" in out
+    said = flow.run("verdicts")
+    assert "TRIM" not in said and "66.5%" not in said
+    (infy,) = [line for line in said.splitlines() if "INFOSYS" in line]
+    assert infy.startswith("REVIEW ")
+    for part in ("₹1,500.55", "2026-11-16", "₹1,900.00", "2026-02-27", "--accept-jumps"):
+        assert part in infy, part
+    flow.run("alerts", "check", "--send")
+    flow.at(2026, 11, 17, 9, 20)
+    out = flow.run("watch", "--once", "--send")
+    assert "1 live, 1 at close, 0 new alerts" in out, out
+    assert flow.phone.got == []
+    view = json.loads(flow.run("prices", "live", "--json"))
+    (kept,) = view["end_of_day"]
+    assert kept["isin"] == INFY and "too old" not in kept["reason"]
+    for part in ("INFY", "₹1,500.55", "2026-11-16", "--accept-jumps"):
+        assert part in kept["reason"], part
+    # the owner looks, and accepts the price: now the true weight speaks
+    flow.run("prices", "import", evening, "--accept-jumps")
+    assert "HOLD   INFOSYS is 61.0% of your money" in flow.run("verdicts")
+    out = flow.run("watch", "--once", "--send")
+    assert "2 live, 0 at close, 0 new alerts" in out, out
+    assert flow.phone.got == []
+
+
+def test_a_held_price_sends_no_add_for_the_other_holding_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same flow from the other side: with Infosys at February's
+    ₹1,900.00 the ETF looks like 33.5% of the money, below a 39% target by
+    more than 5 points (ADD); at the true close it is 39.0% (HOLD). Every
+    weight depends on the price that is held, so none drives a call."""
+    flow = Rebuy(tmp_path, monkeypatch)
+    flow.run("thesis", "set", BEES, "--why", "synthetic: the index", "--target", "39")
+    flow.at(2026, 11, 16, 20)
+    evening = flow.file("2026-11-16", "1500.55")
+    flow.run("prices", "import", evening, code=1)
+    said = flow.run("verdicts")
+    assert "ADD" not in said and "TRIM" not in said
+    (bees,) = [line for line in said.splitlines() if "BEES" in line]
+    assert bees.startswith("REVIEW ") and "INFOSYS" in bees and "₹1,500.55" in bees
+    flow.run("alerts", "check", "--send")
+    flow.at(2026, 11, 17, 9, 20)
+    flow.run("watch", "--once", "--send")
+    assert flow.phone.got == []
+    flow.run("prices", "import", evening, "--accept-jumps")
+    said = flow.run("verdicts")
+    assert "HOLD   INFOSYS is 61.0%" in said and "is 39.0% of your money" in said
+    assert "ADD" not in said and "TRIM" not in said
+
+
+def test_a_split_held_for_a_week_makes_no_call_and_says_what_to_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 1's R-1 from the verdict side: the split stays out every
+    evening, and while it does, no add or trim is worked out; the morning
+    after the stored close turns 8 days old nothing is sent either."""
+    flow = Rebuy(tmp_path, monkeypatch)
+    flow.at(2026, 11, 13, 20)
+    flow.run("prices", "import", flow.file("2026-11-13", "1500.55"), "--accept-jumps")
+    flow.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "70")
+    assert "ADD    INFOSYS is 61.0%" in flow.run("verdicts")
+    for day in (16, 17, 18, 19, 20, 23):
+        flow.at(2026, 11, day, 20)
+        out = flow.run("prices", "import", flow.file(f"2026-11-{day}", "750.30"), code=1)
+        assert "NOT stored: INE009A01021 was 1,500.55 on 2026-11-13" in out
+        said = flow.run("verdicts")
+        assert "REVIEW INFOSYS" in said and "ADD" not in said and "TRIM" not in said
+        assert f"₹750.30 on 2026-11-{day}" in said
+        flow.run("alerts", "check", "--send")
+    flow.at(2026, 11, 24, 9, 20)
+    flow.live["INFY"] = "752.00"
+    out = flow.run("watch", "--once", "--send")
+    assert "1 live, 1 at close, 0 new alerts" in out
+    assert flow.phone.got == []
+
+
+def test_a_price_older_than_a_week_makes_no_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no price file at all for more than BAND_DAYS, nothing is held,
+    but the last close is still not a price to act on: REVIEW, with the
+    price, its day and what to run. Seven days old is still used."""
+    flow = Rebuy(tmp_path, monkeypatch)
+    flow.at(2026, 11, 13, 20)
+    flow.run("prices", "import", flow.file("2026-11-13", "1500.55"), "--accept-jumps")
+    flow.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "70")
+    flow.at(2026, 11, 20, 20)
+    assert "ADD    INFOSYS is 61.0%" in flow.run("verdicts")
+    flow.at(2026, 11, 21, 20)
+    said = flow.run("verdicts")
+    assert "ADD" not in said
+    (infy,) = [line for line in said.splitlines() if "INFOSYS" in line]
+    assert infy.startswith("REVIEW ") and "--accept-jumps" not in infy
+    for part in ("₹1,500.55", "2026-11-13", "more than 7 days", "stockin prices fetch"):
+        assert part in infy, part
+    flow.run("alerts", "check", "--send")
+    assert flow.phone.got == []
+
+
+def test_a_price_beyond_any_real_one_names_its_symbol() -> None:
+    """#39 verify-2 survivor M8."""
+    data = chart("INFY.NS", "123456789.00", MON)
+    with pytest.raises(live.LiveRejected, match=r"^INFY: 123456789\.00 is beyond any real price$"):
+        live.parse_chart(data, INFY, "INFY")
