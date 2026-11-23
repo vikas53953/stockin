@@ -57,9 +57,11 @@ from .prices import (
     PriceStore,
     Quote,
     beyond_band,
+    india_day,
     india_now,
     india_today,
     left_out,
+    rupee_text,
 )
 from .sources import cas, eod, live
 from .store import REBUILD_HINT, ImportReport, Ledger, LedgerMissing, LedgerOutdated, LedgerWriter
@@ -478,10 +480,11 @@ def _store_files(
 ) -> PricesReport:
     """Each file replaces what prices.db holds for its source and day, always:
     that is what lets the right file undo a damaged copy. A price more than
-    JUMP_FACTOR away from the last earlier one, or more than 20% from one of the same
-    source at most a week older, is held back unless
-    `accept_jumps`. A held fund's price that was stored for that day and is
-    not in the file is removed like the rest and reported (`left_out`)."""
+    JUMP_FACTOR away from the last earlier one, or more than 20% from the
+    last one of the same source, is held back unless `accept_jumps`, and
+    kept as held so verdicts know the price in use is in doubt. A held
+    fund's price that was stored for that day and is not in the file is
+    removed like the rest and reported (`left_out`)."""
     kept = changed = 0
     jumps: list[Jump] = []
     removed: list[Quote] = []
@@ -546,8 +549,10 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
         if report.held:
             typer.echo(
                 "  a price that moved more than 20% from the same source's last price, "
-                "or more than double or less than half any earlier one, is held back. "
-                "If it is real (a split, a bonus), run again with --accept-jumps; "
+                "or more than double or less than half any earlier one, is held back, "
+                "and no add or trim is worked out while it is. If it is real (a split "
+                "or a bonus, a real move after a long break without prices, or a share "
+                "you sold and bought back months later), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again. An ETF's split is held "
                 "twice, once in the NAV file and once in the exchange file."
             )
@@ -572,7 +577,7 @@ AcceptJumps = Annotated[
     bool,
     typer.Option(
         "--accept-jumps",
-        help="Store prices even when they moved more than 20% in a week, or 2x at any time.",
+        help="Store prices even when they moved more than 20% from the last one, or 2x.",
     ),
 ]
 
@@ -714,7 +719,7 @@ def verdicts_cmd(as_json: JsonFlag = False) -> None:
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as store:
-        found = for_book(book, prices, store.all())
+        found = for_book(book, prices, store.all(), _today())
     days = [q.on for q in prices.quotes.values()]
     view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
     if as_json:
@@ -1032,7 +1037,7 @@ def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as theses:
-        found = for_book(book, prices, theses.all())
+        found = for_book(book, prices, theses.all(), _today())
     days = [q.on for q in prices.quotes.values()]
     with _open_alerts() as store:
         added = store.record(found, made=india_now())
@@ -1215,16 +1220,28 @@ def _symbols(now: datetime) -> tuple[dict[Isin, str], bool]:
     return found, complete
 
 
-def _unchecked(symbol: str, q: live.LiveQuote, close: Quote | None, today: date) -> str | None:
+def _unchecked(
+    symbol: str, q: live.LiveQuote, close: Quote | None, today: date, held: Quote | None = None
+) -> str | None:
     """Why a live price cannot stand in for the close, or None when it can:
     it is used only next to a close from the last week that it is within
-    NSE's widest daily band of (see live.BAND_PERCENT, live.MAX_CLOSE_AGE)."""
+    NSE's widest daily band of (see live.BAND_PERCENT, live.MAX_CLOSE_AGE).
+    `held` is the end-of-day price held back since that close, if any: then
+    fetching again would only hold it again, so the reason names it and
+    what settles it (#39 verify-2 C-1)."""
     if close is None:
         return (
             f"{symbol}: no end-of-day price yet to check a live price against; "
             "run `stockin prices fetch`"
         )
-    if today - close.on > live.MAX_CLOSE_AGE:
+    old = today - close.on > live.MAX_CLOSE_AGE
+    if held is not None and (old or beyond_band(close.price, q.price)):
+        return (
+            f"{symbol}: the newest end-of-day price, {rupee_text(held.price)} on {held.on}, "
+            f"was not stored (it is too far from {rupee_text(close.price)} on {close.on}); "
+            f"if {rupee_text(held.price)} is right, run `stockin prices fetch --accept-jumps`"
+        )
+    if old:
         return (
             f"{symbol}: the last close is from {close.on}, too old to check a live "
             "price against; run `stockin prices fetch`"
@@ -1294,7 +1311,7 @@ def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
                 )
             )
             continue
-        unchecked = _unchecked(symbol, q, eod_book.get(isin), today)
+        unchecked = _unchecked(symbol, q, eod_book.get(isin), today, eod_book.doubted(isin))
         if unchecked is not None:
             fallbacks.append(Fallback(isin=isin, reason=unchecked))
             continue
@@ -1304,7 +1321,7 @@ def _live_pass(book: Book) -> tuple[PriceBook, LiveView]:
     view = LiveView(
         at=now, market_open=live.market_open(now), live=tuple(got), end_of_day=tuple(fallbacks)
     )
-    return PriceBook.best(quotes), view
+    return PriceBook.best(quotes, eod_book.held.values()), view
 
 
 def _print_live(view: LiveView, book: Book) -> None:
@@ -1475,7 +1492,7 @@ def _watch_pass(send: bool) -> None:
         book = ledger.book()
     prices, view = _live_pass(book)
     with _open_theses() as theses:
-        found = for_book(book, prices, theses.all())
+        found = for_book(book, prices, theses.all(), india_day(view.at))
     with _open_alerts() as store:
         added = store.record(found, made=view.at)
     typer.echo(

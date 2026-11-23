@@ -135,7 +135,7 @@ def holding_page(
     inst = book.instrument(isin)
     ws, _, _ = weights(book, prices)
     w = next((x for x in ws if x.isin == isin), None)
-    verdict = next(v for v in for_book(book, prices, theses) if v.isin == isin)
+    verdict = next(v for v in for_book(book, prices, theses, today) if v.isin == isin)
     thesis = theses.get(isin)
     quote = prices.get(isin)
     value = prices.value(isin, pos.qty)

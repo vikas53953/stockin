@@ -15,6 +15,7 @@ from stockin.facts import parse_isin
 from stockin.money import Money, Price, Qty
 from stockin.prices import (
     OLDEST_FILE_DAY,
+    Jump,
     PriceBook,
     PriceFile,
     PricesDamaged,
@@ -884,7 +885,7 @@ def _damage(kind: str, db: Path) -> None:
     elif kind == "schema-not-utf8":  # verifier 7 (F1): a traceback, not the hint
         _store_with_rows(db, n=3)
         data = db.read_bytes()
-        assert data.count(b"CHECK (micro_rupees") == 1
+        assert data.count(b"CHECK (micro_rupees") == 2  # the quotes table and the held one
         db.write_bytes(data.replace(b"CHECK (micro_rupees", b"\xc3HECK (micro_rupees"))
     elif kind == "key-out-of-order":  # verifier 7 (F2): lookups froze a stale price
         with PriceStore.open(db, write=True) as store:
@@ -1926,3 +1927,143 @@ def test_doctor_fails_and_import_refuses_a_file_with_no_tables(
     r = runner.invoke(app, ["prices", "import", str(EOD / "NAVAll-sample.txt")])
     assert r.exit_code == 2 and "Traceback" not in r.output
     assert path.read_bytes() == bytes(data)
+
+
+# ---------------------------------------------- what is held is kept (#39 verify-2)
+
+_INFY = "INE009A01021"
+
+
+def test_a_held_price_is_kept_out_far_beyond_forty_days(tmp_path: Path) -> None:
+    """#39 verify-2 C-3: the "however old" promise was pinned only up to 40
+    days, so an age limit of 60 survived. Two months, a year and five years
+    after the last stored close, the split is still held."""
+    first = date(2020, 1, 1)
+    base = _q(_INFY, first, "1500.55", "bhavcopy")
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.replace(_file(base))
+        for gap in (41, 61, 366, 1827):
+            new = _q(_INFY, first + timedelta(days=gap), "750.30", "bhavcopy")
+            assert store.take(_file(new)) == (0, (Jump(quote=new, last=base),)), gap
+            assert store.book([base.isin]).get(base.isin) == base
+
+
+def test_what_is_held_is_kept_once_and_cleared_when_accepted(tmp_path: Path) -> None:
+    """What a file said and was not stored stays in prices.db, so readers
+    can tell the price in use is in doubt. The same file again changes
+    nothing; --accept-jumps (or a file that no longer jumps) clears it and
+    leaves prices.db as if the price had never been held."""
+    base = _q(_INFY, date(2026, 11, 13), "1500.55", "bhavcopy")
+    split = _q(_INFY, date(2026, 11, 16), "750.30", "bhavcopy")
+    later = _q(_INFY, date(2026, 11, 17), "752.10", "bhavcopy")
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.replace(_file(base))
+        clean = store.digest()
+        assert store.book([base.isin]).held == {}
+        store.take(_file(split))
+        held = store.digest()
+        assert held != clean
+        store.take(_file(split))
+        assert store.digest() == held
+        book = store.book([base.isin])
+        assert book.held == {base.isin: split} and book.doubted(base.isin) == split
+        assert book.get(base.isin) == base and store.count() == 1
+        store.take(_file(later))
+        assert store.book([base.isin]).doubted(base.isin) == later  # the newest one held
+        assert store.book([base.isin], on_or_before=split.on).held == {base.isin: split}
+        store.take(_file(later), accept_jumps=True)
+        book = store.book([base.isin])
+        assert book.get(base.isin) == later and book.doubted(base.isin) is None
+        store.take(_file(split), accept_jumps=True)
+    with PriceStore.open(tmp_path / "plain.db", write=True) as plain:
+        for q in (base, split, later):
+            plain.replace(_file(q))
+        want = plain.digest()
+    assert PriceStore.open(tmp_path / "prices.db").digest() == want
+
+
+def test_a_file_that_no_longer_jumps_clears_its_held_price(tmp_path: Path) -> None:
+    """The right file after a damaged copy of the same day undoes the hold too."""
+    base = _q(_INFY, date(2026, 11, 13), "1500.55", "bhavcopy")
+    damaged = _q(_INFY, date(2026, 11, 16), "15005.50", "bhavcopy")
+    right = _q(_INFY, date(2026, 11, 16), "1512.00", "bhavcopy")
+    with PriceStore.open(tmp_path / "prices.db", write=True) as store:
+        store.replace(_file(base))
+        store.take(_file(damaged))
+        assert store.book([base.isin]).doubted(base.isin) == damaged
+        assert store.take(_file(right)) == (1, ())
+        book = store.book([base.isin])
+        assert book.held == {} and book.get(base.isin) == right
+
+
+@pytest.mark.parametrize(
+    ("used", "held", "doubted"),
+    [(13, 16, True), (16, 16, True), (17, 16, False), (None, 16, True), (13, None, False)],
+)
+def test_a_price_is_in_doubt_while_a_held_one_is_at_least_as_new(
+    used: int | None, held: int | None, doubted: bool
+) -> None:
+    def q(day: int | None, price: str, source: str) -> list[Quote]:
+        return [] if day is None else [_q(_INFY, date(2026, 11, day), price, source)]
+
+    book = PriceBook.best(q(used, "1500.55", "bhavcopy"), q(held, "750.30", "amfi"))
+    isin = parse_isin(_INFY)
+    assert (book.doubted(isin) is not None) is doubted
+    if doubted:
+        assert book.doubted(isin) == q(held, "750.30", "amfi")[0]
+
+
+def _old_prices_db(path: Path) -> None:
+    """A prices.db as Stockin wrote it before held prices were kept: one table."""
+    import sqlite3
+
+    import stockin.prices as prices_mod
+
+    with sqlite3.connect(path) as c:
+        c.execute(prices_mod._SCHEMA)  # pyright: ignore[reportPrivateUsage]
+        c.execute(
+            "INSERT INTO quotes VALUES (?, 'bhavcopy', '2026-11-13', '2026-11-13', 1500550000)",
+            (_INFY,),
+        )
+    c.close()
+
+
+def test_a_prices_db_from_before_held_prices_reads_and_is_upgraded(tmp_path: Path) -> None:
+    db = tmp_path / "prices.db"
+    _old_prices_db(db)
+    base = _q(_INFY, date(2026, 11, 13), "1500.55", "bhavcopy")
+    before = db.read_bytes()
+    with PriceStore.open(db) as store:
+        book = store.book([base.isin])
+        assert book.get(base.isin) == base and book.held == {}
+        old_digest = store.digest()
+    assert db.read_bytes() == before  # reading writes nothing
+    split = _q(_INFY, date(2026, 11, 16), "750.30", "bhavcopy")
+    with PriceStore.open(db, write=True) as store:
+        assert store.digest() == old_digest  # the same prices, the same digest
+        assert store.take(_file(split))[1]
+    with PriceStore.open(db) as store:
+        assert store.book([base.isin]).doubted(base.isin) == split
+
+
+@pytest.mark.parametrize("kind", ["unknown-source", "bad-date", "price-zero", "foreign-table"])
+def test_a_damaged_held_table_is_damage_like_the_prices_table(tmp_path: Path, kind: str) -> None:
+    """The held prices are read into every book, so the scan on open covers
+    their table too: a row Stockin could not have written is refused."""
+    import sqlite3
+
+    import stockin.prices as prices_mod
+
+    db = tmp_path / "prices.db"
+    _old_prices_db(db)
+    with sqlite3.connect(db) as c:
+        if kind == "foreign-table":
+            c.execute("CREATE TABLE held(isin, source, file_day, on_date, micro_rupees)")
+        else:
+            c.execute("PRAGMA ignore_check_constraints=ON")
+            c.execute(prices_mod._HELD_SCHEMA)  # pyright: ignore[reportPrivateUsage]
+            c.execute("INSERT INTO held VALUES (?,?,?,?,?)", _ROWS[kind])
+    c.close()
+    for write in (False, True):
+        with pytest.raises(PricesDamaged):
+            PriceStore.open(db, write=write)

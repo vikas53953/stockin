@@ -1053,6 +1053,9 @@ def test_a_share_bought_back_after_months_sends_no_trim_on_its_old_close(
     out = flow.run("prices", "import", evening, code=1)
     assert "NOT stored: INE009A01021 was 1,900.00 on 2026-02-27" in out
     assert "this file says 1,500.55 on 2026-11-16" in out
+    # C-2: the hold text covers this case, not only a split or a damaged file
+    for part in ("no add or trim is worked out", "a long break", "bought back", "--accept-jumps"):
+        assert part in out, part
     said = flow.run("verdicts")
     assert "TRIM" not in said and "66.5%" not in said
     (infy,) = [line for line in said.splitlines() if "INFOSYS" in line]
@@ -1114,6 +1117,7 @@ def test_a_split_held_for_a_week_makes_no_call_and_says_what_to_do(
     flow.run("prices", "import", flow.file("2026-11-13", "1500.55"), "--accept-jumps")
     flow.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "70")
     assert "ADD    INFOSYS is 61.0%" in flow.run("verdicts")
+    flow.live["INFY"] = "752.00"
     for day in (16, 17, 18, 19, 20, 23):
         flow.at(2026, 11, day, 20)
         out = flow.run("prices", "import", flow.file(f"2026-11-{day}", "750.30"), code=1)
@@ -1122,11 +1126,18 @@ def test_a_split_held_for_a_week_makes_no_call_and_says_what_to_do(
         assert "REVIEW INFOSYS" in said and "ADD" not in said and "TRIM" not in said
         assert f"₹750.30 on 2026-11-{day}" in said
         flow.run("alerts", "check", "--send")
+        # the next morning, inside the week: the live price is beyond the band
+        flow.at(2026, 11, day + 1, 9, 20)
+        (kept,) = json.loads(flow.run("prices", "live", "--json"))["end_of_day"]
+        assert f"₹750.30 on 2026-11-{day}" in kept["reason"], kept
+        assert "--accept-jumps" in kept["reason"] and "a bad quote" not in kept["reason"]
     flow.at(2026, 11, 24, 9, 20)
-    flow.live["INFY"] = "752.00"
     out = flow.run("watch", "--once", "--send")
     assert "1 live, 1 at close, 0 new alerts" in out
     assert flow.phone.got == []
+    (kept,) = json.loads(flow.run("prices", "live", "--json"))["end_of_day"]
+    assert "₹750.30 on 2026-11-23" in kept["reason"] and "--accept-jumps" in kept["reason"]
+    assert "₹1,500.55 on 2026-11-13" in kept["reason"] and "too old" not in kept["reason"]
 
 
 def test_a_price_older_than_a_week_makes_no_call(

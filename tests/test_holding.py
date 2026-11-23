@@ -102,7 +102,7 @@ def test_the_page_agrees_with_the_dashboard_and_the_verdict(data: Path) -> None:
     w = next(x for x in ws if x.isin == INFY)
     assert h.value == rupees(w.value)  # the tile's value is the page's value
     assert h.bar is not None and h.bar.weight_text == pct(tenths_of(w.bps, 10_000))
-    assert h.verdict == next(v for v in for_book(book, prices, theses) if v.isin == INFY)
+    assert h.verdict == next(v for v in for_book(book, prices, theses, TODAY) if v.isin == INFY)
     held = [x for x in book.holdings() if x.isin == INFY]
     assert len(h.accounts) == len(held)
     assert sum(Qty.parse(a.units).micros for a in h.accounts) == Qty.parse(h.units).micros

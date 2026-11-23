@@ -266,6 +266,8 @@ def test_a_file_that_is_not_a_database_is_said_not_raised(tmp_path: Path) -> Non
 @pytest.fixture
 def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
+    # the fixture's closes are from 2026-11-14, and a price older than a week gives no call
+    monkeypatch.setattr("stockin.prices._now", lambda: datetime(2026, 11, 18, 12, tzinfo=UTC))
     for name in ("mf-2026-01.json", "demat-2026-02.json"):
         r = runner.invoke(cli, ["import", "cas", str(FIX / "cas" / name)])
         assert r.exit_code == 0, r.output
