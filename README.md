@@ -107,7 +107,7 @@ Each holding gets one verdict, with the reason beside it:
 | exit-check | Price below your invalidation level |
 | review-due | Your review date has passed |
 
-Verdicts use end-of-day prices from `stockin prices fetch` (public AMFI and NSE files). A price that moved more than 20% from the same source's last price, or more than double or less than half any earlier one, is held back until you check it (a split, a bonus or a damaged file) and rerun with `--accept-jumps`. A held price stays held however many evenings pass; after a long break, real moves beyond 20% are held too and need the same one-time `--accept-jumps`.
+Verdicts use end-of-day prices from `stockin prices fetch` (public AMFI and NSE files). A price that moved more than 20% from the same source's last price, or more than double or less than half any earlier one, is held back until you check it (a split, a bonus or a damaged file) and rerun with `--accept-jumps`. A held price stays held however many evenings pass; after a long break, or for a share you sold and bought back months later, real moves beyond 20% are held too and need the same one-time `--accept-jumps`. While a price is held, the older price is still the one in use, so no add or trim is worked out: every holding with a thesis shows REVIEW with the held price, its date and the command to run, and nothing is sent to Telegram for it. A holding whose price is more than 7 days old shows REVIEW too, until `stockin prices fetch` brings a newer one.
 
 ### 8. Get alerts and ask questions
 

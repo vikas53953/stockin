@@ -7,7 +7,7 @@ import json
 import os
 import re
 import stat
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -231,8 +231,6 @@ def test_a_damaged_theses_file_is_refused_not_misread(tmp_path: Path, damage: st
 @pytest.fixture
 def data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("STOCKIN_DATA", str(tmp_path))
-    # the fixture's closes are from 2026-11-14, and a price older than a week gives no call
-    monkeypatch.setattr("stockin.prices._now", lambda: datetime(2026, 11, 18, 12, tzinfo=UTC))
     for name in ("mf-2026-01.json", "demat-2026-02.json"):
         r = runner.invoke(cli, ["import", "cas", str(FIX / "cas" / name)])
         assert r.exit_code == 0, r.output

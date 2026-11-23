@@ -1163,6 +1163,28 @@ def test_a_price_older_than_a_week_makes_no_call(
     assert flow.phone.got == []
 
 
+def test_watch_makes_no_call_from_a_close_older_than_a_week(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule on the path that sends with no one looking. On the 7th
+    day the close is still used (with the live price laid over it) and a
+    true ADD goes out; from the 8th day the live price is not used and the
+    old close gives no call, whatever the target says."""
+    flow = Rebuy(tmp_path, monkeypatch)
+    flow.at(2026, 11, 13, 20)
+    flow.run("prices", "import", flow.file("2026-11-13", "1500.55"), "--accept-jumps")
+    flow.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "70")
+    flow.at(2026, 11, 20, 9, 20)
+    out = flow.run("watch", "--once", "--send")
+    assert "2 live, 0 at close, 1 new alert" in out and "ADD" in out
+    assert [text.splitlines()[0] for text in flow.phone.got] == ["ADD INFOSYS"]
+    flow.at(2026, 11, 23, 9, 20)
+    flow.run("thesis", "set", INFY, "--why", "synthetic: cash machine", "--target", "50")
+    out = flow.run("watch", "--once", "--send")
+    assert "0 live, 2 at close, 0 new alerts" in out, out
+    assert len(flow.phone.got) == 1  # no TRIM at 61% from a close 10 days old
+
+
 def test_a_price_beyond_any_real_one_names_its_symbol() -> None:
     """#39 verify-2 survivor M8."""
     data = chart("INFY.NS", "123456789.00", MON)
