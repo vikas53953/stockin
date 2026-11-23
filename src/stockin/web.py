@@ -234,7 +234,7 @@ def create_app(db: Path, port: int) -> FastAPI:
         days = sorted(q.on for q in priced.quotes.values())
         theses, theses_damaged = read_theses()
         insights = all_insights(book, priced, today)
-        verdicts = for_book(book, priced, theses) if theses_damaged is None else ()
+        verdicts = for_book(book, priced, theses, today) if theses_damaged is None else ()
         return page(
             "home.html",
             groups=_groups(book, holdings, prices),

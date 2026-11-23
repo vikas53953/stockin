@@ -11,13 +11,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
 from stockin.alerts import ACTIONABLE, AlertsBlocked, AlertsDamaged, AlertStore, changes, text
 from stockin.cli import app as cli
 from stockin.facts import Isin, parse_isin
+from stockin.notify import Reply, deliver
 from stockin.thesis import Call, Verdict
 
 FIX = Path(__file__).parent / "fixtures"
@@ -110,6 +111,122 @@ def test_over_any_run_of_checks_each_alert_marks_a_change_and_none_repeats(
             sent.setdefault(a.isin, []).append(a.call)
     for isin in ISINS:
         assert len(sent.get(isin, [])) == want.get(isin, 0)
+
+
+_NOW = st.sampled_from(["add", "trim", "trim", "exit", "hold", "review", "doubt", "doubt", "sold"])
+"""A holding's verdict now; "doubt" is review because its price is in doubt
+(Verdict.unsure), "sold" means it is no longer held."""
+
+
+def _now_verdicts(truth: dict[Isin, str]) -> list[Verdict]:
+    return [
+        Verdict(
+            isin=i,
+            name=str(i),
+            call="review" if c == "doubt" else c,  # type: ignore[arg-type]
+            because=f"{i} {c}",
+            weight=None,
+            target=None,
+            unsure=c == "doubt",
+        )
+        for i, c in truth.items()
+    ]
+
+
+@given(
+    st.lists(
+        st.one_of(
+            st.tuples(st.just("prices"), st.sampled_from(ISINS[:2]), _NOW),
+            st.just(("check",)),
+            st.just(("send",)),
+        ),
+        min_size=4,
+        max_size=24,
+    )
+)
+# the verifier's R-1 shape: kept, then in doubt, then a send with no check
+@example([("prices", ISINS[0], "trim"), ("check",), ("prices", ISINS[0], "doubt"), ("send",)])
+# withdrawn while in doubt, then the same call again once it clears
+@example(
+    [
+        ("prices", ISINS[0], "trim"),
+        ("check",),
+        ("prices", ISINS[0], "doubt"),
+        ("check",),
+        ("prices", ISINS[0], "trim"),
+    ]
+)
+def test_no_add_or_trim_is_sent_while_its_price_is_in_doubt(
+    steps: list[tuple[object, ...]],
+) -> None:
+    """#39 verify-3 R-1. Prices change (and with them each verdict), checks
+    and sends interleave in any order; a send knows only today's verdicts,
+    not whether a check has run since. Then:
+
+    - no add or trim ever reaches Telegram while its holding's price is in
+      doubt, whether the check that would withdraw it has run or not;
+    - a check leaves no add or trim pending for a holding in doubt;
+    - nothing true is lost: after a last check and send, every holding
+      whose call is add, trim or exit has that call as the last thing sent
+      for it (a withdrawn add or trim is made again once the doubt clears).
+    """
+    import tempfile
+
+    truth: dict[Isin, str] = {}
+    last: dict[Isin, Call] = {}
+
+    def run_send(store: AlertStore) -> None:
+        doubt = frozenset(i for i, c in truth.items() if c == "doubt")
+
+        def ok(method: str, params: dict[str, str]) -> Reply:
+            call, isin = params["text"].split("\n")[0].split(" ")
+            if call.lower() in ("add", "trim"):
+                assert truth.get(Isin(isin)) != "doubt", (call, isin)
+            last[Isin(isin)] = call.lower()  # type: ignore[assignment]
+            return Reply(ok=True)
+
+        _, err = deliver(store, ok, 1, lambda: T0, doubt)
+        assert err is None
+
+    with tempfile.TemporaryDirectory() as d, AlertStore.open(Path(d) / "alerts.db") as store:
+        for step in steps:
+            if step[0] == "prices":
+                isin, now = Isin(str(step[1])), str(step[2])
+                if now == "sold":
+                    truth.pop(isin, None)
+                else:
+                    truth[isin] = now
+            elif step[0] == "check":
+                store.record(_now_verdicts(truth), made=T0)
+                for p in store.outbox(pending_only=True):
+                    if p.alert.call in ("add", "trim"):
+                        assert truth.get(p.alert.isin) != "doubt", p.alert
+            else:
+                run_send(store)
+        store.record(_now_verdicts(truth), made=T0)
+        run_send(store)
+    for isin, call in truth.items():
+        if call in ("add", "trim", "exit"):
+            assert last.get(isin) == call, (isin, call, last)
+
+
+def test_an_exit_kept_before_a_price_was_in_doubt_is_kept_and_sent(tmp_path: Path) -> None:
+    """Author survivors M3, M5: an exit does not come from a price, so a
+    holding turning unsure neither withdraws a pending exit nor holds it
+    back at the send."""
+    unsure = v(INFY, "review").model_copy(update={"unsure": True})
+    got: list[str] = []
+
+    def ok(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        (ex,) = store.record([v(INFY, "exit")], made=T0)
+        store.record([unsure], made=T0)
+        assert [s.id for s in store.outbox(pending_only=True)] == [ex.id]
+        done, err = deliver(store, ok, 1, lambda: T0, {INFY})
+    assert err is None and [s.id for s in done] == [ex.id] and got[0].startswith("EXIT ")
 
 
 def test_hold_re_arms_a_trim() -> None:
@@ -352,3 +469,43 @@ def test_cli_says_a_damaged_alerts_file_without_a_traceback(data: Path) -> None:
         r = runner.invoke(cli, args)
         assert r.exit_code == 2 and "move alerts.db aside" in r.output
         assert "Traceback" not in r.output
+
+
+def test_a_doubt_that_arises_while_a_send_runs_stops_the_rest(tmp_path: Path) -> None:
+    """#40 verifier R-1: the doubt was worked out once, before the loop, so a
+    price held while a slow send ran (an EXIT going out first) did not stop
+    the TRIM after it. Doubt is asked again for each add or trim, right
+    before it is sent."""
+    other = ISINS[1]
+    doubt: set[Isin] = set()
+    got: list[str] = []
+
+    def slow(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        doubt.add(INFY)  # the evening file is held while this message goes out
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        store.record([v(other, "exit")], made=T0)  # kept first, so sent first
+        store.record([v(other, "exit"), v(INFY, "trim")], made=T0)
+        done, err = deliver(store, slow, 1, lambda: T0, lambda: frozenset(doubt))
+        pending = store.outbox(pending_only=True)
+    assert err is None and len(done) == 1 and got[0].startswith("EXIT ")
+    assert [s.alert.call for s in pending] == ["trim"]
+
+
+def test_when_doubt_cannot_be_worked_out_only_exits_go(tmp_path: Path) -> None:
+    """#40 verifier R-2: prices.db or theses.db unreadable. An exit does not
+    come from a price, so it still goes; every add and trim waits."""
+    got: list[str] = []
+
+    def ok(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        store.record([v(ISINS[1], "exit"), v(INFY, "trim")], made=T0)
+        done, err = deliver(store, ok, 1, lambda: T0, lambda: None)
+        pending = store.outbox(pending_only=True)
+    assert err is None and [s.alert.call for s in done] == ["exit"]
+    assert [s.alert.call for s in pending] == ["trim"] and len(got) == 1

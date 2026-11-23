@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal, Self
 
@@ -34,8 +34,8 @@ from .insights import (
     tenths_of,
     weights,
 )
-from .money import Bps, Value
-from .prices import PriceBook
+from .money import Bps, Price, Value
+from .prices import BAND_DAYS, PriceBook, rupee_text
 
 Call = Literal["add", "trim", "exit", "hold", "review"]
 
@@ -76,6 +76,7 @@ class Verdict(Value):
     target: Bps | None
     weight_text: str = ""  # the weight exactly as `because` prints it
     target_text: str = ""  # the target exactly as `because` prints it
+    unsure: bool = False  # review because the price is in doubt (`doubts`)
 
 
 def _hundredths(bps: int) -> str:
@@ -98,15 +99,19 @@ def verdict(
     weight: Weight | None,
     thesis: Thesis | None,
     money: str = "your money",
+    doubt: str | None = None,
 ) -> Verdict:
     """Your rule, applied in this order: a broken thesis says exit; no
-    thesis or no price says review; with a target, more than BAND above it
+    thesis or no price says review, and so does a price that is not sure
+    (`doubt` is the sentence that says why, see `doubts`); with a target, more than BAND above it
     says trim and more than BAND below says add; with no target, above the
     25% line says trim; otherwise hold."""
     w = weight.bps if weight else None
     target = thesis.target if thesis else None
 
-    def out(call: Call, because: str, now: str = "", aim: str = "") -> Verdict:
+    def out(
+        call: Call, because: str, now: str = "", aim: str = "", unsure: bool = False
+    ) -> Verdict:
         return Verdict(
             isin=isin,
             name=name,
@@ -116,6 +121,7 @@ def verdict(
             target=target,
             weight_text=now,
             target_text=aim,
+            unsure=unsure,
         )
 
     def p(bps: int) -> str:
@@ -129,6 +135,8 @@ def verdict(
         return out("review", f"No thesis yet: write why you hold {name} to get a verdict.")
     if w is None:
         return out("review", f"{name} has no price yet, so its weight is unknown.")
+    if doubt is not None:
+        return out("review", doubt, unsure=True)
     if target is not None:
         band = p(BAND)[:-1] + " points"
         gap = tenths_of(w, 10_000) - tenths_of(target, 10_000)  # as the sentence shows it
@@ -168,17 +176,84 @@ def verdicts(
     weights: tuple[Weight, ...],
     theses: dict[Isin, Thesis],
     money: str = "your money",
+    doubt: Mapping[Isin, str] | None = None,
 ) -> tuple[Verdict, ...]:
     """One verdict per held ISIN, the ones that ask for action first."""
     by = {w.isin: w for w in weights}
     order = {"exit": 0, "trim": 1, "add": 2, "review": 3, "hold": 4}
-    found = [verdict(i, n, by.get(i), theses.get(i), money) for i, n in names.items()]
+    why = doubt or {}
+    found = [verdict(i, n, by.get(i), theses.get(i), money, why.get(i)) for i, n in names.items()]
     found.sort(key=lambda v: (order[v.call], -(v.weight or 0), v.isin))
     return tuple(found)
 
 
-def for_book(book: Book, prices: PriceBook, theses: dict[Isin, Thesis]) -> tuple[Verdict, ...]:
-    """A verdict for every ISIN you hold, from the same weights the map uses."""
+MAX_PRICE_AGE = timedelta(days=BAND_DAYS)
+"""How old a price may be and still give add, trim or hold: the same week
+as the price band (prices.BAND_DAYS)."""
+
+
+def doubts(names: Mapping[Isin, str], prices: PriceBook, today: date) -> dict[Isin, str]:
+    """Why a holding's price is not one to act on, as the sentence its
+    verdict says; a holding with a sure price is not in the result.
+
+    A verdict can reach the phone with no one looking, so it is worked out
+    only from prices Stockin is sure of (#39 verifier round 2, R-1):
+
+    - a newer price that a file gave was held back (PriceBook.doubted). The
+      price in use may then be wrong by any amount, and every weight is a
+      share of the same total, so no holding gets add, trim or hold until
+      the owner has settled it;
+    - the price is more than MAX_PRICE_AGE old. Nothing says it is wrong,
+      so only its own holding waits.
+
+    Each sentence is built from the quotes themselves: the price, its day,
+    and the command that settles it."""
+    held = {i: h for i in sorted(names) if (h := prices.doubted(i)) is not None}
+    out: dict[Isin, str] = {}
+    for isin, name in names.items():
+        used = prices.get(isin)
+        if used is None:
+            continue  # "no price yet" says it already
+        if isin in held:
+            new = held[isin]
+            out[isin] = (
+                f"{name}'s newest price, {rupee_text(new.price)} on {new.on}, was not stored: "
+                f"it is too far from {rupee_text(used.price)} on {used.on}, the price in use. "
+                f"No add or trim is worked out until that is settled. {_accept(new.price)}"
+            )
+        elif held:
+            other, new = next(iter(held.items()))
+            out[isin] = (
+                f"{name}'s weight is not sure: the newest price of {names[other]}, "
+                f"{rupee_text(new.price)} on {new.on}, was not stored, and every weight is a "
+                f"share of the same total. {_accept(new.price)}"
+            )
+        elif today - used.on > MAX_PRICE_AGE:
+            out[isin] = (
+                f"{name}'s price, {rupee_text(used.price)}, is from {used.on}, more than "
+                f"{BAND_DAYS} days ago, so no add or trim is worked out from it. "
+                "Run `stockin prices fetch`."
+            )
+    return out
+
+
+def _accept(price: Price) -> str:
+    """What settles it. `prices fetch --accept-jumps` stores every price held
+    in today's files, not only this one (#39 verify-3 C-6), so it says so and
+    names the narrower way: importing the one file with the flag."""
+    return (
+        f"If {rupee_text(price)} is right, import its file with "
+        "`stockin prices import FILE --accept-jumps`, or run "
+        "`stockin prices fetch --accept-jumps`, which stores every price held "
+        "in today's files."
+    )
+
+
+def for_book(
+    book: Book, prices: PriceBook, theses: dict[Isin, Thesis], today: date
+) -> tuple[Verdict, ...]:
+    """A verdict for every ISIN you hold, from the same weights the map
+    uses. `today` is India's day: a price is too old, or not, against it."""
     ws, _, unpriced = weights(book, prices)
     names: dict[Isin, str] = {}
     for pos in book.positions():
@@ -186,7 +261,7 @@ def for_book(book: Book, prices: PriceBook, theses: dict[Isin, Thesis]) -> tuple
         names[pos.isin] = short_name(inst.name) if inst else pos.isin
     # weights are shares of what has a price; say so while anything has none
     money = "your priced money" if unpriced and ws else "your money"
-    return verdicts(names, ws, theses, money)
+    return verdicts(names, ws, theses, money, doubts(names, prices, today))
 
 
 _SCHEMA = """

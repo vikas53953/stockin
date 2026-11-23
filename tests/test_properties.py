@@ -48,6 +48,7 @@ from stockin.networth import (
 from stockin.prices import PriceBook, PriceFile, PriceStore, Quote, is_jump, left_out
 from stockin.sources import cas, eod
 from stockin.store import Ledger, LedgerWriter
+from stockin.thesis import Thesis, for_book
 
 # ------------------------------------------------------------------- money
 
@@ -667,6 +668,132 @@ def test_no_held_price_leaves_a_day_unreported_and_the_earlier_file_puts_it_back
         assert all(q.isin not in after for q in gone)
         a.take(first, accept_jumps=True)
         assert a.digest() == want
+
+
+# ---------------------------------------------------------------- a price not sure
+# #39 verifier round 2: what a file said and Stockin did not store must stay
+# out however many files follow, and no add or trim may be worked out from
+# the price it left in use. The oracle here is plain arithmetic on the
+# drawn prices, never `is_jump`.
+
+_FAR = st.one_of(st.integers(1, 7_999), st.integers(12_001, 60_000))
+"""A move in basis points of the stored price: beyond 20% either way."""
+
+
+@given(
+    st.sampled_from(["amfi", "bhavcopy"]),
+    st.integers(10_000_000, 10**10),
+    _FAR,
+    st.lists(st.tuples(st.integers(1, 300), st.integers(-200, 200)), min_size=1, max_size=10),
+)
+def test_a_held_price_stays_held_through_any_later_files_of_its_source(
+    source: str, stored: int, far: int, later: list[tuple[int, int]]
+) -> None:
+    """Round 2 C-3. One price is stored; every later file of the same source
+    says a price more than 20% away from it (exactly, as fractions), with
+    gaps of up to 300 days between files. Each is held, the stored price
+    stays the price in use, the book names the newest held one, and only
+    --accept-jumps lets it in."""
+    isin = Isin(ISINS[0])
+
+    def file(day: date, micros: int) -> PriceFile:
+        q = Quote(isin=isin, on=day, price=Price(micro_rupees=micros), source=source)  # type: ignore[arg-type]
+        return PriceFile(source=source, day=day, quotes=(q,))  # type: ignore[arg-type]
+
+    day = date(2015, 1, 1)
+    first = file(day, stored)
+    moved = stored * far // 10_000
+    assume(moved > 0)
+    with tempfile.TemporaryDirectory() as d, PriceStore.open(Path(d) / "a.db", write=True) as a:
+        assert a.take(first) == (1, ())
+        newest = first
+        for gap, wobble in later:
+            day += timedelta(days=gap)
+            says = moved * (10_000 + wobble) // 10_000
+            assume(says > 0 and Fraction(abs(says - stored), stored) > Fraction(1, 5))
+            newest = file(day, says)
+            changed, held = a.take(newest)
+            assert changed == 0
+            assert [(j.quote, j.last) for j in held] == [(newest.quotes[0], first.quotes[0])]
+            book = a.book([isin])
+            assert book.get(isin) == first.quotes[0]
+            assert book.doubted(isin) == newest.quotes[0]
+        assert a.take(newest, accept_jumps=True) == (1, ())
+        book = a.book([isin])
+        assert book.get(isin) == newest.quotes[0] and book.doubted(isin) is None
+
+
+_TWO = fx.demat("01-Feb-2026", "28-Feb-2026", {fx.INFY: "12", fx.TCS: "5"})
+_DAY0 = date(2026, 3, 1)
+
+
+@given(
+    st.integers(10_000_000, 10**10),
+    st.integers(10_000_000, 10**10),
+    st.integers(0, 30),
+    st.integers(0, 30),
+    st.one_of(st.none(), st.tuples(st.integers(-30, 30), st.integers(1, 60_000))),
+    st.one_of(st.none(), st.integers(0, 10_000)),
+    st.one_of(st.none(), st.integers(0, 10_000)),
+)
+def test_no_add_trim_or_hold_is_worked_out_from_a_price_that_is_not_sure(
+    infy: int,
+    tcs: int,
+    infy_age: int,
+    tcs_age: int,
+    held: tuple[int, int] | None,
+    infy_target: int | None,
+    tcs_target: int | None,
+) -> None:
+    """A price is not sure when a newer one was held back and is still more
+    than 20% from it (then every weight is in doubt: each is a share of the
+    same total) or when it is more than 7 days old (then its own holding
+    is). Such a holding's verdict is review, marked unsure (so no add or
+    trim kept for it is sent), and its sentence carries the price, its day
+    and what to run. Every other verdict is exactly what the same prices
+    give when none is in doubt."""
+    from stockin.prices import rupee_text
+
+    statement = cas.from_casparser(_TWO, "sha")
+    book = Book.of(statement.facts, statement.instruments, statement.accounts)
+    a, b = Isin(fx.INFY), Isin(fx.TCS)
+    today = _DAY0 + timedelta(days=60)
+
+    def q(isin: Isin, micros: int, age: int) -> Quote:
+        on = today - timedelta(days=age)
+        return Quote(isin=isin, on=on, price=Price(micro_rupees=micros), source="bhavcopy")
+
+    quotes = {a: q(a, infy, infy_age), b: q(b, tcs, tcs_age)}
+    # the held price is drawn as basis points of the price in use, so it
+    # lands inside the band (no longer a doubt; #39 verify-3 C-1) as well
+    # as beyond it
+    kept = None if held is None else q(a, max(1, infy * held[1] // 10_000), infy_age - held[0])
+    assume(kept is None or kept.on <= today)
+    theses = {
+        i: Thesis(isin=i, why="synthetic", target=None if t is None else Bps(t), written=_DAY0)
+        for i, t in ((a, infy_target), (b, tcs_target))
+    }
+    fresh = {i: x.model_copy(update={"on": today}) for i, x in quotes.items()}
+    plain = {v.isin: v for v in for_book(book, PriceBook(quotes=fresh), theses, today)}
+    doubted = (
+        kept is not None
+        and kept.on >= quotes[a].on
+        and Fraction(abs(kept.price.micro_rupees - infy), infy) > Fraction(1, 5)
+    )
+    prices = PriceBook(quotes=quotes, held={} if kept is None else {a: kept})
+    for v in for_book(book, prices, theses, today):
+        used = quotes[v.isin]
+        if doubted:
+            assert kept is not None
+            assert v.call == "review" and v.unsure and "INFOSYS" in v.because
+            assert rupee_text(kept.price) in v.because and str(kept.on) in v.because
+            assert "--accept-jumps" in v.because
+        elif (today - used.on).days > 7:
+            assert v.call == "review" and v.unsure and "stockin prices fetch" in v.because
+            assert rupee_text(used.price) in v.because and str(used.on) in v.because
+        else:
+            assert v == plain[v.isin]
+            assert v.call != "review" and not v.unsure
 
 
 # ---------------------------------------------------------------- net worth

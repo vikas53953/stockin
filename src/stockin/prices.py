@@ -13,6 +13,11 @@ importing a file REPLACES what is stored for its source and day, and readers
 take each source's newest file. So the last import of a day wins, the same
 file twice changes nothing, and importing the right file undoes a damaged
 one completely. Older days stay as history.
+
+A price held back as a jump is not stored as a price, but what the file
+said is kept beside the prices (table `held`, same key), replaced with its
+file like them. Nothing is valued from it: it tells readers that the price
+still in use is in doubt, so no verdict acts on it (PriceBook.doubted).
 """
 
 from __future__ import annotations
@@ -83,27 +88,61 @@ class PriceFile(Value):
 class PriceBook(Value):
     """Best known quote per ISIN. A missing ISIN is unpriced: callers get
     None, never zero. The quote's date travels with it, so staleness is
-    always visible."""
+    always visible.
+
+    `held` is the newest price a file gave for an ISIN that was held back
+    and not stored (see is_jump). It is never a price to value anything
+    with; it is there so a reader can tell that the price in use is in
+    doubt (`doubted`)."""
 
     quotes: Mapping[Isin, Quote]
+    held: Mapping[Isin, Quote] = {}
 
     def get(self, isin: Isin) -> Quote | None:
         return self.quotes.get(isin)
+
+    def doubted(self, isin: Isin) -> Quote | None:
+        """The held-back price that puts this ISIN's price in doubt: one at
+        least as new as the price in use and still more than the band away
+        from it. None once a price as new has been stored (--accept-jumps,
+        or a later file back within the band), or once the price in use
+        agrees with the held one (an older day's file accepted while a
+        later day's like price is still held; #39 verify-3 C-1). A held
+        price was not stored, so the price in use can be months old and
+        wrong by any amount; no add or trim may be worked out from it
+        (#39 verifier round 2, R-1)."""
+        held, used = self.held.get(isin), self.quotes.get(isin)
+        if held is None or used is None:
+            return held
+        if used.on > held.on or not beyond_band(used.price, held.price):
+            return None
+        return held
 
     def value(self, isin: Isin, qty: Qty) -> Money | None:
         quote = self.get(isin)
         return None if quote is None else Money.of(qty, quote.price)
 
     @classmethod
-    def best(cls, quotes: Iterable[Quote]) -> PriceBook:
+    def best(cls, quotes: Iterable[Quote], held: Iterable[Quote] = ()) -> PriceBook:
         """Latest date per ISIN; on a tie, bhavcopy before amfi. Pure, and
-        independent of input order."""
-        out: dict[Isin, Quote] = {}
-        for q in quotes:
-            cur = out.get(q.isin)
-            if cur is None or _better(q, cur):
-                out[q.isin] = q
-        return cls(quotes=out)
+        independent of input order. `held` is picked the same way."""
+        return cls(quotes=_best(quotes), held=_best(held))
+
+
+def _best(quotes: Iterable[Quote]) -> dict[Isin, Quote]:
+    out: dict[Isin, Quote] = {}
+    for q in quotes:
+        cur = out.get(q.isin)
+        if cur is None or _better(q, cur):
+            out[q.isin] = q
+    return out
+
+
+def rupee_text(price: Price) -> str:
+    """Exact, at least two decimals: ₹1,367.00, ₹2,378.851, ₹94.4817."""
+    whole, micros = divmod(price.micro_rupees, 1_000_000)
+    frac = f"{micros:06d}".rstrip("0").ljust(2, "0")
+    return "\u20b9" + str(Money(paise=whole * 100))[:-3] + "." + frac
 
 
 def _better(a: Quote, b: Quote) -> bool:
@@ -122,14 +161,13 @@ or bonus. A real split needs a look anyway: units come from the last statement."
 
 BAND_BPS = 2_000
 BAND_DAYS = 7
-"""Closer in time, the rule is tighter: a price more than 20% away from a
-last one at most 7 calendar days older is held too. NSE's widest daily price
-band is 20%, so a share that moved further in a few trading days is rare,
-and a 1:1 split whose ex-date close sits just above half the old close
-(₹750.30 against ₹1,500.55) is caught here, not let through by the 2x rule
-(#33 verifier 3, R-1). A fund's NAV moves a few percent a week. Against a
-price more than 7 days old only the 2x rule applies: after a longer gap
-without prices, a split that closes just above half is stored."""
+"""A price more than 20% away from the last one of the same source is held
+too, however old that one is (see is_jump). NSE's widest daily price band
+is 20%, so a share that moved further between two files is rare, and a 1:1
+split whose ex-date close sits just above half the old close (₹750.30
+against ₹1,500.55) is caught here, not let through by the 2x rule (#33
+verifier 3, R-1). BAND_DAYS is how old a price may be and still be acted on:
+no add or trim is worked out from an older one (thesis.for_book)."""
 
 
 class Jump(Value):
@@ -148,15 +186,22 @@ def beyond_band(last: Price, new: Price, band_bps: int = BAND_BPS) -> bool:
 
 def is_jump(last: Quote, new: Quote) -> bool:
     """Held for the owner: beyond 2x from any earlier price, or beyond 20%
-    from a price of the same source at most BAND_DAYS older.
+    from the last price of the same source, however old.
 
     The band compares like with like: a fund's NAV and its exchange close
-    can differ legitimately, so AMFI against bhavcopy is held only at 2x."""
+    can differ legitimately, so AMFI against bhavcopy is held only at 2x.
+    It has no age limit, because a held price is not stored: with one, a
+    split held every evening was let in once the last stored close turned
+    a week old, and the next send could carry a wrong ADD (#39 verifier R-1).
+    After a long gap a real move beyond 20% is held too (a share sold and
+    bought back months later, a long break without fetches), and the owner
+    accepts it once with --accept-jumps. Until then the old price stays in
+    use, so what is held is kept (PriceStore.take) and readers treat the
+    price in use as in doubt (PriceBook.doubted; #39 verifier round 2)."""
     a, b = last.price.micro_rupees, new.price.micro_rupees
     if b > JUMP_FACTOR * a or JUMP_FACTOR * b < a:
         return True
-    recent = new.on - last.on <= timedelta(days=BAND_DAYS)
-    return recent and last.source == new.source and beyond_band(last.price, new.price)
+    return last.source == new.source and beyond_band(last.price, new.price)
 
 
 def hold_jumps(
@@ -211,6 +256,15 @@ CREATE TABLE IF NOT EXISTS quotes(
 """
 
 
+_HELD_SCHEMA = _SCHEMA.replace("quotes(", "held(")
+"""What a file said and Stockin did not store: the prices held back as
+jumps, one row per (isin, source, file day) like `quotes`. Importing a file
+replaces its source and day here too, so the same file leaves the same rows
+and --accept-jumps (or the right file) clears them. Nothing is valued from
+this table; readers use it to know a price is in doubt (PriceBook.doubted)."""
+_TABLES = ("quotes", "held")
+
+
 class PricesMissing(FileNotFoundError):
     """Raised by a read handle when no prices have been fetched yet."""
 
@@ -231,13 +285,17 @@ _COLUMNS = (  # (name, primary-key position)
 _ISIN_GLOB = "[A-Z][A-Z]" + "[A-Z0-9]" * 9 + "[0-9]"
 """An ISIN's shape: country, nine letters or digits, a check digit."""
 
-_OUR_TABLE = (
-    "table",
-    "quotes",
-    " ".join(_SCHEMA.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE").split()),
-)
-"""sqlite_master's row for the table `_SCHEMA` creates (SQLite keeps the
-statement's text, without IF NOT EXISTS), whitespace aside."""
+_OUR_TABLES = [
+    (
+        "table",
+        name,
+        " ".join(sql.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE").split()),
+    )
+    for name, sql in zip(_TABLES, (_SCHEMA, _HELD_SCHEMA), strict=True)
+]
+"""sqlite_master's rows for the tables `_SCHEMA` and `_HELD_SCHEMA` create
+(SQLite keeps the statement's text, without IF NOT EXISTS), whitespace
+aside. A prices.db written before `held` existed has only the first."""
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -262,9 +320,10 @@ def india_today() -> date:
     return india_day(_now())
 
 
-def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
-    """True if prices.db is ours and intact; False if the file has no tables
-    at all (new or 0 bytes). Anything else is PricesDamaged: a file another
+def _check_shape(conn: sqlite3.Connection, path: Path) -> int:
+    """How many of our tables prices.db holds, once it is known to be ours
+    and intact: 2, or 1 for a file from before `held` existed; 0 if the
+    file has no tables at all (new or 0 bytes). Anything else is PricesDamaged: a file another
     program (or an older Stockin) made, a damaged page, or a row we could not
     have written. Never guess at, or write into, such a file."""
     objects = conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall()
@@ -276,12 +335,13 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
         # new file to write into (verifier 2 on #22).
         if path.stat().st_size > 0:
             raise PricesDamaged(f"{path} is damaged (it has data but no tables)")
-        return False
+        return 0
     # The file must hold exactly the table Stockin creates, constraints and
     # all: a table with our column names but no NOT NULL let a NULL date past
     # the scan and crash every read (verifier 3 on #21). A file with any other
     # table, index, view or trigger is not ours either.
-    if [(t, n, " ".join(str(q).split())) for t, n, q in objects] != [_OUR_TABLE]:
+    found = [(t, n, " ".join(str(q).split())) for t, n, q in objects]
+    if found not in (_OUR_TABLES[:1], _OUR_TABLES):
         raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
     # SQLite pages have no checksum. integrity_check (not quick_check) also
     # finds a key byte that puts rows out of key order, which leaves lookups
@@ -292,9 +352,10 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     # a row dated after today would win "newest file" for ever: no later
     # import could replace it (verifier 6)
     today = india_today().isoformat()
-    cols = tuple((r[1], r[5]) for r in conn.execute("PRAGMA table_info(quotes)"))
-    if cols != _COLUMNS:
-        raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
+    for table in _TABLES[: len(found)]:
+        cols = tuple((r[1], r[5]) for r in conn.execute(f"PRAGMA table_info({table})"))
+        if cols != _COLUMNS:
+            raise PricesDamaged(f"{path} is not a Stockin price file (unexpected tables)")
     # A full scan: a damaged page anywhere in the table raises here. date()
     # is NULL for text that is not a real day (2026-13-39) and normalises an
     # impossible one (2026-02-30), so `IS NOT date(x)` is a real date check.
@@ -303,29 +364,30 @@ def _check_shape(conn: sqlite3.Connection, path: Path) -> bool:
     # dated before OLDEST_FILE_DAY and no NAV is more than OLDEST_NAV_YEARS
     # older than its file (the parsers' own bounds; by calendar year, like
     # the NAVAll parser), so every date a row may hold is one Python can.
-    odd = conn.execute(
-        """SELECT 1 FROM quotes WHERE typeof(isin) != 'text' OR isin NOT GLOB ?
-             OR source NOT IN ('bhavcopy', 'amfi')
-             OR file_day IS NOT date(file_day) OR on_date IS NOT date(on_date)
-             OR (source = 'bhavcopy' AND on_date != file_day)
-             OR file_day > ? OR on_date > ?
-             OR file_day < ?
-             OR CAST(substr(on_date, 1, 4) AS INTEGER)
-                < CAST(substr(file_day, 1, 4) AS INTEGER) - ?
-             OR typeof(micro_rupees) != 'integer'
-             OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
-        (
-            _ISIN_GLOB,
-            today,
-            today,
-            OLDEST_FILE_DAY.isoformat(),
-            OLDEST_NAV_YEARS,
-            MAX_PRICE_MICROS,
-        ),
-    ).fetchone()
-    if odd is not None:
-        raise PricesDamaged(f"{path} holds rows Stockin could not have written")
-    return True
+    for table in _TABLES[: len(found)]:
+        odd = conn.execute(
+            f"""SELECT 1 FROM {table} WHERE typeof(isin) != 'text' OR isin NOT GLOB ?
+                 OR source NOT IN ('bhavcopy', 'amfi')
+                 OR file_day IS NOT date(file_day) OR on_date IS NOT date(on_date)
+                 OR (source = 'bhavcopy' AND on_date != file_day)
+                 OR file_day > ? OR on_date > ?
+                 OR file_day < ?
+                 OR CAST(substr(on_date, 1, 4) AS INTEGER)
+                    < CAST(substr(file_day, 1, 4) AS INTEGER) - ?
+                 OR typeof(micro_rupees) != 'integer'
+                 OR micro_rupees <= 0 OR micro_rupees > ? LIMIT 1""",
+            (
+                _ISIN_GLOB,
+                today,
+                today,
+                OLDEST_FILE_DAY.isoformat(),
+                OLDEST_NAV_YEARS,
+                MAX_PRICE_MICROS,
+            ),
+        ).fetchone()
+        if odd is not None:
+            raise PricesDamaged(f"{path} holds rows Stockin could not have written")
+    return len(found)
 
 
 @contextmanager
@@ -347,9 +409,10 @@ def _guard(path: Path) -> Generator[None]:
 class PriceStore:
     """prices.db. `book()` for readers; `replace()` only for the price job."""
 
-    def __init__(self, conn: sqlite3.Connection, path: Path) -> None:
+    def __init__(self, conn: sqlite3.Connection, path: Path, tables: int = 2) -> None:
         self._conn = conn
         self._path = path
+        self._tables = _TABLES[:tables]  # a file from before `held` has one
 
     @classmethod
     def open(cls, path: Path, *, write: bool = False) -> Self:
@@ -369,45 +432,52 @@ class PriceStore:
                 if write:
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute(_SCHEMA)
+                    conn.execute(_HELD_SCHEMA)
+                    ours = len(_TABLES)
             except (sqlite3.DatabaseError, UnicodeDecodeError, PricesDamaged):
                 conn.close()
                 raise
         if not ours and not write:  # an empty file: nothing fetched yet
             conn.close()
             raise PricesMissing(f"{path} holds no prices; run `stockin prices fetch`")
-        return cls(conn, path)
+        return cls(conn, path, ours)
 
     def stored(self, source: Source, day: date) -> dict[Isin, Quote]:
         """What prices.db holds for one source's file of one day."""
         with _guard(self._path):
             return self._stored(source, day)
 
-    def _stored(self, source: Source, day: date) -> dict[Isin, Quote]:
+    def _stored(self, source: Source, day: date, table: str = "quotes") -> dict[Isin, Quote]:
         rows = self._conn.execute(
-            "SELECT isin, on_date, micro_rupees FROM quotes WHERE source=? AND file_day=?",
+            f"SELECT isin, on_date, micro_rupees FROM {table} WHERE source=? AND file_day=?",
             (source, day.isoformat()),
         ).fetchall()
         return {Isin(i): _quote(Isin(i), on, source, micros) for i, on, micros in rows}
 
-    def replace(self, file: PriceFile) -> int:
+    def replace(self, file: PriceFile, held: Iterable[Quote] = ()) -> int:
         """Make prices.db say, for this file's source and day, exactly what
-        `file` says. Returns the rows added, changed or removed."""
+        `file` says, and keep `held` as the prices of that file that were
+        held back (none, unless `take` held some). Returns the price rows
+        added, changed or removed."""
         new = {q.isin: q for q in file.quotes}
-        day = file.day.isoformat()
+        out = {q.isin: q for q in held}
         with _guard(self._path), self._conn:
             old = self._stored(file.source, file.day)
-            if new != old:
-                self._conn.execute(
-                    "DELETE FROM quotes WHERE source=? AND file_day=?", (file.source, day)
-                )
-                self._conn.executemany(
-                    "INSERT INTO quotes VALUES (?,?,?,?,?)",
-                    [
-                        (q.isin, file.source, day, q.on.isoformat(), q.price.micro_rupees)
-                        for q in new.values()
-                    ],
-                )
+            for table, want in (("quotes", new), ("held", out)):
+                if want != self._stored(file.source, file.day, table):
+                    self._put(table, file, want)
         return sum(1 for isin in new.keys() | old.keys() if new.get(isin) != old.get(isin))
+
+    def _put(self, table: str, file: PriceFile, rows: Mapping[Isin, Quote]) -> None:
+        day = file.day.isoformat()
+        self._conn.execute(f"DELETE FROM {table} WHERE source=? AND file_day=?", (file.source, day))
+        self._conn.executemany(
+            f"INSERT INTO {table} VALUES (?,?,?,?,?)",
+            [
+                (q.isin, file.source, day, q.on.isoformat(), q.price.micro_rupees)
+                for q in rows.values()
+            ],
+        )
 
     def take(self, file: PriceFile, accept_jumps: bool = False) -> tuple[int, tuple[Jump, ...]]:
         """Import one file: `replace`, with any price that jumped from the
@@ -420,7 +490,7 @@ class PriceStore:
             last = self.book(isins, before)
             same = self.book(isins, before, sources=(file.source,))
             file, held = hold_jumps(file, last, self.stored(file.source, file.day), same)
-        return self.replace(file), held
+        return self.replace(file, (j.quote for j in held)), held
 
     def book(
         self,
@@ -430,20 +500,25 @@ class PriceStore:
     ) -> PriceBook:
         """The best quote per ISIN: each source's newest file that prices it
         (file day on or before `on_or_before`; default any), then
-        `PriceBook.best` between the sources (default all)."""
-        sql = "SELECT on_date, micro_rupees FROM quotes WHERE isin=? AND source=?"
+        `PriceBook.best` between the sources (default all). The prices held
+        back are read the same way into `PriceBook.held`."""
         tail: tuple[str, ...] = ()
+        where = "WHERE isin=? AND source=?"
         if on_or_before is not None:
-            sql += " AND file_day <= ?"
+            where += " AND file_day <= ?"
             tail = (on_or_before.isoformat(),)
-        sql += " ORDER BY file_day DESC LIMIT 1"
-        quotes: list[Quote] = []
+        found: dict[str, list[Quote]] = {table: [] for table in _TABLES}
         with _guard(self._path):
-            for isin in sorted(set(isins)):
-                for source in _RANK if sources is None else sources:
-                    for on, micros in self._conn.execute(sql, (isin, source, *tail)):
-                        quotes.append(_quote(isin, on, source, micros))
-        return PriceBook.best(quotes)
+            for table in self._tables:
+                sql = (
+                    f"SELECT on_date, micro_rupees FROM {table} {where} "
+                    "ORDER BY file_day DESC LIMIT 1"
+                )
+                for isin in sorted(set(isins)):
+                    for source in _RANK if sources is None else sources:
+                        for on, micros in self._conn.execute(sql, (isin, source, *tail)):
+                            found[table].append(_quote(isin, on, source, micros))
+        return PriceBook.best(found["quotes"], found["held"])
 
     def latest_day(self) -> date | None:
         """The day of the newest file stored."""
@@ -458,9 +533,12 @@ class PriceStore:
 
     def digest(self) -> str:
         h = hashlib.sha256()
-        for row in self._conn.execute("SELECT * FROM quotes ORDER BY isin, source, file_day"):
-            h.update(repr(tuple(row)).encode())
-            h.update(b"\n")
+        for table in self._tables:
+            tag = () if table == "quotes" else (table,)
+            rows = self._conn.execute(f"SELECT * FROM {table} ORDER BY isin, source, file_day")
+            for row in rows:
+                h.update(repr((*row, *tag)).encode())
+                h.update(b"\n")
         return h.hexdigest()
 
     def close(self) -> None:

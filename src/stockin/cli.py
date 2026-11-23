@@ -10,6 +10,7 @@ import http.client
 import io
 import os
 import shlex
+import sqlite3
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -21,7 +22,7 @@ import typer
 from pydantic import TypeAdapter
 
 from . import __version__, notify
-from .alerts import AlertsBlocked, AlertsDamaged, AlertStore, Sent
+from .alerts import FROM_PRICE, AlertsBlocked, AlertsDamaged, AlertStore, Sent
 from .book import Book, Holding, ReconcileReport, reconcile
 from .facts import Isin
 from .insights import Insight, all_insights, tenths_of
@@ -458,10 +459,11 @@ def _store_files(
 ) -> PricesReport:
     """Each file replaces what prices.db holds for its source and day, always:
     that is what lets the right file undo a damaged copy. A price more than
-    JUMP_FACTOR away from the last earlier one, or more than 20% from one of the same
-    source at most a week older, is held back unless
-    `accept_jumps`. A held fund's price that was stored for that day and is
-    not in the file is removed like the rest and reported (`left_out`)."""
+    JUMP_FACTOR away from the last earlier one, or more than 20% from the
+    last one of the same source, is held back unless `accept_jumps`, and
+    kept as held so verdicts know the price in use is in doubt. A held
+    fund's price that was stored for that day and is not in the file is
+    removed like the rest and reported (`left_out`)."""
     kept = changed = 0
     jumps: list[Jump] = []
     removed: list[Quote] = []
@@ -514,9 +516,11 @@ def _print_prices(report: PricesReport, as_json: bool) -> None:
             )
         if report.held:
             typer.echo(
-                "  a price that moved more than 20% from the same source's price a week old "
-                "or less, or more than double or less than half any earlier one, is held back. "
-                "If it is real (a split, a bonus), run again with --accept-jumps; "
+                "  a price that moved more than 20% from the same source's last price, "
+                "or more than double or less than half any earlier one, is held back, "
+                "and no add or trim is worked out while it is. If it is real (a split "
+                "or a bonus, a real move after a long break without prices, or a share "
+                "you sold and bought back months later), run again with --accept-jumps; "
                 "if not, the file is damaged: download it again. An ETF's split is held "
                 "twice, once in the NAV file and once in the exchange file."
             )
@@ -541,7 +545,7 @@ AcceptJumps = Annotated[
     bool,
     typer.Option(
         "--accept-jumps",
-        help="Store prices even when they moved more than 20% in a week, or 2x at any time.",
+        help="Store prices even when they moved more than 20% from the last one, or 2x.",
     ),
 ]
 
@@ -675,15 +679,20 @@ class VerdictsView(Value):
     verdicts: tuple[Verdict, ...]
 
 
-@app.command("verdicts")
-def verdicts_cmd(as_json: JsonFlag = False) -> None:
-    """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
+def _verdicts_now() -> tuple[tuple[Verdict, ...], PriceBook]:
+    """Today's verdict for every holding, and the prices they came from."""
     with _open_ledger() as ledger:
         book = ledger.book()
     held = frozenset(h.isin for h in book.holdings())
     prices = _price_book(held) or PriceBook(quotes={})
     with _open_theses() as store:
-        found = for_book(book, prices, store.all())
+        return for_book(book, prices, store.all(), _today()), prices
+
+
+@app.command("verdicts")
+def verdicts_cmd(as_json: JsonFlag = False) -> None:
+    """Add, trim, exit, hold or review for each holding, from your own thesis and target."""
+    found, prices = _verdicts_now()
     days = [q.on for q in prices.quotes.values()]
     view = VerdictsView(priced_on=max(days).isoformat() if days else None, verdicts=found)
     if as_json:
@@ -995,13 +1004,9 @@ SendFlag = Annotated[bool, typer.Option("--send", help="Also send pending alerts
 @alerts_app.command("check")
 def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
     """Work out today's verdicts and keep an alert for each one that newly turned
-    into add, trim or exit. Running it again on the same numbers adds nothing."""
-    with _open_ledger() as ledger:
-        book = ledger.book()
-    held = frozenset(h.isin for h in book.holdings())
-    prices = _price_book(held) or PriceBook(quotes={})
-    with _open_theses() as theses:
-        found = for_book(book, prices, theses.all())
+    into add, trim or exit. Running it again on the same numbers adds nothing.
+    An add or trim not yet sent is withdrawn while its price is in doubt."""
+    found, prices = _verdicts_now()
     days = [q.on for q in prices.quotes.values()]
     with _open_alerts() as store:
         added = store.record(found, made=india_now())
@@ -1050,23 +1055,74 @@ def _transport(bot: notify.Bot) -> notify.Transport:
         raise _fail(str(exc)) from None
 
 
+def _unsure(found: tuple[Verdict, ...]) -> frozenset[Isin]:
+    return frozenset(v.isin for v in found if v.unsure)
+
+
+class _DoubtsNow:
+    """Which holdings' prices are in doubt, worked out afresh each time a
+    send comes to an add or trim (#40 verifier R-1). If the verdicts cannot
+    be worked out (a price or thesis file Stockin cannot read), the error is
+    said once and every add and trim waits for the rest of this send; exits
+    still go (#40 verifier R-2)."""
+
+    def __init__(self) -> None:
+        self.failed = False
+        self.last: frozenset[Isin] = frozenset()
+
+    def __call__(self) -> frozenset[Isin] | None:
+        if self.failed:
+            return None
+        try:
+            found, _ = _verdicts_now()
+        except typer.Exit:  # said already, on stderr
+            self.failed = True
+            return None
+        except (ValueError, sqlite3.DatabaseError, OSError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            self.failed = True
+            return None
+        self.last = _unsure(found)
+        return self.last
+
+
 def _send_pending(quiet: bool = False) -> None:
     bot = _bot()
     call = _transport(bot)
+    doubts = _DoubtsNow()
     with _open_alerts() as store:
-        done, error = notify.deliver(store, call, bot.chat, india_now)
-        left = len(store.outbox(pending_only=True))
+        done, error = notify.deliver(store, call, bot.chat, india_now, doubts)
+        pending = store.outbox(pending_only=True)
+    left = len(pending)
     n = len(done)
     typer.echo(f"sent {n} alert{'' if n == 1 else 's'} to Telegram", err=quiet)
+    for s in pending:
+        if error is not None or s.alert.call not in FROM_PRICE:
+            continue
+        if doubts.failed:
+            why = "the verdicts could not be worked out (see the error above)"
+        elif s.alert.isin in doubts.last:
+            why = "its price is in doubt (see `stockin verdicts`)"
+        else:
+            continue
+        typer.echo(
+            f"  not sent: {s.alert.call.upper()} {s.alert.name}, {why}; "
+            "the next `stockin alerts check` withdraws it or sends it",
+            err=quiet,
+        )
     if error is not None:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"  {left} still pending; they go out on the next send", err=True)
+    if error is not None or doubts.failed:
         raise typer.Exit(1)
 
 
 @alerts_app.command("send")
 def alerts_send() -> None:
-    """Send every pending alert to Telegram, oldest first. Exit 1 if any is left pending."""
+    """Send every pending alert to Telegram, oldest first. Exit 1 if any is left pending.
+
+    An add or trim whose holding's price is in doubt now is held back."""
+    _bot()  # "connect it first" before anything else is read
     _send_pending()
 
 
