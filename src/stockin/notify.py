@@ -180,32 +180,50 @@ def send_one(call: Transport, chat: int, message: str) -> None:
     call("sendMessage", {"chat_id": str(chat), "text": message})
 
 
+Doubts = Callable[[], "frozenset[Isin] | None"]
+"""The holdings whose price is in doubt right now, or None when that cannot
+be worked out (a price or thesis file Stockin cannot read)."""
+
+
 def deliver(
     store: AlertStore,
     call: Transport,
     chat: int,
     now: Callable[[], datetime],
-    unsure: Iterable[Isin] = (),
+    unsure: Iterable[Isin] | Doubts = (),
 ) -> tuple[tuple[Sent, ...], TelegramError | None]:
     """Send every pending alert, oldest first, marking each sent as soon as
     Telegram accepts it. Stops at the first failure, which is returned, so
     the rest stay pending in order.
 
-    `unsure` are the holdings whose price is in doubt now (Verdict.unsure):
+    `unsure` says which holdings' prices are in doubt (Verdict.unsure):
     their add and trim alerts are held back, still pending, so nothing
     worked out from a price Stockin is not sure of reaches the phone even
-    when no check has run since the doubt arose (#39 verify-3 R-1). Each
-    alert is sent under alerts.db's write lock and only if it is still
-    pending then, so one a check withdrew meanwhile is not sent."""
-    doubt = frozenset(unsure)
+    when no check has run since the doubt arose (#39 verify-3 R-1). Given
+    as a function, it is asked again for each add or trim, under alerts.db's
+    write lock right before the send, so a price held while a slow send
+    runs stops the rest (#40 verifier R-1); when it returns None every add
+    and trim waits, and exits still go (#40 verifier R-2). Each alert is
+    sent only if it is still pending then, so one a check withdrew
+    meanwhile is not sent."""
+    if callable(unsure):
+        doubts: Doubts = unsure
+    else:
+        fixed = frozenset(unsure)
+
+        def doubts() -> frozenset[Isin] | None:
+            return fixed
+
     done: list[Sent] = []
     for s in store.outbox(pending_only=True):
-        if s.alert.call in FROM_PRICE and s.alert.isin in doubt:
-            continue
         try:
             with store.sending(s.id) as mark:
                 if mark is None:  # sent by another run, or withdrawn
                     continue
+                if s.alert.call in FROM_PRICE:
+                    doubt = doubts()
+                    if doubt is None or s.alert.isin in doubt:
+                        continue
                 send_one(call, chat, text(s.alert))
                 when = now()
                 mark(when)

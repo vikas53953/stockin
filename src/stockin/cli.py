@@ -10,6 +10,7 @@ import http.client
 import io
 import os
 import shlex
+import sqlite3
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -1018,7 +1019,7 @@ def alerts_check(as_json: JsonFlag = False, send: SendFlag = False) -> None:
         typer.echo(f"{len(added)} new alert{'s' if len(added) > 1 else ''}:")
         _alert_lines(added)
     if send:
-        _send_pending(_unsure(found), quiet=as_json)
+        _send_pending(quiet=as_json)
 
 
 @alerts_app.command("list")
@@ -1058,25 +1059,61 @@ def _unsure(found: tuple[Verdict, ...]) -> frozenset[Isin]:
     return frozenset(v.isin for v in found if v.unsure)
 
 
-def _send_pending(unsure: frozenset[Isin], quiet: bool = False) -> None:
+class _DoubtsNow:
+    """Which holdings' prices are in doubt, worked out afresh each time a
+    send comes to an add or trim (#40 verifier R-1). If the verdicts cannot
+    be worked out (a price or thesis file Stockin cannot read), the error is
+    said once and every add and trim waits for the rest of this send; exits
+    still go (#40 verifier R-2)."""
+
+    def __init__(self) -> None:
+        self.failed = False
+        self.last: frozenset[Isin] = frozenset()
+
+    def __call__(self) -> frozenset[Isin] | None:
+        if self.failed:
+            return None
+        try:
+            found, _ = _verdicts_now()
+        except typer.Exit:  # said already, on stderr
+            self.failed = True
+            return None
+        except (ValueError, sqlite3.DatabaseError, OSError) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            self.failed = True
+            return None
+        self.last = _unsure(found)
+        return self.last
+
+
+def _send_pending(quiet: bool = False) -> None:
     bot = _bot()
     call = _transport(bot)
+    doubts = _DoubtsNow()
     with _open_alerts() as store:
-        done, error = notify.deliver(store, call, bot.chat, india_now, unsure)
+        done, error = notify.deliver(store, call, bot.chat, india_now, doubts)
         pending = store.outbox(pending_only=True)
     left = len(pending)
     n = len(done)
     typer.echo(f"sent {n} alert{'' if n == 1 else 's'} to Telegram", err=quiet)
     for s in pending:
-        if error is None and s.alert.call in FROM_PRICE and s.alert.isin in unsure:
-            typer.echo(
-                f"  not sent: {s.alert.call.upper()} {s.alert.name}, its price is in doubt "
-                "(see `stockin verdicts`); the next `stockin alerts check` withdraws it",
-                err=quiet,
-            )
+        if error is not None or s.alert.call not in FROM_PRICE:
+            continue
+        if doubts.failed:
+            why = "the verdicts could not be worked out (see the error above)"
+        elif s.alert.isin in doubts.last:
+            why = "its price is in doubt (see `stockin verdicts`)"
+        else:
+            continue
+        typer.echo(
+            f"  not sent: {s.alert.call.upper()} {s.alert.name}, {why}; "
+            "the next `stockin alerts check` withdraws it or sends it",
+            err=quiet,
+        )
     if error is not None:
         typer.echo(f"error: {error}", err=True)
         typer.echo(f"  {left} still pending; they go out on the next send", err=True)
+    if error is not None or doubts.failed:
         raise typer.Exit(1)
 
 
@@ -1086,8 +1123,7 @@ def alerts_send() -> None:
 
     An add or trim whose holding's price is in doubt now is held back."""
     _bot()  # "connect it first" before anything else is read
-    found, _ = _verdicts_now()
-    _send_pending(_unsure(found))
+    _send_pending()
 
 
 @alerts_app.command("connect")

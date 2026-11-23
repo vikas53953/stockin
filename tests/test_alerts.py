@@ -486,6 +486,7 @@ def test_a_doubt_that_arises_while_a_send_runs_stops_the_rest(tmp_path: Path) ->
         return Reply(ok=True)
 
     with AlertStore.open(tmp_path / "alerts.db") as store:
+        store.record([v(other, "exit")], made=T0)  # kept first, so sent first
         store.record([v(other, "exit"), v(INFY, "trim")], made=T0)
         done, err = deliver(store, slow, 1, lambda: T0, lambda: frozenset(doubt))
         pending = store.outbox(pending_only=True)
