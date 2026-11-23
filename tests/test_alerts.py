@@ -469,3 +469,42 @@ def test_cli_says_a_damaged_alerts_file_without_a_traceback(data: Path) -> None:
         r = runner.invoke(cli, args)
         assert r.exit_code == 2 and "move alerts.db aside" in r.output
         assert "Traceback" not in r.output
+
+
+def test_a_doubt_that_arises_while_a_send_runs_stops_the_rest(tmp_path: Path) -> None:
+    """#40 verifier R-1: the doubt was worked out once, before the loop, so a
+    price held while a slow send ran (an EXIT going out first) did not stop
+    the TRIM after it. Doubt is asked again for each add or trim, right
+    before it is sent."""
+    other = ISINS[1]
+    doubt: set[Isin] = set()
+    got: list[str] = []
+
+    def slow(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        doubt.add(INFY)  # the evening file is held while this message goes out
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        store.record([v(other, "exit"), v(INFY, "trim")], made=T0)
+        done, err = deliver(store, slow, 1, lambda: T0, lambda: frozenset(doubt))
+        pending = store.outbox(pending_only=True)
+    assert err is None and len(done) == 1 and got[0].startswith("EXIT ")
+    assert [s.alert.call for s in pending] == ["trim"]
+
+
+def test_when_doubt_cannot_be_worked_out_only_exits_go(tmp_path: Path) -> None:
+    """#40 verifier R-2: prices.db or theses.db unreadable. An exit does not
+    come from a price, so it still goes; every add and trim waits."""
+    got: list[str] = []
+
+    def ok(method: str, params: dict[str, str]) -> Reply:
+        got.append(params["text"])
+        return Reply(ok=True)
+
+    with AlertStore.open(tmp_path / "alerts.db") as store:
+        store.record([v(ISINS[1], "exit"), v(INFY, "trim")], made=T0)
+        done, err = deliver(store, ok, 1, lambda: T0, lambda: None)
+        pending = store.outbox(pending_only=True)
+    assert err is None and [s.alert.call for s in done] == ["exit"]
+    assert [s.alert.call for s in pending] == ["trim"] and len(got) == 1

@@ -611,3 +611,31 @@ def test_a_check_during_a_send_does_not_withdraw_what_went_out(tmp_path: Path) -
     with AlertStore.open(path) as store:
         (kept,) = store.outbox()
         assert kept.sent == T0 and store.calls() == {INFY: "hold"}
+
+
+def test_alerts_send_still_sends_an_exit_when_prices_cannot_be_read(
+    friday: Path, telegram: type[Fake]
+) -> None:
+    """#40 verifier R-2: `alerts send` worked out verdicts before sending
+    anything, so a prices.db it could not read held back a pending EXIT too.
+    Now an exit goes, every add and trim waits, and the error is said."""
+    r = runner.invoke(cli, ["thesis", "set", _NIFTYBEES, "--why", "synthetic: the index"])
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(cli, ["thesis", "broken", _NIFTYBEES]).exit_code == 0
+    r = runner.invoke(cli, ["alerts", "check"])
+    assert r.exit_code == 0 and "EXIT" in r.output, r.output
+    calls = [
+        a["alert"]["call"]
+        for a in json.loads(runner.invoke(cli, ["alerts", "list", "--json"]).output)["alerts"]
+        if a["sent"] is None
+    ]
+    assert sorted(calls) == ["exit", "trim"]  # Friday's TRIM is still waiting
+    import sqlite3
+
+    with sqlite3.connect(friday / "data" / "prices.db") as db:  # a file Stockin refuses
+        db.execute("CREATE TABLE stray (x)")
+    r = runner.invoke(cli, ["alerts", "send"])
+    assert "sent 1 alert to Telegram" in r.output, r.output
+    assert "error:" in r.output and r.exit_code == 1
+    (msg,) = telegram.sent
+    assert msg["text"].startswith("EXIT ")
